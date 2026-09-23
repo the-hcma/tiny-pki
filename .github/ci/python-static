@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# .github/ci/ gate — the-hcma/repository-helpers convention; run by pre-pr-checks
+# and ci.yml. One sync for ruff + pyright (shared venv).
+set -euo pipefail
+
+bash .github/ci/assert-uv-lock-version
+bash .github/ci/setup-python
+uv run ruff check src tests
+uv run ruff format --check src tests
+uv run pyright

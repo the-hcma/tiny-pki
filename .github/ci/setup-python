@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# .github/ci/ gate — the-hcma/repository-helpers convention; run by pre-pr-checks
+# and ci.yml. Installs the pinned Python and syncs the project + dev group.
+set -euo pipefail
+
+timeout 120 uv python install "$(tr -d '[:space:]' < .python-version)"
+
+current="$(uv run python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+required="$(tr -d '[:space:]' < .python-version | cut -d. -f1,2)"
+if [[ "$current" != "$required" ]]; then
+  echo "Python version mismatch: using $current but .python-version pins $required" >&2
+  exit 1
+fi
+
+timeout 300 uv sync --group dev
