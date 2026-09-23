@@ -104,11 +104,12 @@ def test_one_shot_help() -> None:
     assert_that(buf.getvalue(), contains_string("renew-crl"))
 
 
-def test_pki_stub_warns(capsys: CaptureFixture[str]) -> None:
+def test_pki_without_store_exits(capsys: CaptureFixture[str], monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.delenv("TINY_PKI_STORE", raising=False)
     with raises(SystemExit):
         main(["--color", "never", "init"])
     err = capsys.readouterr().err
-    assert_that(err, contains_string("not implemented"))
+    assert_that(err, contains_string("Expected --store"))
 
 
 def test_unknown_command_exits_nonzero(capsys: CaptureFixture[str]) -> None:

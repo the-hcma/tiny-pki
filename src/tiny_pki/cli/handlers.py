@@ -1,16 +1,44 @@
-"""Stub PKI handlers — replaced by the CLI-commands stack layer.
+"""PKI command handlers for the tiny-pki REPL.
 
-Shell chrome (#8) can import this module; real verbs land in #9.
+Shell chrome lives in ``main``; this module implements init/create/show/…
 """
 
 from __future__ import annotations
 
+import getpass
+import os
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import TypedDict
+
+from tiny_pki import (
+    DEFAULT_CA_VALIDITY_DAYS,
+    DEFAULT_CERT_VALIDITY_DAYS,
+    DEFAULT_ORGANIZATION_NAME,
+    generate_ca_certificate,
+    generate_client_certificate,
+    generate_crl,
+    generate_pkcs12,
+    generate_server_certificate,
+    get_certificate_expiry,
+    get_certificate_fingerprint,
+    get_certificate_issuer,
+    get_certificate_sans,
+    get_certificate_serial_number,
+    get_certificate_subject,
+)
 from tiny_pki.cli.theme import Theme
 from tiny_pki.store import CertificateStore
 
 
 class HandlerNotReadyError(RuntimeError):
-    """Raised until the CLI-commands layer implements PKI verbs."""
+    """Kept for the shell dispatch contract; not raised by real handlers."""
+
+
+class _ParsedFlags(TypedDict):
+    positional: list[str]
+    flags: dict[str, str]
+    multi: dict[str, list[str]]
 
 
 def dispatch(
@@ -20,6 +48,326 @@ def dispatch(
     store: CertificateStore | None,
     theme: Theme,
 ) -> None:
-    """Placeholder until init/create/show/… handlers are wired."""
-    del args, store, theme
-    raise HandlerNotReadyError(f"Command {command!r} is not implemented yet (see issue #9)")
+    """Dispatch a PKI verb. Raises ValueError/KeyError/FileNotFoundError on user errors."""
+    if command == "renew-crl":
+        command = "crl"
+    handlers = {
+        "create": _cmd_create,
+        "crl": _cmd_crl,
+        "delete": _cmd_delete,
+        "export": _cmd_export,
+        "init": _cmd_init,
+        "inspect": _cmd_inspect,
+        "revoke": _cmd_revoke,
+        "show": _cmd_show,
+    }
+    handler = handlers.get(command)
+    if handler is None:
+        raise ValueError(f"Unknown command {command!r}; type help")
+    handler(args, store=store, theme=theme)
+
+
+def _require_store(store: CertificateStore | None) -> CertificateStore:
+    if store is None:
+        raise ValueError("Expected --store / TINY_PKI_STORE for this command")
+    return store
+
+
+def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
+    store = _require_store(store)
+    opts = _parse_flags(args, allowed={"cn", "org", "days", "key-size"})
+    if opts["positional"]:
+        raise ValueError("init takes no positional arguments; use --cn / --org")
+    if store.has_ca():
+        raise ValueError(f"CA already exists under {store.root}")
+    cn = opts["flags"].get("cn", "Private CA")
+    org = opts["flags"].get("org", DEFAULT_ORGANIZATION_NAME)
+    days = _parse_days(opts["flags"].get("days", str(DEFAULT_CA_VALIDITY_DAYS)), default=DEFAULT_CA_VALIDITY_DAYS)
+    key_size = int(opts["flags"].get("key-size", "4096"))
+    cert_pem, key_pem = generate_ca_certificate(
+        cn,
+        organization_name=org,
+        validity_days=days,
+        key_size=key_size,
+    )
+    store.write_ca(cert_pem, key_pem)
+    store.write_crl(generate_crl(cert_pem, key_pem, []))
+    print(theme.ok(f"CA created: {get_certificate_subject(cert_pem)}"))
+    print(theme.dim(f"fingerprint {get_certificate_fingerprint(cert_pem)}"))
+
+
+def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
+    store = _require_store(store)
+    if not args:
+        raise ValueError("Expected create client|server <name>")
+    kind = args[0]
+    opts = _parse_flags(args[1:], allowed={"days", "key-size", "san", "org"})
+    positional = opts["positional"]
+    if kind not in {"client", "server"}:
+        raise ValueError(f"Expected create client|server, got {kind!r}")
+    if not positional:
+        raise ValueError(f"Expected identity/common name after create {kind}")
+    name = positional[0]
+    if len(positional) > 1:
+        raise ValueError("Unexpected extra arguments")
+    if kind == "client" and opts["multi"].get("san"):
+        raise ValueError("--san is only supported for server certificates")
+    ca_cert, ca_key = store.read_ca()
+    days = _parse_days(opts["flags"].get("days", str(DEFAULT_CERT_VALIDITY_DAYS)), default=DEFAULT_CERT_VALIDITY_DAYS)
+    key_size = int(opts["flags"].get("key-size", "4096"))
+    org = opts["flags"].get("org")
+
+    if kind == "client":
+        cert_pem, key_pem = generate_client_certificate(
+            ca_cert,
+            ca_key,
+            name,
+            organization_name=org,
+            validity_days=days,
+            key_size=key_size,
+        )
+    else:
+        sans = [s for s in opts["multi"].get("san", []) if s]
+        if not sans:
+            sans = [name]
+        cert_pem, key_pem = generate_server_certificate(
+            ca_cert,
+            ca_key,
+            name,
+            sans,
+            organization_name=org,
+            validity_days=days,
+            key_size=key_size,
+        )
+
+    entry = store.add_certificate(
+        common_name=name,
+        kind=kind,  # type: ignore[arg-type]
+        serial_number=get_certificate_serial_number(cert_pem),
+        cert_pem=cert_pem,
+        key_pem=key_pem,
+        not_valid_after=get_certificate_expiry(cert_pem),
+        fingerprint=get_certificate_fingerprint(cert_pem),
+    )
+    # Re-issue may auto-revoke a prior live CN — keep crl.pem aligned with the index.
+    store.write_crl(generate_crl(ca_cert, ca_key, store.revoked_entries()))
+    print(theme.ok(f"issued {kind} {entry.common_name}"))
+    print(theme.dim(f"serial {entry.serial_number}  fp {entry.fingerprint}"))
+
+
+def _cmd_show(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
+    store = _require_store(store)
+    target = args[0] if args else "certs"
+    if target == "ca":
+        ca_cert, _ = store.read_ca()
+        _print_cert_summary(ca_cert, theme)
+        return
+    if target == "certs":
+        entries = store.list_certificates()
+        if not entries:
+            print(theme.dim("(none)"))
+            return
+        for entry in entries:
+            status = "revoked" if entry.revoked_at else "active"
+            color = theme.error if entry.revoked_at else theme.ok
+            print(
+                f"{color(status)}  {entry.kind:6}  {entry.common_name}  "
+                f"serial={entry.serial_number}  expires={entry.not_valid_after}"
+            )
+        return
+    if target == "crl":
+        crl = store.read_crl()
+        if crl is None:
+            print(theme.dim("(no crl.pem yet)"))
+            return
+        print(theme.dim(f"{store.crl_path} ({len(crl)} bytes)"))
+        for serial, when in store.revoked_entries():
+            print(f"  revoked serial={format(serial, 'x')} at {when.isoformat()}")
+        return
+    entry = store.get_certificate(target)
+    if entry is None:
+        raise KeyError(f"Expected issued certificate matching {target!r}")
+    cert_pem = store.read_certificate_pem(entry)
+    _print_cert_summary(cert_pem, theme)
+    if entry.revoked_at:
+        print(theme.error(f"revoked_at {entry.revoked_at}"))
+
+
+def _cmd_inspect(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
+    if not args:
+        raise ValueError("Expected inspect <identity|path>")
+    target = args[0]
+    path = Path(target)
+    if path.is_file():
+        _print_cert_summary(path.read_bytes(), theme)
+        return
+    store = _require_store(store)
+    entry = store.get_certificate(target)
+    if entry is None:
+        raise KeyError(f"Expected PEM path or store identity, got {target!r}")
+    _print_cert_summary(store.read_certificate_pem(entry), theme)
+
+
+def _cmd_revoke(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
+    store = _require_store(store)
+    if not args:
+        raise ValueError("Expected revoke <identity|serial>")
+    target = store.get_certificate(args[0])
+    if target is None:
+        raise KeyError(f"Expected issued certificate matching {args[0]!r}")
+    entry = store.mark_revoked(target.serial_number)
+    ca_cert, ca_key = store.read_ca()
+    store.write_crl(generate_crl(ca_cert, ca_key, store.revoked_entries()))
+    print(theme.warn(f"revoked {entry.common_name}"))
+    print(theme.dim(f"crl updated: {store.crl_path}"))
+
+
+def _cmd_delete(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
+    store = _require_store(store)
+    opts = _parse_flags(args, allowed={"force"})
+    if not opts["positional"]:
+        raise ValueError("Expected delete <identity|serial> [--force]")
+    force = "--force" in args or "force" in opts["flags"]
+    entry = store.delete_certificate(opts["positional"][0], force=force)
+    # Keep crl.pem aligned with tombstones / remaining revoked serials.
+    if store.has_ca():
+        ca_cert, ca_key = store.read_ca()
+        store.write_crl(generate_crl(ca_cert, ca_key, store.revoked_entries()))
+    print(theme.ok(f"deleted {entry.common_name}"))
+
+
+def _cmd_export(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
+    store = _require_store(store)
+    if len(args) < 2:
+        raise ValueError("Expected export pem|p12 <identity> [--out PATH] [--password ...]")
+    fmt = args[0]
+    opts = _parse_flags(args[1:], allowed={"out", "password"})
+    if not opts["positional"]:
+        raise ValueError("Expected identity after export format")
+    identity = opts["positional"][0]
+    entry = store.get_certificate(identity)
+    if entry is None:
+        raise KeyError(f"Expected issued certificate matching {identity!r}")
+    cert_pem = store.read_certificate_pem(entry)
+    key_pem = store.read_key_pem(entry)
+    ca_cert, _ = store.read_ca()
+
+    if fmt == "pem":
+        out = Path(opts["flags"].get("out", f"{entry.common_name}.pem"))
+        _write_secret_file(out, cert_pem.decode() + key_pem.decode())
+        print(theme.ok(f"wrote {out}"))
+        return
+    if fmt == "p12":
+        password = opts["flags"].get("password")
+        if password is None:
+            try:
+                password = getpass.getpass("PKCS#12 password: ")
+            except (EOFError, KeyboardInterrupt) as exc:
+                raise ValueError("Expected a non-empty password") from exc
+        if not password:
+            raise ValueError("Expected a non-empty password")
+        p12 = generate_pkcs12(cert_pem, key_pem, ca_cert, entry.common_name, password.encode())
+        out_flag = opts["flags"].get("out")
+        if out_flag:
+            path = Path(out_flag)
+            _write_secret_file(path, p12)
+        else:
+            path = store.write_bundle(entry.common_name, p12, serial_number=entry.serial_number)
+        print(theme.ok(f"wrote {path}"))
+        return
+    raise ValueError(f"Expected export pem|p12, got {fmt!r}")
+
+
+def _cmd_crl(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
+    del args
+    store = _require_store(store)
+    ca_cert, ca_key = store.read_ca()
+    store.write_crl(generate_crl(ca_cert, ca_key, store.revoked_entries()))
+    print(theme.ok(f"crl regenerated: {store.crl_path}"))
+
+
+def _print_cert_summary(cert_pem: bytes, theme: Theme) -> None:
+    expiry = get_certificate_expiry(cert_pem)
+    now = datetime.now(UTC)
+    if expiry <= now:
+        status = theme.error("expired")
+    elif (expiry - now).days <= 30:
+        status = theme.warn("expiring soon")
+    else:
+        status = theme.ok("valid")
+    print(f"subject   {get_certificate_subject(cert_pem)}")
+    print(f"issuer    {get_certificate_issuer(cert_pem)}")
+    print(f"serial    {format(get_certificate_serial_number(cert_pem), 'x')}")
+    print(f"expires   {expiry.isoformat()} ({status})")
+    print(f"fingerprint {get_certificate_fingerprint(cert_pem)}")
+    sans = get_certificate_sans(cert_pem)
+    if sans:
+        print(f"sans      {', '.join(sans)}")
+
+
+def _parse_days(raw: str, *, default: int) -> int:
+    """Parse ``--days`` into a positive int that cannot overflow datetime math."""
+    text = raw.strip() if raw else str(default)
+    if not text:
+        raise ValueError("Expected a positive integer for --days")
+    try:
+        days = int(text)
+    except ValueError as exc:
+        raise ValueError(f"Expected a positive integer for --days, got {raw!r}") from exc
+    if days < 1 or days > 36500:
+        raise ValueError(f"Expected --days between 1 and 36500, got {days}")
+    return days
+
+
+def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
+    """Parse ``--flag value`` / ``--flag`` and collect positionals.
+
+    Repeated ``--san`` accumulates in ``multi``. Value-less flags (``--force``)
+    never consume the following positional token.
+    """
+    positional: list[str] = []
+    flags: dict[str, str] = {}
+    multi: dict[str, list[str]] = {}
+    valueless = frozenset({"force"})
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token.startswith("--"):
+            name = token[2:]
+            if name not in allowed:
+                raise ValueError(f"Unknown flag --{name}")
+            if name in valueless:
+                value = ""
+                i += 1
+            elif i + 1 < len(args) and not args[i + 1].startswith("--"):
+                value = args[i + 1]
+                i += 2
+            else:
+                value = ""
+                i += 1
+            if name == "san":
+                if not value:
+                    raise ValueError("Expected a non-empty value for --san")
+                multi.setdefault(name, []).append(value)
+            else:
+                flags[name] = value
+            continue
+        positional.append(token)
+        i += 1
+    return {"positional": positional, "flags": flags, "multi": multi}
+
+
+def _write_secret_file(path: Path, data: str | bytes) -> None:
+    """Write bytes/text with mode 0600 from creation (no world-readable window)."""
+    payload = data.encode() if isinstance(data, str) else data
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError(f"Expected progress writing {path}, got {written} bytes")
+            view = view[written:]
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
