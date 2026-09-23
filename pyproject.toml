@@ -1,0 +1,84 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tiny-pki"
+version = "0.1.0"
+description = "Small private-CA crypto library and CLI (issue, revoke, CRL, PKCS#12) for mTLS"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Henrique Andrade", email = "thehcma@users.noreply.github.com" },
+]
+requires-python = ">=3.12"
+keywords = [
+    "certificate",
+    "crl",
+    "mtls",
+    "pkcs12",
+    "pki",
+    "private-ca",
+    "tls",
+    "x509",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security :: Cryptography",
+]
+dependencies = [
+    "cryptography>=44.0.0",
+    "prompt-toolkit>=3.0.43",
+]
+
+[project.scripts]
+tiny-pki = "tiny_pki.cli.main:main"
+
+[project.urls]
+Homepage = "https://github.com/the-hcma/tiny-pki"
+Repository = "https://github.com/the-hcma/tiny-pki"
+Issues = "https://github.com/the-hcma/tiny-pki/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tiny_pki"]
+
+[dependency-groups]
+dev = [
+    "PyHamcrest>=2.1.0",
+    "pyright>=1.1.400",
+    "pytest>=8.0.0",
+    "ruff>=0.11.0",
+]
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["tiny_pki"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

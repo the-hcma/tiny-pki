@@ -1,0 +1,7 @@
+---
+description: All remote/network I/O must use explicit timeouts and bounded retries
+alwaysApply: true
+---
+
+<!-- agents-rule-shim: remote-timeouts-retries -->
+Canonical rule: [`.agents/rules/remote-timeouts-retries.md`](../../.agents/rules/remote-timeouts-retries.md)

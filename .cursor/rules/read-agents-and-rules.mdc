@@ -1,0 +1,7 @@
+---
+description: On every new agent session, read AGENTS.md and .agents/rules before acting
+alwaysApply: true
+---
+
+<!-- agents-rule-shim: read-agents-and-rules -->
+Canonical rule: [`.agents/rules/read-agents-and-rules.md`](../../.agents/rules/read-agents-and-rules.md)

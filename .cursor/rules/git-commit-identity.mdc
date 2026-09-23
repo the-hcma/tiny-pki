@@ -1,0 +1,7 @@
+---
+description: Commits and PRs attribute only the committer — no agent or machine co-authors
+alwaysApply: true
+---
+
+<!-- agents-rule-shim: git-commit-identity -->
+Canonical rule: [`.agents/rules/git-commit-identity.md`](../../.agents/rules/git-commit-identity.md)

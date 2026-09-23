@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+#
+# Launch the tiny-pki CLI.
+#
+# Usage:
+#   ./scripts/tiny-pki [OPTIONS]
+#
+# See ``tiny_pki.cli.main`` for the flag list.
+
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+cli_module="tiny_pki.cli.main"
+
+if command -v uv >/dev/null 2>&1; then
+  exec uv run python -m "$cli_module" "$@"
+fi
+
+venv_python="${repo_root}/.venv/bin/python"
+if [[ -x "$venv_python" ]]; then
+  exec "$venv_python" -m "$cli_module" "$@"
+fi
+
+echo "tiny-pki: install uv (https://docs.astral.sh/uv/) or run 'uv sync' in ${repo_root}" >&2
+exit 1

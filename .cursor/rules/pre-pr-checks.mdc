@@ -1,0 +1,7 @@
+---
+description: Block PR submit until pre-pr-checks pass (shellcheck, tests, clean main wt)
+alwaysApply: true
+---
+
+<!-- agents-rule-shim: pre-pr-checks -->
+Canonical rule: [`.agents/rules/pre-pr-checks.md`](../../.agents/rules/pre-pr-checks.md)

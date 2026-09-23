@@ -1,0 +1,7 @@
+---
+description: Ship a PR end-to-end — local gates, submit, agent review loop, operator email
+alwaysApply: true
+---
+
+<!-- agents-rule-shim: pr-ship-and-review -->
+Canonical rule: [`.agents/rules/pr-ship-and-review.md`](../../.agents/rules/pr-ship-and-review.md)

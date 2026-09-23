@@ -1,0 +1,7 @@
+---
+description: Choose Graphite vs GitHub Stacked PRs from .github/stacking-tool
+alwaysApply: true
+---
+
+<!-- agents-rule-shim: stacking-tool -->
+Canonical rule: [`.agents/rules/stacking-tool.md`](../../.agents/rules/stacking-tool.md)

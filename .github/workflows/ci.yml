@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, edited]
+
+  push:
+    branches-ignore:
+      - main
+      - '**/graphite-base/**'
+      - 'gh-readonly-queue/**'
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.ref }}-${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}-${{ github.event.action || github.event_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  guard:
+    permissions:
+      contents: read
+      pull-requests: read
+    name: Guard
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.set-skip.outputs.skip }}
+    steps:
+      - id: pr-state
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        with:
+          timeout_seconds: 15
+          max_attempts: 3
+          retry_wait_seconds: 5
+          command: |
+            if [[ -z "$PR_NUMBER" ]]; then exit 0; fi
+            state=$(gh pr view "$PR_NUMBER" --repo "$REPOSITORY" --json state -q .state)
+            echo "state=$state" >> "$GITHUB_OUTPUT"
+
+      - id: set-skip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ github.head_ref || github.ref_name }}
+          PR_STATE: ${{ steps.pr-state.outputs.state }}
+        run: |
+          if [[ "$HEAD_REF" == gtmq_merge_* ]] || [[ "$PR_STATE" == "MERGED" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]] \
+              && [[ "${{ github.event.action }}" == "edited" ]] \
+              && [[ "${{ github.event.sender.login }}" == "coderabbitai[bot]" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Pull request CI skipped: CodeRabbit description edit (review metadata only)"
+            exit 0
+          fi
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            BRANCH="${GITHUB_REF#refs/heads/}"
+            PR_COUNT=0
+            if count="$(gh pr list --repo "$GITHUB_REPOSITORY" \
+                --head "$BRANCH" --state open \
+                --json number --jq 'length' 2>/dev/null)"; then
+              PR_COUNT="$count"
+            fi
+            if [[ "$PR_COUNT" -gt 0 ]]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "Push CI skipped: open PR exists; pull_request handles this push"
+              exit 0
+            fi
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+  python:
+    name: Python (ruff, pyright, pytest)
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: latest
+
+      - name: Sync and check
+        run: |
+          uv sync --group dev
+          uv run ruff check src tests
+          uv run ruff format --check src tests
+          uv run pyright
+          uv run pytest
+
+  secret-scan:
+    name: Secret Scan
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+      - name: Secret Scan
+        env:
+          GITLEAKS_BASE: ${{ github.event.pull_request.base.sha || '' }}
+          GITLEAKS_HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+        run: bash .github/ci/secret-scan

@@ -1,0 +1,17 @@
+---
+description: Run github-repo-lint after repo config or workflow changes
+globs:
+  - .agents/rules/**
+  - .agents/skills/**
+  - .cursor/rules/**
+  - .github/**
+  - pnpm-workspace.yaml
+  - release-please-config.json
+  - .release-please-manifest.json
+  - scripts/lib/repo-practices-workflows/**
+  - web/pnpm-workspace.yaml
+alwaysApply: false
+---
+
+<!-- agents-rule-shim: repo-practices-after-config-change -->
+Canonical rule: [`.agents/rules/repo-practices-after-config-change.md`](../../.agents/rules/repo-practices-after-config-change.md)

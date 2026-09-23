@@ -1,0 +1,7 @@
+---
+description: Run agent `gh` calls through repository-helpers/scripts/gh-api
+alwaysApply: true
+---
+
+<!-- agents-rule-shim: github-api-throttle -->
+Canonical rule: [`.agents/rules/github-api-throttle.md`](../../.agents/rules/github-api-throttle.md)
