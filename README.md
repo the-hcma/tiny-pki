@@ -11,7 +11,7 @@ Intended consumers:
 
 ## Status
 
-Private org library (scaffolding). Core crypto + REPL CLI are landing next.
+Public scaffolding. Core crypto + REPL CLI are landing next.
 
 ## Install (development)
 
