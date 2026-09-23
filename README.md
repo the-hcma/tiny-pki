@@ -1,5 +1,10 @@
 # tiny-pki
 
+[![PyPI version](https://img.shields.io/pypi/v/tiny-pki.svg)](https://pypi.org/project/tiny-pki/)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/the-hcma/tiny-pki/blob/main/LICENSE)
+[![CI](https://github.com/the-hcma/tiny-pki/actions/workflows/ci.yml/badge.svg)](https://github.com/the-hcma/tiny-pki/actions/workflows/ci.yml)
+
 Small **private CA** toolkit for Python: issue CA / server / client certificates,
 generate CRLs, export PKCS#12 bundles, and inspect PEMs. Built on
 [`cryptography`](https://cryptography.io/).
@@ -22,5 +27,7 @@ uv run tiny-pki --help
 
 ## License
 
-MIT — see [LICENSE](./LICENSE). Code extracted from my-tracks was relicensed MIT
-by the copyright holder for this shared package.
+MIT © 2026 Henrique Andrade ([GitHub's thehcma](https://github.com/thehcma)) — see [`LICENSE`](./LICENSE).
+
+Code extracted from my-tracks was relicensed MIT by the copyright holder for this
+shared package.
