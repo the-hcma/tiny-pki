@@ -78,27 +78,41 @@ jobs:
           fi
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
-  python:
-    name: Python (ruff, pyright, pytest)
+  python-static:
+    name: Python lint & format checks
     needs: guard
     if: needs.guard.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
 
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           version: latest
 
-      - name: Sync and check
-        run: |
-          uv sync --group dev
-          uv run ruff check src tests
-          uv run ruff format --check src tests
-          uv run pyright
-          uv run pytest
+      - name: Python lint & format checks
+        run: bash .github/ci/python-static
+
+  test:
+    name: Pytest (hermetic)
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: latest
+
+      - name: Pytest (hermetic)
+        run: bash .github/ci/pytest-hermetic
 
   secret-scan:
     name: Secret Scan
@@ -110,6 +124,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
       - name: Secret Scan
         env:
