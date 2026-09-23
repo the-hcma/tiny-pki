@@ -182,8 +182,8 @@ def _dispatch_parts(
         _print_help(theme)
         return True
     if command == "clear":
-        # ANSI clear only when colors are enabled (honors --color never / NO_COLOR).
-        if theme.enabled:
+        # Screen control is independent of color theming (--color never / NO_COLOR).
+        if sys.stdout.isatty():
             print("\033[2J\033[H", end="", flush=True)
         return True
     if command == "edit-mode":

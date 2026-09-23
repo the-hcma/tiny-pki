@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import sys
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -148,3 +149,10 @@ def test_repl_history_falls_back(monkeypatch: MonkeyPatch, capsys: CaptureFixtur
     assert_that(hist, instance_of(InMemoryHistory))
     err = capsys.readouterr().err
     assert_that(err, contains_string("history disabled"))
+
+
+def test_clear_works_with_color_never(capsys: CaptureFixture[str], monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    main(["--color", "never", "clear"])
+    out = capsys.readouterr().out
+    assert_that(out, contains_string("\033[2J\033[H"))
