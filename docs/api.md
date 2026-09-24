@@ -11,7 +11,7 @@ before calling — see [`security.md`](security.md)). Invalid input raises
 | --- | --- |
 | `generate_ca_certificate(common_name="Private CA", *, organization_name="tiny-pki", validity_days=3650, key_size=4096)` | `(ca_cert_pem, ca_key_pem)` — self-signed, `BasicConstraints(ca=True)`, `keyCertSign` + `cRLSign` |
 | `generate_client_certificate(ca_cert_pem, ca_key_pem, common_name, *, organization_name=None, validity_days=397, key_size=3072, allow_long_validity=False)` | `(cert_pem, key_pem)` — `CLIENT_AUTH` EKU; CN is the identity |
-| `generate_server_certificate(ca_cert_pem, ca_key_pem, common_name, san_entries, *, organization_name=None, validity_days=90, key_size=3072, allow_long_validity=False)` | `(cert_pem, key_pem)` — `SERVER_AUTH` EKU; `san_entries` are DNS names or IP literals (at least one) |
+| `generate_server_certificate(ca_cert_pem, ca_key_pem, common_name, san_entries, *, organization_name=None, validity_days=90, key_size=3072, allow_long_validity=False, include_common_name_in_sans=True)` | `(cert_pem, key_pem)` — `SERVER_AUTH` EKU; `san_entries` are DNS names or IP literals (at least one) |
 
 `organization_name=None` on leaves inherits the CA's `O`. `key_size` must be one of
 `ALLOWED_KEY_SIZES` (`2048`, `3072`, `4096`); `validity_days` must be positive.
@@ -38,12 +38,14 @@ Name rules (`tiny_pki.names`):
   without a trailing dot, IDNs as punycode A-labels, canonical IP literals, and
   duplicates dropped. URLs, `host:port`, CIDR ranges, IPv6 zone IDs, underscores,
   empty or over-long labels, and numeric last labels (malformed IPs) raise
-  `ValueError`. Wildcards must be the whole leftmost label followed by at least
+  `ValueError`, as do IDN labels that IDNA2003 would silently remap (`faß` →
+  `fass`); pass their `xn--` form instead. Wildcards must be the whole leftmost label followed by at least
   two labels (`*.lan.example`); OpenSSL won't match shorter patterns.
 - TLS clients ignore the CN, so a server CN that is itself a valid host/IP and
   missing from `san_entries` is appended with a `TinyPkiWarning`. Pass
   `include_common_name_in_sans=False` to opt out. The CLI asks first on a TTY;
-  `--yes` accepts and `--no-cn-san` declines.
+  `--yes` accepts and `--no-cn-san` declines; both apply to servers only, and
+  `--no-cn-san` needs `--san` (otherwise the CN is the only SAN).
 - The store matches identities case-insensitively, but certificates keep the CN
   exactly as given (after stripping).
 - Client certificates carry no SAN: nginx (`$ssl_client_s_dn`) and Mosquitto
