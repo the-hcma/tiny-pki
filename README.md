@@ -61,7 +61,7 @@ from tiny_pki import (
     get_certificate_serial_number,
 )
 
-# key_size defaults to 4096; 2048 keeps this example fast.
+# Keys default to RSA 3072 (leaves) / 4096 (CA); 2048 keeps this example fast.
 ca_cert, ca_key = generate_ca_certificate("Home CA", key_size=2048)
 
 client_cert, client_key = generate_client_certificate(ca_cert, ca_key, "alice", key_size=2048)
@@ -107,6 +107,10 @@ tiny-pki --store ./stores/ca
 Point nginx `ssl_client_certificate` at `stores/ca/ca/ca.crt` and `ssl_crl` at
 `stores/ca/ca/crl.pem` for mTLS with revocation. The CRL is valid for 30 days:
 re-run `tiny-pki --store ./stores/ca crl` (and reload nginx) before it expires.
+
+Server certificates default to 90 days and client certificates to 397 days
+(capped at 200 / 825; `--allow-long-validity` overrides). Re-issue with `create`
+before they expire — see [`docs/api.md`](docs/api.md#issue) for the rationale.
 
 ### Store layout
 

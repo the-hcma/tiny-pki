@@ -6,7 +6,9 @@ Extracted and generalized from ``the-hcma/my-tracks`` ``app/pki.py`` (MIT).
 from __future__ import annotations
 
 import ipaddress
+import warnings
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -16,10 +18,18 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from tiny_pki._rsa import load_rsa_private_key
 from tiny_pki.constants import (
     ALLOWED_KEY_SIZES,
+    APPLE_MAX_SERVER_VALIDITY_DAYS,
+    CLOCK_SKEW_BACKDATE,
+    DEFAULT_CA_KEY_SIZE,
     DEFAULT_CA_VALIDITY_DAYS,
-    DEFAULT_CERT_VALIDITY_DAYS,
+    DEFAULT_CLIENT_VALIDITY_DAYS,
+    DEFAULT_LEAF_KEY_SIZE,
     DEFAULT_ORGANIZATION_NAME,
+    DEFAULT_SERVER_VALIDITY_DAYS,
+    MAX_CLIENT_VALIDITY_DAYS,
+    MAX_SERVER_VALIDITY_DAYS,
 )
+from tiny_pki.errors import TinyPkiWarning
 
 
 def generate_ca_certificate(
@@ -27,9 +37,13 @@ def generate_ca_certificate(
     *,
     organization_name: str = DEFAULT_ORGANIZATION_NAME,
     validity_days: int = DEFAULT_CA_VALIDITY_DAYS,
-    key_size: int = 4096,
+    key_size: int = DEFAULT_CA_KEY_SIZE,
 ) -> tuple[bytes, bytes]:
     """Generate a self-signed CA certificate and private key.
+
+    The validity window is backdated by ``CLOCK_SKEW_BACKDATE`` so relying parties
+    with slightly slow clocks accept the certificate immediately; the encoded
+    period stays exactly ``validity_days``.
 
     Returns:
         Tuple of ``(certificate_pem, private_key_pem)``.
@@ -49,15 +63,15 @@ def generate_ca_certificate(
             x509.NameAttribute(NameOID.ORGANIZATION_NAME, organization_name),
         ]
     )
-    now = datetime.now(UTC)
+    not_before, not_after = _validity_window(validity_days)
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
         .issuer_name(issuer)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(now)
-        .not_valid_after(now + timedelta(days=validity_days))
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
         .add_extension(
             x509.KeyUsage(
@@ -85,8 +99,9 @@ def generate_client_certificate(
     common_name: str,
     *,
     organization_name: str | None = None,
-    validity_days: int = DEFAULT_CERT_VALIDITY_DAYS,
-    key_size: int = 4096,
+    validity_days: int = DEFAULT_CLIENT_VALIDITY_DAYS,
+    key_size: int = DEFAULT_LEAF_KEY_SIZE,
+    allow_long_validity: bool = False,
 ) -> tuple[bytes, bytes]:
     """Generate a client (CLIENT_AUTH) certificate signed by the given CA.
 
@@ -94,6 +109,10 @@ def generate_client_certificate(
 
     When ``organization_name`` is omitted, the CA certificate's O is reused, falling
     back to ``DEFAULT_ORGANIZATION_NAME`` if the CA has no O attribute.
+
+    Raises:
+        ValueError: If ``validity_days`` exceeds ``MAX_CLIENT_VALIDITY_DAYS`` without
+            ``allow_long_validity=True``, or the certificate would outlive the CA.
     """
     _require_non_empty(common_name, "common_name")
     _require_key_size(key_size)
@@ -101,6 +120,9 @@ def generate_client_certificate(
 
     ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
     ca_key = load_rsa_private_key(ca_key_pem)
+    not_before, not_after = _leaf_validity_window(
+        ca_cert, validity_days, kind="client", allow_long_validity=allow_long_validity
+    )
     client_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
 
     org = organization_name
@@ -116,15 +138,14 @@ def generate_client_certificate(
             x509.NameAttribute(NameOID.ORGANIZATION_NAME, org),
         ]
     )
-    now = datetime.now(UTC)
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
         .issuer_name(ca_cert.subject)
         .public_key(client_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(now)
-        .not_valid_after(now + timedelta(days=validity_days))
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .add_extension(
             x509.KeyUsage(
@@ -161,12 +182,21 @@ def generate_server_certificate(
     san_entries: list[str],
     *,
     organization_name: str | None = None,
-    validity_days: int = DEFAULT_CERT_VALIDITY_DAYS,
-    key_size: int = 4096,
+    validity_days: int = DEFAULT_SERVER_VALIDITY_DAYS,
+    key_size: int = DEFAULT_LEAF_KEY_SIZE,
+    allow_long_validity: bool = False,
 ) -> tuple[bytes, bytes]:
     """Generate a server (SERVER_AUTH) certificate signed by the given CA.
 
     ``san_entries`` must contain at least one DNS name or IP address.
+
+    Raises:
+        ValueError: If ``validity_days`` exceeds ``MAX_SERVER_VALIDITY_DAYS`` without
+            ``allow_long_validity=True``, or the certificate would outlive the CA.
+
+    Warns:
+        TinyPkiWarning: When an override exceeds ``APPLE_MAX_SERVER_VALIDITY_DAYS``
+            (Apple platforms reject such server certificates).
     """
     _require_non_empty(common_name, "common_name")
     _require_key_size(key_size)
@@ -176,6 +206,9 @@ def generate_server_certificate(
 
     ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
     ca_key = load_rsa_private_key(ca_key_pem)
+    not_before, not_after = _leaf_validity_window(
+        ca_cert, validity_days, kind="server", allow_long_validity=allow_long_validity
+    )
     server_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
 
     org = organization_name
@@ -199,15 +232,14 @@ def generate_server_certificate(
         except ValueError:
             san_objects.append(x509.DNSName(entry))
 
-    now = datetime.now(UTC)
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
         .issuer_name(ca_cert.subject)
         .public_key(server_key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(now)
-        .not_valid_after(now + timedelta(days=validity_days))
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .add_extension(
             x509.KeyUsage(
@@ -238,6 +270,39 @@ def generate_server_certificate(
     return _pem_pair(cert, server_key)
 
 
+def _leaf_validity_window(
+    ca_cert: x509.Certificate,
+    validity_days: int,
+    *,
+    kind: Literal["client", "server"],
+    allow_long_validity: bool,
+) -> tuple[datetime, datetime]:
+    """Return ``(not_before, not_after)`` after enforcing lifetime policy."""
+    cap = MAX_SERVER_VALIDITY_DAYS if kind == "server" else MAX_CLIENT_VALIDITY_DAYS
+    if validity_days > cap and not allow_long_validity:
+        raise ValueError(
+            f"Expected validity_days <= {cap} for {kind} certificates, got {validity_days}; "
+            "pass allow_long_validity=True (CLI: --allow-long-validity) to override"
+        )
+    if kind == "server" and validity_days > APPLE_MAX_SERVER_VALIDITY_DAYS:
+        warnings.warn(
+            f"Server certificate validity {validity_days} days exceeds "
+            f"{APPLE_MAX_SERVER_VALIDITY_DAYS}; Apple platforms will reject it",
+            TinyPkiWarning,
+            stacklevel=3,
+        )
+    not_before, not_after = _validity_window(validity_days)
+    ca_not_after = ca_cert.not_valid_after_utc
+    if not_after > ca_not_after:
+        remaining_days = max((ca_not_after - not_before).days, 0)
+        raise ValueError(
+            f"Expected {kind} certificate to expire by the CA's notAfter "
+            f"({ca_not_after.isoformat()}), got validity_days={validity_days}; "
+            f"use validity_days <= {remaining_days} or renew the CA"
+        )
+    return not_before, not_after
+
+
 def _pem_pair(cert: x509.Certificate, key: rsa.RSAPrivateKey) -> tuple[bytes, bytes]:
     cert_pem = cert.public_bytes(serialization.Encoding.PEM)
     key_pem = key.private_bytes(
@@ -261,3 +326,9 @@ def _require_non_empty(value: str, field_name: str) -> None:
 def _require_validity_days(validity_days: int) -> None:
     if validity_days <= 0:
         raise ValueError(f"Expected validity_days > 0, got {validity_days}")
+
+
+def _validity_window(validity_days: int) -> tuple[datetime, datetime]:
+    """Backdate the whole window so the encoded period is exactly ``validity_days``."""
+    not_before = datetime.now(UTC) - CLOCK_SKEW_BACKDATE
+    return not_before, not_before + timedelta(days=validity_days)

@@ -8,14 +8,20 @@ from __future__ import annotations
 import getpass
 import json
 import os
+import sys
+import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict
 
 from tiny_pki import (
+    DEFAULT_CA_KEY_SIZE,
     DEFAULT_CA_VALIDITY_DAYS,
-    DEFAULT_CERT_VALIDITY_DAYS,
+    DEFAULT_CLIENT_VALIDITY_DAYS,
+    DEFAULT_LEAF_KEY_SIZE,
     DEFAULT_ORGANIZATION_NAME,
+    DEFAULT_SERVER_VALIDITY_DAYS,
+    TinyPkiWarning,
     generate_ca_certificate,
     generate_client_certificate,
     generate_crl,
@@ -85,7 +91,7 @@ def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) 
     cn = opts["flags"].get("cn", "Private CA")
     org = opts["flags"].get("org", DEFAULT_ORGANIZATION_NAME)
     days = _parse_days(opts["flags"].get("days", str(DEFAULT_CA_VALIDITY_DAYS)), default=DEFAULT_CA_VALIDITY_DAYS)
-    key_size = int(opts["flags"].get("key-size", "4096"))
+    key_size = int(opts["flags"].get("key-size", str(DEFAULT_CA_KEY_SIZE)))
     cert_pem, key_pem = generate_ca_certificate(
         cn,
         organization_name=org,
@@ -103,7 +109,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
     if not args:
         raise ValueError("Expected create client|server <name>")
     kind = args[0]
-    opts = _parse_flags(args[1:], allowed={"days", "key-size", "san", "org"})
+    opts = _parse_flags(args[1:], allowed={"allow-long-validity", "days", "key-size", "org", "san"})
     positional = opts["positional"]
     if kind not in {"client", "server"}:
         raise ValueError(f"Expected create client|server, got {kind!r}")
@@ -115,32 +121,40 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
     if kind == "client" and opts["multi"].get("san"):
         raise ValueError("--san is only supported for server certificates")
     ca_cert, ca_key = store.read_ca()
-    days = _parse_days(opts["flags"].get("days", str(DEFAULT_CERT_VALIDITY_DAYS)), default=DEFAULT_CERT_VALIDITY_DAYS)
-    key_size = int(opts["flags"].get("key-size", "4096"))
+    default_days = DEFAULT_CLIENT_VALIDITY_DAYS if kind == "client" else DEFAULT_SERVER_VALIDITY_DAYS
+    days = _parse_days(opts["flags"].get("days", str(default_days)), default=default_days)
+    key_size = int(opts["flags"].get("key-size", str(DEFAULT_LEAF_KEY_SIZE)))
     org = opts["flags"].get("org")
+    allow_long_validity = "allow-long-validity" in opts["flags"]
 
-    if kind == "client":
-        cert_pem, key_pem = generate_client_certificate(
-            ca_cert,
-            ca_key,
-            name,
-            organization_name=org,
-            validity_days=days,
-            key_size=key_size,
-        )
-    else:
-        sans = [s for s in opts["multi"].get("san", []) if s]
-        if not sans:
-            sans = [name]
-        cert_pem, key_pem = generate_server_certificate(
-            ca_cert,
-            ca_key,
-            name,
-            sans,
-            organization_name=org,
-            validity_days=days,
-            key_size=key_size,
-        )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", TinyPkiWarning)
+        if kind == "client":
+            cert_pem, key_pem = generate_client_certificate(
+                ca_cert,
+                ca_key,
+                name,
+                organization_name=org,
+                validity_days=days,
+                key_size=key_size,
+                allow_long_validity=allow_long_validity,
+            )
+        else:
+            sans = [s for s in opts["multi"].get("san", []) if s]
+            if not sans:
+                sans = [name]
+            cert_pem, key_pem = generate_server_certificate(
+                ca_cert,
+                ca_key,
+                name,
+                sans,
+                organization_name=org,
+                validity_days=days,
+                key_size=key_size,
+                allow_long_validity=allow_long_validity,
+            )
+    for warning in caught:
+        print(theme.warn(f"warning: {warning.message}"), file=sys.stderr)
 
     entry = store.add_certificate(
         common_name=name,
@@ -450,7 +464,7 @@ def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
     positional: list[str] = []
     flags: dict[str, str] = {}
     multi: dict[str, list[str]] = {}
-    valueless = frozenset({"force"})
+    valueless = frozenset({"allow-long-validity", "force"})
     i = 0
     while i < len(args):
         token = args[i]
