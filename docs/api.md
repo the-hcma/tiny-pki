@@ -74,7 +74,11 @@ Name rules (`tiny_pki.names`):
 
 | Function | Returns |
 | --- | --- |
-| `generate_crl(ca_cert_pem, ca_key_pem, revoked_entries, *, validity_days=30)` | CRL PEM signed by the CA |
+| `generate_crl(ca_cert_pem, ca_key_pem, revoked_entries, *, validity_days=30, crl_number=None)` | CRL PEM signed by the CA, with `CRLNumber` and `AuthorityKeyIdentifier` (RFC 5280) |
+
+`crl_number` defaults to microseconds since the epoch, which only increases if
+the signing host's clock never goes backwards. Pass a persisted counter if you
+can't guarantee that.
 
 `revoked_entries` is a `list[tuple[int, datetime]]` of `(serial_number,
 revoked_at)`. The CRL's `nextUpdate` is `validity_days` from now — relying parties
