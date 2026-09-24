@@ -92,7 +92,7 @@ Inside this repo's dev checkout, prefix commands with `uv run`.
 tiny-pki --store ./stores/ca init --cn "Home CA" --permit home --permit 192.168.0.0/16
 tiny-pki --store ./stores/ca create client alice --days 730
 tiny-pki --store ./stores/ca create server api.home --san api.home --san 192.168.1.10
-tiny-pki --store ./stores/ca export p12 alice --password 'change-me'
+tiny-pki --store ./stores/ca export p12 alice   # prompts for the bundle password
 tiny-pki --store ./stores/ca revoke alice   # regenerates stores/ca/ca/crl.pem
 tiny-pki --store ./stores/ca list clients
 tiny-pki --store ./stores/ca show certs

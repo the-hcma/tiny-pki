@@ -19,6 +19,7 @@ from tiny_pki.constants import (
     DEFAULT_SERVER_VALIDITY_DAYS,
     MAX_CLIENT_VALIDITY_DAYS,
     MAX_SERVER_VALIDITY_DAYS,
+    MIN_PKCS12_PASSWORD_LENGTH,
     VALIDITY_PRESETS,
 )
 from tiny_pki.errors import TinyPkiWarning
@@ -53,6 +54,7 @@ __all__ = [
     "DEFAULT_SERVER_VALIDITY_DAYS",
     "MAX_CLIENT_VALIDITY_DAYS",
     "MAX_SERVER_VALIDITY_DAYS",
+    "MIN_PKCS12_PASSWORD_LENGTH",
     "TinyPkiWarning",
     "VALIDITY_PRESETS",
     "__version__",

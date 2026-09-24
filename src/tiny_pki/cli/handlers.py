@@ -38,6 +38,8 @@ from tiny_pki.cli.theme import Theme
 from tiny_pki.names import common_name_as_san, normalize_san_entries
 from tiny_pki.store import CertificateStore, IssuedCertificate
 
+P12_PASSWORD_ENV = "TINY_PKI_P12_PASSWORD"
+
 
 class HandlerNotReadyError(RuntimeError):
     """Kept for the shell dispatch contract; not raised by real handlers."""
@@ -398,9 +400,9 @@ def _cmd_delete(args: list[str], *, store: CertificateStore | None, theme: Theme
 def _cmd_export(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     store = _require_store(store)
     if len(args) < 2:
-        raise ValueError("Expected export pem|p12 <identity> [--out PATH] [--password ...]")
+        raise ValueError("Expected export pem|p12 <identity> [--out PATH] [--legacy] [--password ...]")
     fmt = args[0]
-    opts = _parse_flags(args[1:], allowed={"out", "password"})
+    opts = _parse_flags(args[1:], allowed={"legacy", "out", "password"})
     if not opts["positional"]:
         raise ValueError("Expected identity after export format")
     identity = opts["positional"][0]
@@ -418,6 +420,16 @@ def _cmd_export(args: list[str], *, store: CertificateStore | None, theme: Theme
         return
     if fmt == "p12":
         password = opts["flags"].get("password")
+        if password is not None:
+            print(
+                theme.warn(
+                    "warning: --password is visible in shell/REPL history and process listings; "
+                    f"prefer the prompt or {P12_PASSWORD_ENV}"
+                ),
+                file=sys.stderr,
+            )
+        else:
+            password = os.environ.get(P12_PASSWORD_ENV)
         if password is None:
             try:
                 password = getpass.getpass("PKCS#12 password: ")
@@ -425,7 +437,9 @@ def _cmd_export(args: list[str], *, store: CertificateStore | None, theme: Theme
                 raise ValueError("Expected a non-empty password") from exc
         if not password:
             raise ValueError("Expected a non-empty password")
-        p12 = generate_pkcs12(cert_pem, key_pem, ca_cert, entry.common_name, password.encode())
+        p12 = generate_pkcs12(
+            cert_pem, key_pem, ca_cert, entry.common_name, password.encode(), legacy="legacy" in opts["flags"]
+        )
         out_flag = opts["flags"].get("out")
         if out_flag:
             path = Path(out_flag)
@@ -487,7 +501,7 @@ def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
     positional: list[str] = []
     flags: dict[str, str] = {}
     multi: dict[str, list[str]] = {}
-    valueless = frozenset({"allow-long-validity", "force", "no-cn-san", "yes"})
+    valueless = frozenset({"allow-long-validity", "force", "legacy", "no-cn-san", "yes"})
     i = 0
     while i < len(args):
         token = args[i]

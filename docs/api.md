@@ -89,9 +89,17 @@ that window. Pass the **full** revoked set every time; the CRL is not incrementa
 
 | Function | Returns |
 | --- | --- |
-| `generate_pkcs12(cert_pem, key_pem, ca_cert_pem, friendly_name, password)` | PKCS#12 `bytes` (cert + key + CA chain) |
+| `generate_pkcs12(cert_pem, key_pem, ca_cert_pem, friendly_name, password, *, legacy=False)` | PKCS#12 `bytes` (cert + key + CA chain) |
 
-`password` is `bytes` and must be non-empty.
+- `password` is `bytes` of at least `MIN_PKCS12_PASSWORD_LENGTH` (8).
+- By default the bundle uses AES-256-CBC with PBKDF2-HMAC-SHA256 and an
+  HMAC-SHA256 MAC (`cryptography`'s best available encryption).
+- `legacy=True` (CLI `export p12 --legacy`) switches to 3DES with a SHA-1 MAC,
+  for older Android or Apple keychains that can't import the modern format. Use
+  it only when a device needs it.
+- The CLI takes the password from a prompt, from `TINY_PKI_P12_PASSWORD`, or from
+  `--password`. The last one warns, because it ends up in shell/REPL history and
+  process listings.
 
 ## Inspect
 
@@ -123,6 +131,7 @@ All take a certificate PEM.
 | `DEFAULT_SERVER_VALIDITY_DAYS` | `90` |
 | `MAX_CLIENT_VALIDITY_DAYS` | `825` |
 | `MAX_SERVER_VALIDITY_DAYS` | `200` |
+| `MIN_PKCS12_PASSWORD_LENGTH` | `8` |
 | `VALIDITY_PRESETS` | `[(90, "90 days"), …, (825, "825 days")]` for UI pickers |
 
 `TinyPkiWarning` (a `UserWarning`) flags certificates that were issued but that

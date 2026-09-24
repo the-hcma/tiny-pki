@@ -224,12 +224,12 @@ class TestInspectAndCrlAndPkcs12:
     def test_generate_pkcs12_roundtrip(self) -> None:
         ca_cert, ca_key = generate_ca_certificate(key_size=2048)
         cert_pem, key_pem = generate_client_certificate(ca_cert, ca_key, "carol", key_size=2048)
-        p12 = generate_pkcs12(cert_pem, key_pem, ca_cert, "carol", b"secret")
+        p12 = generate_pkcs12(cert_pem, key_pem, ca_cert, "carol", b"secret-pw")
         assert_that(
             calling(pkcs12.load_key_and_certificates).with_args(p12, b"wrong"),
             raises(ValueError),
         )
-        key, cert, additional = pkcs12.load_key_and_certificates(p12, b"secret")
+        key, cert, additional = pkcs12.load_key_and_certificates(p12, b"secret-pw")
         assert_that(key, is_(not_none()))
         assert_that(cert, is_(not_none()))
         assert_that(additional, has_length(1))
@@ -238,7 +238,7 @@ class TestInspectAndCrlAndPkcs12:
         ca_cert, ca_key = generate_ca_certificate(key_size=2048)
         cert_pem, key_pem = generate_client_certificate(ca_cert, ca_key, "carol", key_size=2048)
         assert_that(
-            calling(generate_pkcs12).with_args(cert_pem, key_pem, ca_cert, "", b"secret"),
+            calling(generate_pkcs12).with_args(cert_pem, key_pem, ca_cert, "", b"secret-pw"),
             raises(ValueError, "friendly_name"),
         )
         assert_that(

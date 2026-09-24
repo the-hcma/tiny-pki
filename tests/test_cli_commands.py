@@ -43,8 +43,11 @@ def _run(
     return captured.out, captured.err
 
 
-def test_init_create_show_revoke_delete_export(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+def test_init_create_show_revoke_delete_export(
+    tmp_path: Path, capsys: CaptureFixture[str], monkeypatch: MonkeyPatch
+) -> None:
     store = tmp_path / "ca"
+    monkeypatch.setenv("TINY_PKI_P12_PASSWORD", "secret-pw")
     out, err = _run(store, "init", "--cn", "Test CA", "--key-size", "2048", capsys=capsys)
     assert_that(err, equal_to(""))
     assert_that(out, contains_string("CA created"))
@@ -111,15 +114,13 @@ def test_init_create_show_revoke_delete_export(tmp_path: Path, capsys: CaptureFi
         "alice",
         "--out",
         str(p12_out),
-        "--password",
-        "secret",
         capsys=capsys,
     )
     assert_that(err, equal_to(""))
     assert_that(p12_out.is_file(), is_(True))
     assert_that(oct(p12_out.stat().st_mode & 0o777), equal_to("0o600"))
 
-    out, err = _run(store, "export", "p12", "alice", "--password", "secret", capsys=capsys)
+    out, err = _run(store, "export", "p12", "alice", capsys=capsys)
     assert_that(err, equal_to(""))
     alice = cs.get_certificate("alice")
     assert_that(alice, is_(not_none()))

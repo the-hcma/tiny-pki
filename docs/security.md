@@ -34,6 +34,12 @@ runs. Hand them to the device once (PKCS#12 with a password, over a secure
 channel) and avoid keeping copies you don't need. `delete` removes the on-disk
 key after revocation.
 
+The PKCS#12 password protects the key in transit. Use a long, random one: the
+bundle can be attacked offline. Send the password separately from the file.
+Prefer the interactive prompt or `TINY_PKI_P12_PASSWORD` over `--password`.
+Reserve `--legacy` (3DES/SHA-1) for devices that can't import the default
+AES-256 bundle.
+
 ## Revocation only works if the CRL is fresh
 
 - Every revoke must be followed by publishing the new CRL **and** reloading the
