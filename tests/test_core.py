@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import ipaddress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 from cryptography import x509
@@ -78,7 +78,7 @@ class TestGenerateCaCertificate:
         cert_pem, _ = generate_ca_certificate(validity_days=365)
         cert = x509.load_pem_x509_certificate(cert_pem)
         delta = cert.not_valid_after_utc - cert.not_valid_before_utc
-        assert_that(delta.days, equal_to(365))
+        assert_that(delta, equal_to(timedelta(days=365)))
 
     def test_default_key_size_4096(self) -> None:
         cert_pem, _ = generate_ca_certificate()

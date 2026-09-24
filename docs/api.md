@@ -10,11 +10,24 @@ before calling — see [`security.md`](security.md)). Invalid input raises
 | Function | Returns |
 | --- | --- |
 | `generate_ca_certificate(common_name="Private CA", *, organization_name="tiny-pki", validity_days=3650, key_size=4096)` | `(ca_cert_pem, ca_key_pem)` — self-signed, `BasicConstraints(ca=True)`, `keyCertSign` + `cRLSign` |
-| `generate_client_certificate(ca_cert_pem, ca_key_pem, common_name, *, organization_name=None, validity_days=1825, key_size=4096)` | `(cert_pem, key_pem)` — `CLIENT_AUTH` EKU; CN is the identity |
-| `generate_server_certificate(ca_cert_pem, ca_key_pem, common_name, san_entries, *, organization_name=None, validity_days=1825, key_size=4096)` | `(cert_pem, key_pem)` — `SERVER_AUTH` EKU; `san_entries` are DNS names or IP literals (at least one) |
+| `generate_client_certificate(ca_cert_pem, ca_key_pem, common_name, *, organization_name=None, validity_days=397, key_size=3072, allow_long_validity=False)` | `(cert_pem, key_pem)` — `CLIENT_AUTH` EKU; CN is the identity |
+| `generate_server_certificate(ca_cert_pem, ca_key_pem, common_name, san_entries, *, organization_name=None, validity_days=90, key_size=3072, allow_long_validity=False)` | `(cert_pem, key_pem)` — `SERVER_AUTH` EKU; `san_entries` are DNS names or IP literals (at least one) |
 
 `organization_name=None` on leaves inherits the CA's `O`. `key_size` must be one of
 `ALLOWED_KEY_SIZES` (`2048`, `3072`, `4096`); `validity_days` must be positive.
+
+Lifetime policy:
+
+- Leaves are capped at `MAX_SERVER_VALIDITY_DAYS` (200) / `MAX_CLIENT_VALIDITY_DAYS`
+  (825). Pass `allow_long_validity=True` to exceed the cap; a server certificate
+  over `APPLE_MAX_SERVER_VALIDITY_DAYS` (825) also emits a `TinyPkiWarning`
+  because Apple platforms reject it.
+- A leaf may not outlive its CA: issuance raises `ValueError` naming the maximum
+  `validity_days` still possible.
+- The validity window (and a CRL's `lastUpdate`) is backdated by
+  `CLOCK_SKEW_BACKDATE` (5 minutes) so devices with slightly slow clocks accept
+  fresh certificates. The encoded period (`notAfter - notBefore`) is exactly
+  `validity_days`, so the caps and Apple's limit apply to what is actually issued.
 
 ## Revoke
 
@@ -55,10 +68,20 @@ All take a certificate PEM.
 | Name | Value |
 | --- | --- |
 | `ALLOWED_KEY_SIZES` | `(2048, 3072, 4096)` |
+| `APPLE_MAX_SERVER_VALIDITY_DAYS` | `825` |
+| `CLOCK_SKEW_BACKDATE` | `timedelta(minutes=5)` |
+| `DEFAULT_CA_KEY_SIZE` | `4096` |
 | `DEFAULT_CA_VALIDITY_DAYS` | `3650` |
-| `DEFAULT_CERT_VALIDITY_DAYS` | `1825` |
+| `DEFAULT_CLIENT_VALIDITY_DAYS` | `397` |
+| `DEFAULT_LEAF_KEY_SIZE` | `3072` |
 | `DEFAULT_ORGANIZATION_NAME` | `"tiny-pki"` |
-| `VALIDITY_PRESETS` | `[(365, "1 year"), …, (1825, "5 years")]` for UI pickers |
+| `DEFAULT_SERVER_VALIDITY_DAYS` | `90` |
+| `MAX_CLIENT_VALIDITY_DAYS` | `825` |
+| `MAX_SERVER_VALIDITY_DAYS` | `200` |
+| `VALIDITY_PRESETS` | `[(90, "90 days"), …, (825, "825 days")]` for UI pickers |
+
+`TinyPkiWarning` (a `UserWarning`) flags certificates that were issued but that
+some relying parties may reject.
 
 ## Optional: `tiny_pki.secrets`
 

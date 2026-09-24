@@ -8,6 +8,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 
 from tiny_pki._rsa import load_rsa_private_key
+from tiny_pki.constants import CLOCK_SKEW_BACKDATE
 
 
 def generate_crl(
@@ -38,7 +39,7 @@ def generate_crl(
     builder = (
         x509.CertificateRevocationListBuilder()
         .issuer_name(ca_cert.subject)
-        .last_update(now)
+        .last_update(now - CLOCK_SKEW_BACKDATE)
         .next_update(now + timedelta(days=validity_days))
     )
     for serial_number, revocation_time in revoked_entries:
