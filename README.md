@@ -89,7 +89,7 @@ Store path is required for write operations (`--store` or `TINY_PKI_STORE`).
 Inside this repo's dev checkout, prefix commands with `uv run`.
 
 ```bash
-tiny-pki --store ./stores/ca init --cn "Home CA"
+tiny-pki --store ./stores/ca init --cn "Home CA" --permit home --permit 192.168.0.0/16
 tiny-pki --store ./stores/ca create client alice --days 730
 tiny-pki --store ./stores/ca create server api.home --san api.home --san 192.168.1.10
 tiny-pki --store ./stores/ca export p12 alice --password 'change-me'

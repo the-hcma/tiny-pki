@@ -104,7 +104,7 @@ def _require_store(store: CertificateStore | None) -> CertificateStore:
 
 def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     store = _require_store(store)
-    opts = _parse_flags(args, allowed={"cn", "org", "days", "key-size"})
+    opts = _parse_flags(args, allowed={"cn", "days", "key-size", "org", "permit"})
     if opts["positional"]:
         raise ValueError("init takes no positional arguments; use --cn / --org")
     if store.has_ca():
@@ -118,6 +118,7 @@ def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) 
         organization_name=org,
         validity_days=days,
         key_size=key_size,
+        permitted_subtrees=opts["multi"].get("permit"),
     )
     store.write_ca(cert_pem, key_pem)
     store.write_crl(generate_crl(cert_pem, key_pem, []))
@@ -480,7 +481,7 @@ def _parse_days(raw: str, *, default: int) -> int:
 def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
     """Parse ``--flag value`` / ``--flag`` and collect positionals.
 
-    Repeated ``--san`` accumulates in ``multi``. Value-less flags (``--force``)
+    Repeated ``--san`` / ``--permit`` accumulate in ``multi``. Value-less flags (``--force``)
     never consume the following positional token.
     """
     positional: list[str] = []
@@ -503,9 +504,9 @@ def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
             else:
                 value = ""
                 i += 1
-            if name == "san":
+            if name in {"permit", "san"}:
                 if not value:
-                    raise ValueError("Expected a non-empty value for --san")
+                    raise ValueError(f"Expected a non-empty value for --{name}")
                 multi.setdefault(name, []).append(value)
             else:
                 flags[name] = value

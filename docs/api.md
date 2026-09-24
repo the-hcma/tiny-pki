@@ -9,7 +9,7 @@ before calling — see [`security.md`](security.md)). Invalid input raises
 
 | Function | Returns |
 | --- | --- |
-| `generate_ca_certificate(common_name="Private CA", *, organization_name="tiny-pki", validity_days=3650, key_size=4096)` | `(ca_cert_pem, ca_key_pem)` — self-signed, `BasicConstraints(ca=True)`, `keyCertSign` + `cRLSign` |
+| `generate_ca_certificate(common_name="Private CA", *, organization_name="tiny-pki", validity_days=3650, key_size=4096, permitted_subtrees=None)` | `(ca_cert_pem, ca_key_pem)` — self-signed, `BasicConstraints(ca=True, path_length=0)` (signs leaves only), `keyCertSign` + `cRLSign`; optional critical Name Constraints |
 | `generate_client_certificate(ca_cert_pem, ca_key_pem, common_name, *, organization_name=None, validity_days=397, key_size=3072, allow_long_validity=False)` | `(cert_pem, key_pem)` — `CLIENT_AUTH` EKU; CN is the identity |
 | `generate_server_certificate(ca_cert_pem, ca_key_pem, common_name, san_entries, *, organization_name=None, validity_days=90, key_size=3072, allow_long_validity=False, include_common_name_in_sans=True)` | `(cert_pem, key_pem)` — `SERVER_AUTH` EKU; `san_entries` are DNS names or IP literals (at least one) |
 
@@ -28,6 +28,18 @@ Lifetime policy:
   `CLOCK_SKEW_BACKDATE` (5 minutes) so devices with slightly slow clocks accept
   fresh certificates. The encoded period (`notAfter - notBefore`) is exactly
   `validity_days`, so the caps and Apple's limit apply to what is actually issued.
+
+Name Constraints (`permitted_subtrees`, CLI `init --permit`):
+
+- Entries are DNS suffixes (`"home"` permits `home` and every name under it) or
+  IP networks (`"192.168.0.0/16"`; a bare IP is a single host). Wildcards, URLs,
+  and networks with host bits set are rejected.
+- Leaf issuance refuses SANs outside the constraints, so you get an error at
+  issue time rather than a failed handshake later. When the leaf has no DNS SAN,
+  a dotted CN made of letters, digits, `-`, `_` and `.` (IP literals included) is
+  checked against the DNS constraints too, as OpenSSL does.
+- RFC 5280 only constrains the name types you list: a DNS-only constraint
+  leaves IP SANs unrestricted, so add your LAN ranges too.
 
 Name rules (`tiny_pki.names`):
 
