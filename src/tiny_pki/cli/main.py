@@ -156,8 +156,10 @@ def _argument_tokens(command: str, store: CertificateStore | None) -> tuple[str,
         return ("emacs", "vim")
     if command == "export":
         fixed = ("pem", "p12")
+    elif command == "list":
+        return ("ca", "certs", "clients", "revoked", "servers")
     elif command == "show":
-        fixed = ("ca", "certs", "crl")
+        fixed = ("ca", "certs", "clients", "crl", "revoked", "servers")
     names: tuple[str, ...] = ()
     if command in {"delete", "export", "inspect", "revoke", "show"} and store is not None:
         try:

@@ -6,17 +6,19 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 from hamcrest import assert_that, calling, equal_to, has_length, is_, none, not_none, raises
 
 from tiny_pki import (
     generate_ca_certificate,
     generate_client_certificate,
+    generate_server_certificate,
     get_certificate_expiry,
     get_certificate_fingerprint,
     get_certificate_serial_number,
 )
-from tiny_pki.store import CertificateStore, require_store_path
+from tiny_pki.store import CertificateStore, IssuedCertificate, require_store_path
 
 
 def test_require_store_path_rejects_empty() -> None:
@@ -57,6 +59,302 @@ def test_write_ca_and_issue_client(tmp_path: Path) -> None:
     assert_that(store.read_key_pem(entry), equal_to(key_pem))
     assert_that(oct((store.root / entry.key_path).stat().st_mode & 0o777), equal_to("0o600"))
     assert_that(entry.serial_number in entry.cert_path, is_(True))
+    assert_that(entry.cert_path.startswith("clients/"), is_(True))
+    assert_that(store.ca_cert_path.is_file(), is_(True))
+    assert_that(store.ca_cert_path, equal_to(store.root / "ca" / "ca.crt"))
+
+
+def test_ensure_layout_creates_typed_dirs(tmp_path: Path) -> None:
+    store = CertificateStore(tmp_path / "ca")
+    store.ensure_layout()
+    assert_that(store.ca_dir.is_dir(), is_(True))
+    assert_that(store.clients_dir.is_dir(), is_(True))
+    assert_that(store.servers_dir.is_dir(), is_(True))
+    assert_that(store.bundles_dir.is_dir(), is_(True))
+    assert_that(store.index_path.is_file(), is_(True))
+
+
+def test_issue_paths_by_kind(tmp_path: Path) -> None:
+    store = CertificateStore(tmp_path / "ca")
+    ca_cert, ca_key = generate_ca_certificate(key_size=2048)
+    store.write_ca(ca_cert, ca_key)
+
+    client_pem, client_key = generate_client_certificate(ca_cert, ca_key, "alice", key_size=2048)
+    client = store.add_certificate(
+        common_name="alice",
+        kind="client",
+        serial_number=get_certificate_serial_number(client_pem),
+        cert_pem=client_pem,
+        key_pem=client_key,
+        not_valid_after=get_certificate_expiry(client_pem),
+        fingerprint=get_certificate_fingerprint(client_pem),
+    )
+    server_pem, server_key = generate_server_certificate(ca_cert, ca_key, "api.home", ["api.home"], key_size=2048)
+    server = store.add_certificate(
+        common_name="api.home",
+        kind="server",
+        serial_number=get_certificate_serial_number(server_pem),
+        cert_pem=server_pem,
+        key_pem=server_key,
+        not_valid_after=get_certificate_expiry(server_pem),
+        fingerprint=get_certificate_fingerprint(server_pem),
+    )
+    assert_that(client.cert_path.startswith("clients/"), is_(True))
+    assert_that(server.cert_path.startswith("servers/"), is_(True))
+    assert_that((store.root / client.cert_path).is_file(), is_(True))
+    assert_that((store.root / server.cert_path).is_file(), is_(True))
+
+
+def test_list_certificates_filters_kind_and_status(tmp_path: Path) -> None:
+    store = CertificateStore(tmp_path / "ca")
+    ca_cert, ca_key = generate_ca_certificate(key_size=2048)
+    store.write_ca(ca_cert, ca_key)
+
+    client_pem, client_key = generate_client_certificate(ca_cert, ca_key, "alice", key_size=2048)
+    store.add_certificate(
+        common_name="alice",
+        kind="client",
+        serial_number=get_certificate_serial_number(client_pem),
+        cert_pem=client_pem,
+        key_pem=client_key,
+        not_valid_after=get_certificate_expiry(client_pem),
+        fingerprint=get_certificate_fingerprint(client_pem),
+    )
+    server_pem, server_key = generate_server_certificate(ca_cert, ca_key, "api.home", ["api.home"], key_size=2048)
+    store.add_certificate(
+        common_name="api.home",
+        kind="server",
+        serial_number=get_certificate_serial_number(server_pem),
+        cert_pem=server_pem,
+        key_pem=server_key,
+        not_valid_after=get_certificate_expiry(server_pem),
+        fingerprint=get_certificate_fingerprint(server_pem),
+    )
+    store.mark_revoked("alice")
+
+    assert_that(store.list_certificates(kind="client", status="active"), has_length(0))
+    assert_that(store.list_certificates(kind="server", status="active"), has_length(1))
+    assert_that(store.list_certificates(status="revoked"), has_length(1))
+    assert_that(store.list_certificates(status="all"), has_length(2))
+    assert_that(
+        calling(store.list_certificates).with_args(status="bogus"),  # type: ignore[arg-type]
+        raises(ValueError, "active"),
+    )
+
+
+def test_migrate_legacy_flat_layout(tmp_path: Path) -> None:
+    root = tmp_path / "legacy"
+    root.mkdir()
+    ca_cert, ca_key = generate_ca_certificate(key_size=2048)
+    (root / "ca.crt").write_bytes(ca_cert)
+    (root / "ca.key").write_bytes(ca_key)
+    certs = root / "certs"
+    certs.mkdir()
+    client_pem, client_key = generate_client_certificate(ca_cert, ca_key, "alice", key_size=2048)
+    serial = format(get_certificate_serial_number(client_pem), "x")
+    (certs / f"alice-{serial}.crt").write_bytes(client_pem)
+    (certs / f"alice-{serial}.key").write_bytes(client_key)
+    server_pem, server_key = generate_server_certificate(ca_cert, ca_key, "api.home", ["api.home"], key_size=2048)
+    server_serial = format(get_certificate_serial_number(server_pem), "x")
+    (certs / f"api.home-{server_serial}.crt").write_bytes(server_pem)
+    (certs / f"api.home-{server_serial}.key").write_bytes(server_key)
+    revoked_pem, revoked_key = generate_client_certificate(ca_cert, ca_key, "oldbob", key_size=2048)
+    revoked_serial = format(get_certificate_serial_number(revoked_pem), "x")
+    (certs / f"oldbob-{revoked_serial}.crt").write_bytes(revoked_pem)
+    (certs / f"oldbob-{revoked_serial}.key").write_bytes(revoked_key)
+    revoked_at = "2020-01-01T00:00:00+00:00"
+    (root / "index.json").write_text(
+        "["
+        "{"
+        f'"common_name":"alice","kind":"client","serial_number":"{serial}",'
+        f'"cert_path":"certs/alice-{serial}.crt","key_path":"certs/alice-{serial}.key",'
+        f'"not_valid_after":"{get_certificate_expiry(client_pem).isoformat()}",'
+        f'"fingerprint":"{get_certificate_fingerprint(client_pem)}","revoked_at":null'
+        "},"
+        "{"
+        f'"common_name":"api.home","kind":"server","serial_number":"{server_serial}",'
+        f'"cert_path":"certs/api.home-{server_serial}.crt",'
+        f'"key_path":"certs/api.home-{server_serial}.key",'
+        f'"not_valid_after":"{get_certificate_expiry(server_pem).isoformat()}",'
+        f'"fingerprint":"{get_certificate_fingerprint(server_pem)}","revoked_at":null'
+        "},"
+        "{"
+        f'"common_name":"oldbob","kind":"client","serial_number":"{revoked_serial}",'
+        f'"cert_path":"certs/oldbob-{revoked_serial}.crt",'
+        f'"key_path":"certs/oldbob-{revoked_serial}.key",'
+        f'"not_valid_after":"{get_certificate_expiry(revoked_pem).isoformat()}",'
+        f'"fingerprint":"{get_certificate_fingerprint(revoked_pem)}",'
+        f'"revoked_at":"{revoked_at}"'
+        "},"
+        "{"
+        '"common_name":"gone","kind":"client","serial_number":"dead",'
+        '"cert_path":"","key_path":"",'
+        '"not_valid_after":"2099-01-01T00:00:00+00:00",'
+        '"fingerprint":"bb",'
+        '"revoked_at":"2019-06-01T00:00:00+00:00"'
+        "}"
+        "]\n",
+        encoding="utf-8",
+    )
+
+    store = CertificateStore(root)
+    store.ensure_layout()
+
+    assert_that(store.ca_cert_path.is_file(), is_(True))
+    assert_that((root / "ca.crt").exists(), is_(False))
+    assert_that((root / "certs").exists(), is_(False))
+    entry = store.get_certificate("alice")
+    assert_that(entry, is_(not_none()))
+    live = cast(IssuedCertificate, entry)
+    assert_that(live.cert_path.startswith("clients/"), is_(True))
+    assert_that(live.key_path.startswith("clients/"), is_(True))
+    assert_that(store.read_certificate_pem(live), equal_to(client_pem))
+    assert_that(store.read_key_pem(live), equal_to(client_key))
+    server = store.get_certificate("api.home")
+    assert_that(server, is_(not_none()))
+    server_entry = cast(IssuedCertificate, server)
+    assert_that(server_entry.cert_path.startswith("servers/"), is_(True))
+    assert_that(server_entry.key_path.startswith("servers/"), is_(True))
+    assert_that((root / server_entry.cert_path).is_file(), is_(True))
+    assert_that((root / server_entry.key_path).is_file(), is_(True))
+    assert_that(store.read_key_pem(server_entry), equal_to(server_key))
+    revoked_listed = store.list_certificates(status="revoked")
+    assert_that(revoked_listed, has_length(2))
+    assert_that({e.common_name for e in revoked_listed}, equal_to({"gone", "oldbob"}))
+    gone = next(e for e in revoked_listed if e.common_name == "gone")
+    assert_that(gone.cert_path, equal_to(""))
+    assert_that(gone.revoked_at, equal_to("2019-06-01T00:00:00+00:00"))
+    assert_that(store.revoked_entries(), has_length(2))
+    assert_that(
+        {serial for serial, _ in store.revoked_entries()},
+        equal_to({int(revoked_serial, 16), int("dead", 16)}),
+    )
+
+    # First-touch has_ca/read_ca on a fresh flat store (no prior ensure_layout).
+    root_untouched = tmp_path / "legacy-first-touch"
+    root_untouched.mkdir()
+    (root_untouched / "ca.crt").write_bytes(ca_cert)
+    (root_untouched / "ca.key").write_bytes(ca_key)
+    (root_untouched / "index.json").write_text("[]\n", encoding="utf-8")
+    first_touch = CertificateStore(root_untouched)
+    assert_that(first_touch.has_ca(), is_(True))
+    assert_that(first_touch.read_ca()[0], equal_to(ca_cert))
+    assert_that(first_touch.ca_cert_path.is_file(), is_(True))
+    assert_that((root_untouched / "ca.crt").exists(), is_(False))
+    assert_that(
+        calling(first_touch.write_ca).with_args(*generate_ca_certificate(key_size=2048)),
+        raises(ValueError, "already exists"),
+    )
+
+    # Leave a root CRL and reopen so read_crl migrates without other touches.
+    root2 = tmp_path / "legacy-crl"
+    root2.mkdir()
+    (root2 / "ca.crt").write_bytes(ca_cert)
+    (root2 / "ca.key").write_bytes(ca_key)
+    (root2 / "crl.pem").write_bytes(b"legacy-crl")
+    (root2 / "index.json").write_text("[]\n", encoding="utf-8")
+    crl_store = CertificateStore(root2)
+    assert_that(crl_store.read_crl(), equal_to(b"legacy-crl"))
+    assert_that(crl_store.crl_path.is_file(), is_(True))
+    assert_that((root2 / "crl.pem").exists(), is_(False))
+
+
+def test_migrate_resumes_partial_layout(tmp_path: Path) -> None:
+    """Index+leaves typed with CA PEMs still at root — migration finishes."""
+    root = tmp_path / "partial"
+    root.mkdir()
+    ca_cert, ca_key = generate_ca_certificate(key_size=2048)
+    (root / "ca.crt").write_bytes(ca_cert)
+    (root / "ca.key").write_bytes(ca_key)
+    clients = root / "clients"
+    clients.mkdir()
+    client_pem, client_key = generate_client_certificate(ca_cert, ca_key, "alice", key_size=2048)
+    serial = format(get_certificate_serial_number(client_pem), "x")
+    (clients / f"alice-{serial}.crt").write_bytes(client_pem)
+    (clients / f"alice-{serial}.key").write_bytes(client_key)
+    ca_dir = root / "ca"
+    ca_dir.mkdir()
+    (ca_dir / "index.json").write_text(
+        "["
+        "{"
+        f'"common_name":"alice","kind":"client","serial_number":"{serial}",'
+        f'"cert_path":"clients/alice-{serial}.crt","key_path":"clients/alice-{serial}.key",'
+        f'"not_valid_after":"{get_certificate_expiry(client_pem).isoformat()}",'
+        f'"fingerprint":"{get_certificate_fingerprint(client_pem)}","revoked_at":null'
+        "}"
+        "]\n",
+        encoding="utf-8",
+    )
+    store = CertificateStore(root)
+    assert_that(store.has_ca(), is_(True))
+    entry = store.get_certificate("alice")
+    assert_that(entry, is_(not_none()))
+    assert_that(cast(IssuedCertificate, entry).cert_path.startswith("clients/"), is_(True))
+    assert_that(store.ca_cert_path.is_file(), is_(True))
+    assert_that((root / "ca.crt").exists(), is_(False))
+
+    # Mid-CA-move: ca.crt already under ca/, ca.key/crl.pem still at root.
+    root_mid = tmp_path / "partial-mid-ca"
+    root_mid.mkdir()
+    (root_mid / "ca").mkdir()
+    (root_mid / "ca" / "ca.crt").write_bytes(ca_cert)
+    (root_mid / "ca.key").write_bytes(ca_key)
+    (root_mid / "crl.pem").write_bytes(b"mid-crl")
+    (root_mid / "ca" / "index.json").write_text("[]\n", encoding="utf-8")
+    mid = CertificateStore(root_mid)
+    assert_that(mid.has_ca(), is_(True))
+    assert_that(mid.read_ca()[1], equal_to(ca_key))
+    assert_that(mid.read_crl(), equal_to(b"mid-crl"))
+    assert_that(mid.ca_key_path.is_file(), is_(True))
+    assert_that((root_mid / "ca.key").exists(), is_(False))
+    assert_that((root_mid / "crl.pem").exists(), is_(False))
+
+
+def test_migrate_rejects_key_path_outside_certs(tmp_path: Path) -> None:
+    root = tmp_path / "legacy"
+    root.mkdir()
+    ca_cert, ca_key = generate_ca_certificate(key_size=2048)
+    (root / "ca.crt").write_bytes(ca_cert)
+    (root / "ca.key").write_bytes(ca_key)
+    (root / "certs").mkdir()
+    (root / "index.json").write_text(
+        "["
+        "{"
+        '"common_name":"evil","kind":"client","serial_number":"1",'
+        '"cert_path":"certs/evil-1.crt","key_path":"keys/evil.key",'
+        '"not_valid_after":"2099-01-01T00:00:00+00:00",'
+        '"fingerprint":"aa","revoked_at":null'
+        "}"
+        "]\n",
+        encoding="utf-8",
+    )
+    store = CertificateStore(root)
+    assert_that(calling(store.ensure_layout), raises(ValueError, "certs/"))
+
+
+def test_migrate_rejects_path_traversal(tmp_path: Path) -> None:
+    root = tmp_path / "legacy"
+    root.mkdir()
+    ca_cert, ca_key = generate_ca_certificate(key_size=2048)
+    (root / "ca.crt").write_bytes(ca_cert)
+    (root / "ca.key").write_bytes(ca_key)
+    outside = tmp_path / "outside.crt"
+    outside.write_bytes(b"sentinel")
+    (root / "index.json").write_text(
+        "["
+        "{"
+        '"common_name":"evil","kind":"client","serial_number":"1",'
+        '"cert_path":"certs/../../outside.crt","key_path":"certs/evil-1.key",'
+        '"not_valid_after":"2099-01-01T00:00:00+00:00",'
+        '"fingerprint":"aa","revoked_at":null'
+        "}"
+        "]\n",
+        encoding="utf-8",
+    )
+    store = CertificateStore(root)
+    assert_that(calling(store.ensure_layout), raises(ValueError, "relative path"))
+    assert_that(outside.read_bytes(), equal_to(b"sentinel"))
+    assert_that((root / "ca.crt").is_file(), is_(True))
 
 
 def test_write_ca_refuses_overwrite_without_force(tmp_path: Path) -> None:
@@ -146,6 +444,10 @@ def test_revoke_and_delete_tombstone(tmp_path: Path) -> None:
     # Tombstone keeps serial for CRL regeneration.
     assert_that(store.revoked_entries(), has_length(1))
     assert_that(store.list_certificates(), has_length(0))
+    revoked_listed = store.list_certificates(status="revoked")
+    assert_that(revoked_listed, has_length(1))
+    assert_that(revoked_listed[0].common_name, equal_to("bob"))
+    assert_that(revoked_listed[0].cert_path, equal_to(""))
 
 
 def test_delete_force_active(tmp_path: Path) -> None:
@@ -178,14 +480,14 @@ def test_index_path_traversal_rejected(tmp_path: Path) -> None:
     store.write_ca(ca_cert, ca_key)
     store.index_path.write_text(
         '[{"common_name":"evil","kind":"client","serial_number":"1",'
-        '"cert_path":"../outside.crt","key_path":"certs/x.key",'
+        '"cert_path":"../outside.crt","key_path":"clients/x.key",'
         '"not_valid_after":"2099-01-01T00:00:00+00:00","fingerprint":"f","revoked_at":null}]\n',
         encoding="utf-8",
     )
     assert_that(calling(store.list_certificates), raises(ValueError, "relative path"))
     store.index_path.write_text(
         '[{"common_name":"evil","kind":"client","serial_number":"1",'
-        f'"cert_path":"{tmp_path / "abs.crt"}","key_path":"certs/x.key",'
+        f'"cert_path":"{tmp_path / "abs.crt"}","key_path":"clients/x.key",'
         '"not_valid_after":"2099-01-01T00:00:00+00:00","fingerprint":"f","revoked_at":null}]\n',
         encoding="utf-8",
     )
@@ -411,10 +713,10 @@ def test_add_certificate_rejects_symlink_escape(tmp_path: Path) -> None:
     store.write_ca(ca_cert, ca_key)
     outside = tmp_path / "outside.crt"
     outside.write_bytes(b"sentinel")
-    store.certs_dir.mkdir(exist_ok=True)
-    link = store.certs_dir / "alice-1.crt"
+    store.clients_dir.mkdir(exist_ok=True)
+    link = store.clients_dir / "alice-1.crt"
     link.symlink_to(outside)
-    (store.certs_dir / "alice-1.key").symlink_to(tmp_path / "outside.key")
+    (store.clients_dir / "alice-1.key").symlink_to(tmp_path / "outside.key")
     assert_that(
         calling(store.add_certificate).with_args(
             common_name="alice",

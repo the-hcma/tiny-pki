@@ -18,10 +18,10 @@ from tiny_pki.cli.main import main
 
 
 def test_completion_emits_a_script_per_shell(capsys: CaptureFixture[str]) -> None:
-    for shell, needle in (
-        ("bash", "complete -F _tiny_pki_completion tiny-pki"),
-        ("zsh", "_tiny-pki()"),
-        ("fish", "complete -c tiny-pki"),
+    for shell, needle, list_case in (
+        ("bash", "complete -F _tiny_pki_completion tiny-pki", "list) COMPREPLY="),
+        ("zsh", "_tiny-pki()", "list) _values 'target'"),
+        ("fish", "complete -c tiny-pki", "__fish_seen_subcommand_from list"),
     ):
         assert_that(run_completion([shell]), equal_to(0))
         out = capsys.readouterr().out
@@ -29,6 +29,10 @@ def test_completion_emits_a_script_per_shell(capsys: CaptureFixture[str]) -> Non
         assert_that(out, contains_string("tiny-pki"))
         assert_that(out, contains_string("--version"))
         assert_that(out, contains_string("init"))
+        assert_that(out, contains_string(list_case))
+        assert_that(out, contains_string("clients"))
+        assert_that(out, contains_string("servers"))
+        assert_that(out, contains_string("revoked"))
         assert_that(out, is_not(contains_string("Traceback")))
 
 

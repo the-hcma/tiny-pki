@@ -53,7 +53,8 @@ uv run tiny-pki --store ./stores/ca init --cn "Home CA"
 uv run tiny-pki --store ./stores/ca create client alice --days 730
 uv run tiny-pki --store ./stores/ca create server api.home --san api.home --san 192.168.1.10
 uv run tiny-pki --store ./stores/ca export p12 alice --password 'change-me'
-uv run tiny-pki --store ./stores/ca revoke alice   # regenerates stores/ca/crl.pem
+uv run tiny-pki --store ./stores/ca revoke alice   # regenerates stores/ca/ca/crl.pem
+uv run tiny-pki --store ./stores/ca list clients
 uv run tiny-pki --store ./stores/ca show certs
 ```
 
@@ -63,8 +64,28 @@ Or drop into the REPL (Vim keys by default; `edit-mode emacs` to switch):
 uv run tiny-pki --store ./stores/ca
 ```
 
-Point nginx `ssl_client_certificate` at `stores/ca/ca.crt` and `ssl_crl` at `stores/ca/crl.pem`
-for mTLS with revocation.
+Point nginx `ssl_client_certificate` at `stores/ca/ca/ca.crt` and `ssl_crl` at
+`stores/ca/ca/crl.pem` for mTLS with revocation.
+
+### Store layout
+
+```text
+$TINY_PKI_STORE/
+  ca/ca.crt  ca/ca.key  ca/crl.pem  ca/index.json
+  clients/{cn}-{serial}.{crt,key}
+  servers/{cn}-{serial}.{crt,key}
+  bundles/{cn}-{serial}.p12
+```
+
+List by category:
+
+```bash
+uv run tiny-pki --store ./stores/ca list
+uv run tiny-pki --store ./stores/ca list clients
+uv run tiny-pki --store ./stores/ca list servers
+uv run tiny-pki --store ./stores/ca list revoked
+uv run tiny-pki --store ./stores/ca list certs --json
+```
 
 ## Library
 
