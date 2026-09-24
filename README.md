@@ -18,8 +18,31 @@ Intended consumers:
 
 ```bash
 uv sync --group dev
+uv run tiny-pki --version   # tiny-pki <version> (<commit>)
 uv run tiny-pki --help
 ```
+
+### Shell completion
+
+`tiny-pki completion <bash|zsh|fish>` prints a completion script. Install it to
+the per-user completion dir (idempotent; `--force` to overwrite, `--json`
+reports the path):
+
+```bash
+tiny-pki completion bash --install
+tiny-pki completion zsh --install    # then put its dir on $fpath before compinit
+tiny-pki completion fish --install
+```
+
+Or place it yourself — bash-completion v2 lazy-loads this path (no rc edit):
+
+```bash
+tiny-pki completion bash > ~/.local/share/bash-completion/completions/tiny-pki.bash
+tiny-pki completion fish > ~/.config/fish/completions/tiny-pki.fish
+```
+
+Open a new shell afterwards. The script completes top-level flags and PKI
+verbs; keep `tiny-pki` on `PATH`.
 
 ## Quick start (CLI)
 

@@ -13,11 +13,12 @@ from prompt_toolkit.enums import EditingMode
 from prompt_toolkit.history import FileHistory, History, InMemoryHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 
-from tiny_pki import __version__
 from tiny_pki.cli.commands import COMMAND_HELP, COMMANDS, PKI_COMMANDS
 from tiny_pki.cli.completer import ReplCompleter
+from tiny_pki.cli.completion import run_completion
 from tiny_pki.cli.theme import Theme, stdout_color_enabled
 from tiny_pki.store import CertificateStore, require_store_path
+from tiny_pki.version import format_cli_version_line
 
 _HISTORY_PATH = Path.home() / ".cache" / "tiny-pki" / "history"
 
@@ -28,8 +29,11 @@ def main(argv: list[str] | None = None) -> None:
     args, rest = parser.parse_known_args(argv)
 
     if args.version:
-        print(__version__)
+        print(format_cli_version_line(prog="tiny-pki"))
         return
+
+    if rest and rest[0] == "completion":
+        raise SystemExit(run_completion(rest[1:]))
 
     theme = Theme(enabled=stdout_color_enabled(args.color))
     store_path = args.store or os.environ.get("TINY_PKI_STORE")
@@ -56,7 +60,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         prog="tiny-pki",
         description="Private CA toolkit: issue, show, revoke, delete certificates.",
     )
-    parser.add_argument("--version", action="store_true", help="Print package version and exit.")
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="Print package version and git commit, then exit.",
+    )
     parser.add_argument(
         "--store",
         metavar="DIR",
@@ -105,7 +113,7 @@ def _run_repl(*, store: CertificateStore | None, theme: Theme, edit_mode: str) -
         editing_mode=EditingMode.EMACS if edit_mode == "emacs" else EditingMode.VI,
     )
 
-    print(theme.dim(f"tiny-pki {__version__} — type help"), flush=True)
+    print(theme.dim(f"{format_cli_version_line(prog='tiny-pki')} — type help"), flush=True)
     if store is None:
         print(theme.warn("No --store / TINY_PKI_STORE set; write commands will fail."), flush=True)
     else:
@@ -181,6 +189,8 @@ def _dispatch_parts(
     if command == "help":
         _print_help(theme)
         return True
+    if command == "completion":
+        return run_completion(args) == 0
     if command == "clear":
         # Screen control is independent of color theming (--color never / NO_COLOR).
         if sys.stdout.isatty():
