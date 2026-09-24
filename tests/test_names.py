@@ -78,6 +78,8 @@ def test_normalize_san_entry_accepts(raw: str, expected: str) -> None:
         ("*.home", "at least two labels"),
         ("x.*.home", "entire leftmost label"),
         ("a*.lan.home", "letters, digits, and inner hyphens"),
+        ("faß.de", "encodes unambiguously"),
+        ("ſ.home", "encodes unambiguously"),
         ("under_score.home", "letters, digits, and inner hyphens"),
         ("-bad.home", "letters, digits, and inner hyphens"),
         ("a" * 64 + ".home", "letters, digits, and inner hyphens"),
@@ -207,6 +209,25 @@ def test_cli_cn_in_san_prompt(tmp_path: Path, capsys: CaptureFixture[str], monke
     _cli(store, "create", "server", "four.home", "--san", "alias4.home", "--no-cn-san", "--key-size", "2048")
     assert_that(_sans(store, "three.home"), has_item("three.home"))
     assert_that(_sans(store, "four.home"), equal_to(["alias4.home"]))
+
+
+@pytest.mark.parametrize(
+    ("words", "message"),
+    [
+        (("client", "alice", "--no-cn-san"), "only supported for server certificates"),
+        (("client", "alice", "--yes"), "only supported for server certificates"),
+        (("server", "api.home", "--no-cn-san"), "Expected --san with --no-cn-san"),
+    ],
+)
+def test_cli_cn_san_flag_misuse(
+    tmp_path: Path, capsys: CaptureFixture[str], words: tuple[str, ...], message: str
+) -> None:
+    store = tmp_path / "ca"
+    _cli(store, "init", "--key-size", "2048")
+    capsys.readouterr()
+    with pytest.raises(SystemExit):
+        _cli(store, "create", *words, "--key-size", "2048")
+    assert_that(capsys.readouterr().err, contains_string(message))
 
 
 def test_cli_non_interactive_adds_cn(tmp_path: Path, capsys: CaptureFixture[str], monkeypatch: MonkeyPatch) -> None:

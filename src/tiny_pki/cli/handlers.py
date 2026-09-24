@@ -139,8 +139,10 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
     name = positional[0]
     if len(positional) > 1:
         raise ValueError("Unexpected extra arguments")
-    if kind == "client" and (opts["multi"].get("san") or "no-cn-san" in opts["flags"]):
-        raise ValueError("--san / --no-cn-san are only supported for server certificates")
+    if kind == "client" and (opts["multi"].get("san") or {"no-cn-san", "yes"} & opts["flags"].keys()):
+        raise ValueError("--san / --no-cn-san / --yes are only supported for server certificates")
+    if "no-cn-san" in opts["flags"] and not opts["multi"].get("san"):
+        raise ValueError("Expected --san with --no-cn-san; without --san the CN is the only SAN")
     ca_cert, ca_key = store.read_ca()
     default_days = DEFAULT_CLIENT_VALIDITY_DAYS if kind == "client" else DEFAULT_SERVER_VALIDITY_DAYS
     days = _parse_days(opts["flags"].get("days", str(default_days)), default=default_days)

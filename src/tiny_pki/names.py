@@ -129,8 +129,16 @@ def _to_a_label(label: str, original: str) -> str:
     else:
         try:
             ascii_label = label.encode("idna").decode("ascii").lower()
+            round_trip = ascii_label.encode("ascii").decode("idna")
         except UnicodeError as exc:
             raise ValueError(f"Expected a valid internationalized DNS label, got {label!r} in {original!r}") from exc
+        if round_trip != unicodedata.normalize("NFC", label).lower():
+            # IDNA2003 nameprep maps e.g. "ß" to "ss", naming a different domain
+            # than the IDNA2008 A-label TLS clients compute.
+            raise ValueError(
+                f"Expected an internationalized label that encodes unambiguously, got {label!r} "
+                f"(IDNA2003 maps it to {ascii_label!r}) in {original!r}; pass the xn-- A-label instead"
+            )
     if not _LDH_LABEL.fullmatch(ascii_label):
         raise ValueError(
             f"Expected DNS labels of letters, digits, and inner hyphens (max 63 chars), got {label!r} in {original!r}"
