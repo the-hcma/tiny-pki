@@ -16,6 +16,8 @@ before calling — see [`security.md`](security.md)). Invalid input raises
 `organization_name=None` on leaves inherits the CA's `O`. `key_size` must be one of
 `ALLOWED_KEY_SIZES` (`2048`, `3072`, `4096`); `validity_days` must be positive.
 
+Every default and its rationale is listed in [`defaults.md`](defaults.md).
+
 Lifetime policy:
 
 - Leaves are capped at `MAX_SERVER_VALIDITY_DAYS` (200) / `MAX_CLIENT_VALIDITY_DAYS`
@@ -154,6 +156,12 @@ from tiny_pki.secrets import decrypt_private_key, encrypt_private_key, reencrypt
 
 The secret is used verbatim (no salt / KDF stretching), so it must already be
 high-entropy — e.g. Django's `SECRET_KEY`, not a human password.
+`encrypt_private_key` and `derive_fernet_key` raise `ValueError` for secrets
+shorter than `MIN_SECRET_LENGTH` (32 characters). The length check is a floor,
+not a strength test: 32 random characters are fine, 32 repeated letters are not.
+`decrypt_private_key` accepts any non-empty secret, so
+`reencrypt_private_key(token, old_weak, new_strong)` can move keys stored under
+an older, shorter secret.
 
 ## Optional: `tiny_pki.store`
 

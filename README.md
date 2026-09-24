@@ -81,7 +81,8 @@ print(get_certificate_fingerprint(client_cert))
 
 Every function returns bytes (or plain values); writing them to disk, a
 database, or nginx is up to you. See [`docs/api.md`](docs/api.md) for the full
-API and [`docs/security.md`](docs/security.md) for CA-key handling.
+API, [`docs/security.md`](docs/security.md) for CA-key handling, and
+[`docs/defaults.md`](docs/defaults.md) for every default and the reason behind it.
 
 ## Quick start (CLI)
 
@@ -110,7 +111,7 @@ re-run `tiny-pki --store ./stores/ca crl` (and reload nginx) before it expires.
 
 Server certificates default to 90 days and client certificates to 397 days
 (capped at 200 / 825; `--allow-long-validity` overrides). Re-issue with `create`
-before they expire — see [`docs/api.md`](docs/api.md#issue) for the rationale.
+before they expire — see [`docs/defaults.md`](docs/defaults.md#lifetimes) for the rationale.
 
 ### Store layout
 
