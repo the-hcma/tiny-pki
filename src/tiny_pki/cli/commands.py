@@ -14,10 +14,11 @@ COMMAND_HELP: tuple[tuple[str, str], ...] = (
     ("help", "Show this list."),
     ("init", "Create a new CA in --store."),
     ("inspect", "Inspect a store identity or PEM path."),
+    ("list", "List ca|clients|servers|revoked|certs (optional --json)."),
     ("quit", "Leave the REPL (same as exit)."),
     ("renew-crl", "Alias for crl."),
     ("revoke", "Revoke an identity and regenerate the CRL."),
-    ("show", "Show ca|certs|crl|<identity>."),
+    ("show", "Show ca|certs|crl|<identity> (aliases list categories)."),
 )
 
 COMMANDS: tuple[str, ...] = tuple(sorted({name for name, _ in COMMAND_HELP}))
@@ -30,6 +31,7 @@ PKI_COMMANDS: frozenset[str] = frozenset(
         "export",
         "init",
         "inspect",
+        "list",
         "renew-crl",
         "revoke",
         "show",

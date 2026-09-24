@@ -88,7 +88,16 @@ def test_argument_tokens_keep_fixed_when_store_set(tmp_path: Path) -> None:
     show_names = [c.text for c in completer.get_completions(Document("show ", 5), None)]
     assert_that(show_names, has_item("ca"))
     assert_that(show_names, has_item("certs"))
+    assert_that(show_names, has_item("clients"))
     assert_that(show_names, has_item("crl"))
+    assert_that(show_names, has_item("revoked"))
+    assert_that(show_names, has_item("servers"))
+    list_names = [c.text for c in completer.get_completions(Document("list ", 5), None)]
+    assert_that(list_names, has_item("ca"))
+    assert_that(list_names, has_item("certs"))
+    assert_that(list_names, has_item("clients"))
+    assert_that(list_names, has_item("revoked"))
+    assert_that(list_names, has_item("servers"))
 
 
 def test_version_flag(monkeypatch: MonkeyPatch) -> None:

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import cast
 
@@ -134,8 +135,8 @@ def test_init_create_show_revoke_delete_export(tmp_path: Path, capsys: CaptureFi
 
     out, err = _run(store, "revoke", "alice", capsys=capsys)
     assert_that(out, contains_string("revoked alice"))
-    assert_that((store / "crl.pem").is_file(), is_(True))
-    crl = x509.load_pem_x509_crl((store / "crl.pem").read_bytes())
+    assert_that((store / "ca" / "crl.pem").is_file(), is_(True))
+    crl = x509.load_pem_x509_crl((store / "ca" / "crl.pem").read_bytes())
     revoked_serials = [revoked.serial_number for revoked in crl]
     assert_that(
         revoked_serials,
@@ -159,6 +160,103 @@ def test_init_create_show_revoke_delete_export(tmp_path: Path, capsys: CaptureFi
     assert_that(out, contains_string("deleted api.example"))
 
 
+def test_list_filters_and_json(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    empty = tmp_path / "empty-store"
+    out, err = _run(empty, "list", capsys=capsys)
+    assert_that(err, equal_to(""))
+    assert_that(out, contains_string("(no CA)"))
+    assert_that(out, contains_string("clients 0"))
+    out, err = _run(empty, "list", "--json", capsys=capsys)
+    empty_summary = json.loads(out)
+    assert_that(empty_summary["ca_cn"], equal_to(None))
+    assert_that(empty_summary["clients"], equal_to(0))
+    assert_that(empty_summary["servers"], equal_to(0))
+    assert_that(empty_summary["revoked"], equal_to(0))
+
+    store = tmp_path / "ca"
+    _run(store, "init", "--cn", "Home CA", "--key-size", "2048", capsys=capsys)
+    _run(store, "create", "client", "alice", "--key-size", "2048", capsys=capsys)
+    _run(
+        store,
+        "create",
+        "server",
+        "api.home",
+        "--san",
+        "api.home",
+        "--key-size",
+        "2048",
+        capsys=capsys,
+    )
+    assert_that((store / "clients").is_dir(), is_(True))
+    assert_that((store / "servers").is_dir(), is_(True))
+    assert_that((store / "ca" / "ca.crt").is_file(), is_(True))
+
+    out, err = _run(store, "list", capsys=capsys)
+    assert_that(err, equal_to(""))
+    assert_that(out, contains_string("CA Home CA"))
+    assert_that(out, contains_string("clients 1"))
+    assert_that(out, contains_string("servers 1"))
+
+    out, err = _run(store, "list", "--json", capsys=capsys)
+    summary = json.loads(out)
+    assert_that(summary["ca_cn"], equal_to("Home CA"))
+    assert_that(summary["clients"], equal_to(1))
+    assert_that(summary["servers"], equal_to(1))
+    assert_that(summary["revoked"], equal_to(0))
+    assert_that("store" in summary, is_(True))
+
+    out, err = _run(store, "list", "ca", "--json", capsys=capsys)
+    ca_row = json.loads(out)
+    assert_that(ca_row["cn"], equal_to("Home CA"))
+    assert_that("fingerprint" in ca_row, is_(True))
+    assert_that("expires" in ca_row, is_(True))
+    assert_that(ca_row["cert_path"], equal_to(str((store / "ca" / "ca.crt").resolve())))
+    assert_that(ca_row["crl_path"], equal_to(str((store / "ca" / "crl.pem").resolve())))
+    assert_that(ca_row["index_path"], equal_to(str((store / "ca" / "index.json").resolve())))
+
+    out, err = _run(store, "list", "clients", capsys=capsys)
+    assert_that(out, contains_string("alice"))
+    assert_that(out, is_not(contains_string("api.home")))
+
+    out, err = _run(store, "list", "servers", capsys=capsys)
+    assert_that(out, contains_string("api.home"))
+    assert_that(out, is_not(contains_string("alice")))
+
+    _run(store, "revoke", "alice", capsys=capsys)
+    out, err = _run(store, "list", "revoked", capsys=capsys)
+    assert_that(out, contains_string("alice"))
+    assert_that(out, contains_string("revoked"))
+
+    out, err = _run(store, "list", "clients", "--json", capsys=capsys)
+    assert_that(err, equal_to(""))
+    assert_that(json.loads(out), equal_to([]))
+
+    out, err = _run(store, "list", "certs", "--json", capsys=capsys)
+    rows = json.loads(out)
+    assert_that(rows, has_length(2))
+    assert_that({row["cn"] for row in rows}, equal_to({"alice", "api.home"}))
+    for row in rows:
+        assert_that(row["store"], equal_to(str(store.resolve())))
+        assert_that(row["cert_path"].startswith(str(store.resolve())), is_(True))
+
+    out, err = _run(store, "show", "clients", capsys=capsys)
+    assert_that(out, contains_string("(none)"))
+
+    _run(store, "delete", "alice", capsys=capsys)
+    out, err = _run(store, "list", "revoked", "--json", capsys=capsys)
+    tombstones = json.loads(out)
+    assert_that(tombstones, has_length(1))
+    assert_that(tombstones[0]["cn"], equal_to("alice"))
+    assert_that(tombstones[0]["cert_path"], equal_to(""))
+    assert_that(tombstones[0]["store"], equal_to(str(store.resolve())))
+
+    out, err = _run(store, "list", "--json", capsys=capsys)
+    after_delete = json.loads(out)
+    assert_that(after_delete["clients"], equal_to(0))
+    assert_that(after_delete["servers"], equal_to(1))
+    assert_that(after_delete["revoked"], equal_to(1))
+
+
 def test_init_requires_store(capsys: CaptureFixture[str], monkeypatch: MonkeyPatch) -> None:
     monkeypatch.delenv("TINY_PKI_STORE", raising=False)
     with raises(SystemExit) as exited:
@@ -171,7 +269,7 @@ def test_init_requires_store(capsys: CaptureFixture[str], monkeypatch: MonkeyPat
 def test_inspect_pem_path(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
     store = tmp_path / "ca"
     _run(store, "init", "--key-size", "2048", capsys=capsys)
-    ca_path = store / "ca.crt"
+    ca_path = store / "ca" / "ca.crt"
     out, err = _run(store, "inspect", str(ca_path), capsys=capsys)
     assert_that(err, equal_to(""))
     assert_that(out, contains_string("fingerprint"))
@@ -220,7 +318,7 @@ def test_reissue_refreshes_crl(tmp_path: Path, capsys: CaptureFixture[str]) -> N
     first = cast(IssuedCertificate, cs.get_certificate("alice"))
     first_serial = int(first.serial_number, 16)
     _run(store, "create", "client", "alice", "--key-size", "2048", capsys=capsys)
-    crl = x509.load_pem_x509_crl((store / "crl.pem").read_bytes())
+    crl = x509.load_pem_x509_crl((store / "ca" / "crl.pem").read_bytes())
     revoked_serials = [revoked.serial_number for revoked in crl]
     assert_that(revoked_serials, has_item(first_serial))
     second = cs.get_certificate("alice")

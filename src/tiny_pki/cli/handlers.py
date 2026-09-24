@@ -6,6 +6,7 @@ Shell chrome lives in ``main``; this module implements init/create/show/…
 from __future__ import annotations
 
 import getpass
+import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,7 +29,7 @@ from tiny_pki import (
     get_certificate_subject,
 )
 from tiny_pki.cli.theme import Theme
-from tiny_pki.store import CertificateStore
+from tiny_pki.store import CertificateStore, IssuedCertificate
 
 
 class HandlerNotReadyError(RuntimeError):
@@ -58,6 +59,7 @@ def dispatch(
         "export": _cmd_export,
         "init": _cmd_init,
         "inspect": _cmd_inspect,
+        "list": _cmd_list,
         "revoke": _cmd_revoke,
         "show": _cmd_show,
     }
@@ -158,22 +160,8 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
 def _cmd_show(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     store = _require_store(store)
     target = args[0] if args else "certs"
-    if target == "ca":
-        ca_cert, _ = store.read_ca()
-        _print_cert_summary(ca_cert, theme)
-        return
-    if target == "certs":
-        entries = store.list_certificates()
-        if not entries:
-            print(theme.dim("(none)"))
-            return
-        for entry in entries:
-            status = "revoked" if entry.revoked_at else "active"
-            color = theme.error if entry.revoked_at else theme.ok
-            print(
-                f"{color(status)}  {entry.kind:6}  {entry.common_name}  "
-                f"serial={entry.serial_number}  expires={entry.not_valid_after}"
-            )
+    if target in {"ca", "certs", "clients", "servers", "revoked"}:
+        _cmd_list([target, *args[1:]], store=store, theme=theme)
         return
     if target == "crl":
         crl = store.read_crl()
@@ -191,6 +179,140 @@ def _cmd_show(args: list[str], *, store: CertificateStore | None, theme: Theme) 
     _print_cert_summary(cert_pem, theme)
     if entry.revoked_at:
         print(theme.error(f"revoked_at {entry.revoked_at}"))
+
+
+def _cmd_list(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
+    store = _require_store(store)
+    as_json = "--json" in args
+    positional = [a for a in args if a != "--json"]
+    target = positional[0] if positional else ""
+
+    if target in {"", "summary"}:
+        _list_summary(store, theme=theme, as_json=as_json)
+        return
+    if target == "ca":
+        _list_ca(store, theme=theme, as_json=as_json)
+        return
+    if target == "clients":
+        _print_entry_list(
+            store.list_certificates(kind="client", status="active"),
+            store=store,
+            theme=theme,
+            as_json=as_json,
+        )
+        return
+    if target == "servers":
+        _print_entry_list(
+            store.list_certificates(kind="server", status="active"),
+            store=store,
+            theme=theme,
+            as_json=as_json,
+        )
+        return
+    if target == "revoked":
+        _print_entry_list(
+            store.list_certificates(status="revoked"),
+            store=store,
+            theme=theme,
+            as_json=as_json,
+        )
+        return
+    if target == "certs":
+        _print_entry_list(
+            store.list_certificates(status="all"),
+            store=store,
+            theme=theme,
+            as_json=as_json,
+        )
+        return
+    raise ValueError(f"Expected list ca|clients|servers|revoked|certs, got {target!r}")
+
+
+def _list_ca(store: CertificateStore, *, theme: Theme, as_json: bool) -> None:
+    ca_cert, _ = store.read_ca()
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "cn": get_certificate_subject(ca_cert),
+                    "fingerprint": get_certificate_fingerprint(ca_cert),
+                    "expires": get_certificate_expiry(ca_cert).isoformat(),
+                    "cert_path": str(store.ca_cert_path),
+                    "crl_path": str(store.crl_path),
+                    "index_path": str(store.index_path),
+                },
+                sort_keys=True,
+            )
+        )
+        return
+    _print_cert_summary(ca_cert, theme)
+    print(theme.dim(f"cert {store.ca_cert_path}"))
+    print(theme.dim(f"crl  {store.crl_path}"))
+    print(theme.dim(f"index {store.index_path}"))
+
+
+def _list_summary(store: CertificateStore, *, theme: Theme, as_json: bool) -> None:
+    clients = store.list_certificates(kind="client", status="active")
+    servers = store.list_certificates(kind="server", status="active")
+    revoked = store.list_certificates(status="revoked")
+    ca_cn = get_certificate_subject(store.read_ca()[0]) if store.has_ca() else None
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "ca_cn": ca_cn,
+                    "clients": len(clients),
+                    "servers": len(servers),
+                    "revoked": len(revoked),
+                    "store": str(store.root),
+                },
+                sort_keys=True,
+            )
+        )
+        return
+    if ca_cn is None:
+        print(theme.dim("(no CA)"))
+    else:
+        print(theme.ok(f"CA {ca_cn}"))
+    print(theme.dim(f"clients {len(clients)}  servers {len(servers)}  revoked {len(revoked)}"))
+    print(theme.dim(f"store {store.root}"))
+
+
+def _print_entry_list(
+    entries: list[IssuedCertificate],
+    *,
+    store: CertificateStore,
+    theme: Theme,
+    as_json: bool,
+) -> None:
+    if as_json:
+        rows = [
+            {
+                "cn": e.common_name,
+                "kind": e.kind,
+                "serial": e.serial_number,
+                "fingerprint": e.fingerprint,
+                "expires": e.not_valid_after,
+                "status": "revoked" if e.revoked_at else "active",
+                "revoked_at": e.revoked_at,
+                "cert_path": str(store.root / e.cert_path) if e.cert_path else "",
+                "key_path": str(store.root / e.key_path) if e.key_path else "",
+                "store": str(store.root),
+            }
+            for e in entries
+        ]
+        print(json.dumps(rows, sort_keys=True))
+        return
+    if not entries:
+        print(theme.dim("(none)"))
+        return
+    for entry in entries:
+        status = "revoked" if entry.revoked_at else "active"
+        color = theme.error if entry.revoked_at else theme.ok
+        print(
+            f"{color(status)}  {entry.kind:6}  {entry.common_name}  "
+            f"serial={entry.serial_number}  expires={entry.not_valid_after}"
+        )
 
 
 def _cmd_inspect(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
