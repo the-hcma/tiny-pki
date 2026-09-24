@@ -1,0 +1,284 @@
+"""Shell completion script generation and optional per-user install."""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+from typing import NoReturn
+
+from tiny_pki.cli.commands import COMMANDS
+
+_PROG = "tiny-pki"
+_SHELLS = frozenset({"bash", "fish", "zsh"})
+_TOP_FLAGS = (
+    "--color",
+    "--edit-mode",
+    "--help",
+    "--store",
+    "--version",
+)
+_CREATE_ARGS = ("client", "server")
+_EDIT_MODE_ARGS = ("emacs", "vim")
+_EXPORT_ARGS = ("p12", "pem")
+_SHOW_ARGS = ("ca", "certs", "crl")
+
+
+def completion_install_path(shell: str) -> Path:
+    """Conventional per-user path for a shell's tiny-pki completion script."""
+    xdg_data = _xdg_base("XDG_DATA_HOME", Path.home() / ".local" / "share")
+    if shell == "bash":
+        return xdg_data / "bash-completion" / "completions" / "tiny-pki.bash"
+    if shell == "fish":
+        xdg_config = _xdg_base("XDG_CONFIG_HOME", Path.home() / ".config")
+        return xdg_config / "fish" / "completions" / "tiny-pki.fish"
+    return xdg_data / "zsh" / "site-functions" / "_tiny-pki"
+
+
+def completion_script(shell: str) -> str:
+    """Return a tab-completion script for ``bash``, ``zsh``, or ``fish``."""
+    if shell == "bash":
+        return _bash_script()
+    if shell == "fish":
+        return _fish_script()
+    if shell == "zsh":
+        return _zsh_script()
+    raise ValueError(f"unsupported shell: {shell!r} (expected bash, zsh, or fish)")
+
+
+def run_completion(argv: list[str]) -> int:
+    """Handle ``tiny-pki completion <shell> [--install] [--force] [--json]``.
+
+    Returns 0 on success, 2 on usage errors, 1 on install I/O failures.
+    """
+    try:
+        shell, install, force, as_json = _parse_completion_argv(argv)
+    except SystemExit as exc:
+        code = exc.code
+        return int(code) if isinstance(code, int) else 2
+    if force and not install:
+        _emit_error(
+            message="--force only applies with --install",
+            as_json=as_json,
+            hint="Pass --install, or drop --force.",
+        )
+        return 2
+
+    script = completion_script(shell)
+    if not script.endswith("\n"):
+        script += "\n"
+
+    if not install:
+        if as_json:
+            print(json.dumps({"shell": shell, "script": script}, sort_keys=True))
+        else:
+            sys.stdout.write(script)
+        return 0
+
+    path = completion_install_path(shell)
+    want = script.encode()
+
+    def _refuse_clobber() -> NoReturn:
+        _emit_error(
+            message=f"{path} already exists with different contents",
+            as_json=as_json,
+            hint="Re-run with --force to overwrite it.",
+        )
+        raise SystemExit(2)
+
+    try:
+        # Refuse symlinks (including dangling) so --force cannot rewrite a
+        # link target outside the conventional install path.
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            _emit_error(
+                message=f"{path} exists but is not a regular file",
+                as_json=as_json,
+                hint="Remove it (or point XDG_DATA_HOME/XDG_CONFIG_HOME elsewhere), then retry.",
+            )
+            return 1
+        current = path.read_bytes() if path.is_file() else None
+        if current == want:
+            action = "unchanged"
+        elif current is not None and not force:
+            _refuse_clobber()
+        elif force:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(want)
+            action = "written"
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with path.open("xb") as handle:
+                    handle.write(want)
+                action = "written"
+            except FileExistsError:
+                if path.read_bytes() != want:
+                    _refuse_clobber()
+                action = "unchanged"
+    except SystemExit as exc:
+        code = exc.code
+        return int(code) if isinstance(code, int) else 2
+    except OSError as exc:
+        _emit_error(
+            message=f"could not install the completion script to {path}: {exc}",
+            as_json=as_json,
+            hint="Ensure the path is a writable file (not a directory) that you own.",
+        )
+        return 1
+
+    if as_json:
+        print(json.dumps({"action": action, "path": str(path), "shell": shell}, sort_keys=True))
+    else:
+        lines = [f"{action}: {path}"]
+        if shell == "zsh":
+            lines.append(
+                f"  ensure {path.parent} is on $fpath before `compinit` (e.g. in ~/.zshrc), then open a new shell"
+            )
+        else:
+            lines.append("  open a new shell to pick it up")
+        print("\n".join(lines))
+    return 0
+
+
+def _bash_script() -> str:
+    cmds = " ".join(COMMANDS)
+    flags = " ".join(_TOP_FLAGS)
+    create = " ".join(_CREATE_ARGS)
+    edit = " ".join(_EDIT_MODE_ARGS)
+    export = " ".join(_EXPORT_ARGS)
+    show = " ".join(_SHOW_ARGS)
+    return f"""# tiny-pki bash completion — generated by `tiny-pki completion bash`
+_tiny_pki_completion() {{
+  local cur prev
+  cur="${{COMP_WORDS[COMP_CWORD]}}"
+  prev="${{COMP_WORDS[COMP_CWORD-1]}}"
+  local cmds="{cmds}"
+  local flags="{flags}"
+  case "$prev" in
+    --color) COMPREPLY=( $(compgen -W "auto always never" -- "$cur") ); return ;;
+    --edit-mode|edit-mode) COMPREPLY=( $(compgen -W "{edit}" -- "$cur") ); return ;;
+    --store) COMPREPLY=( $(compgen -d -- "$cur") ); return ;;
+    create) COMPREPLY=( $(compgen -W "{create}" -- "$cur") ); return ;;
+    export) COMPREPLY=( $(compgen -W "{export}" -- "$cur") ); return ;;
+    show) COMPREPLY=( $(compgen -W "{show}" -- "$cur") ); return ;;
+    completion) COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") ); return ;;
+  esac
+  if [[ "$cur" == -* ]]; then
+    COMPREPLY=( $(compgen -W "$flags" -- "$cur") )
+  else
+    COMPREPLY=( $(compgen -W "$cmds $flags" -- "$cur") )
+  fi
+}}
+complete -F _tiny_pki_completion {_PROG}
+"""
+
+
+def _emit_error(*, message: str, as_json: bool, hint: str | None = None) -> None:
+    if as_json:
+        payload: dict[str, object] = {"error": "usage_error", "message": message, "ok": False}
+        if hint:
+            payload["hint"] = hint
+        if "not a regular file" in message or "could not install" in message:
+            payload["error"] = "install_failed"
+        print(json.dumps(payload, sort_keys=True), file=sys.stderr)
+        return
+    print(message, file=sys.stderr)
+    if hint:
+        print(hint, file=sys.stderr)
+
+
+def _fish_script() -> str:
+    lines = [
+        "# tiny-pki fish completion — generated by `tiny-pki completion fish`",
+        f"complete -c {_PROG} -f",
+    ]
+    for flag in _TOP_FLAGS:
+        lines.append(f"complete -c {_PROG} -l {flag.lstrip('-')} -d '{flag}'")
+    for cmd in COMMANDS:
+        lines.append(f"complete -c {_PROG} -n '__fish_use_subcommand' -a {cmd}")
+    for arg in _CREATE_ARGS:
+        lines.append(f"complete -c {_PROG} -n '__fish_seen_subcommand_from create' -a {arg}")
+    for arg in _EXPORT_ARGS:
+        lines.append(f"complete -c {_PROG} -n '__fish_seen_subcommand_from export' -a {arg}")
+    for arg in _SHOW_ARGS:
+        lines.append(f"complete -c {_PROG} -n '__fish_seen_subcommand_from show' -a {arg}")
+    for arg in _EDIT_MODE_ARGS:
+        lines.append(f"complete -c {_PROG} -n '__fish_seen_subcommand_from edit-mode' -a {arg}")
+    for shell in sorted(_SHELLS):
+        lines.append(f"complete -c {_PROG} -n '__fish_seen_subcommand_from completion' -a {shell}")
+    return "\n".join(lines) + "\n"
+
+
+def _parse_completion_argv(argv: list[str]) -> tuple[str, bool, bool, bool]:
+    if not argv:
+        print(
+            "usage: tiny-pki completion <bash|zsh|fish> [--install] [--force] [--json]",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    shell = argv[0]
+    if shell not in _SHELLS:
+        print(f"unsupported shell: {shell!r} (expected bash, zsh, or fish)", file=sys.stderr)
+        raise SystemExit(2)
+    install = False
+    force = False
+    as_json = False
+    for token in argv[1:]:
+        if token == "--install":
+            install = True
+        elif token == "--force":
+            force = True
+        elif token == "--json":
+            as_json = True
+        else:
+            print(f"unexpected argument: {token!r}", file=sys.stderr)
+            raise SystemExit(2)
+    return shell, install, force, as_json
+
+
+def _xdg_base(var: str, default: Path) -> Path:
+    """XDG base dir from ``$var``, honoring the spec: a relative value is ignored."""
+    value = os.environ.get(var, "")
+    candidate = Path(value) if value else default
+    return candidate if candidate.is_absolute() else default
+
+
+def _zsh_script() -> str:
+    cmds = " ".join(COMMANDS)
+    flags = " ".join(_TOP_FLAGS)
+    create = " ".join(_CREATE_ARGS)
+    edit = " ".join(_EDIT_MODE_ARGS)
+    export = " ".join(_EXPORT_ARGS)
+    show = " ".join(_SHOW_ARGS)
+    # Function name must match the installed file (``_tiny-pki``) so zsh
+    # autoload from ``$fpath`` finds the right completer without a second
+    # ``compdef`` call.
+    return f"""#compdef {_PROG}
+# tiny-pki zsh completion — generated by `tiny-pki completion zsh`
+_tiny-pki() {{
+  local -a cmds flags
+  cmds=({cmds})
+  flags=({flags})
+  local context state state_descr line
+  typeset -A opt_args
+  _arguments -C \\
+    '1:command:->cmd' \\
+    '*::arg:->args'
+  case $state in
+    cmd)
+      _describe -t commands 'tiny-pki command' cmds
+      _describe -t options 'tiny-pki option' flags
+      ;;
+    args)
+      case $words[1] in
+        create) _values 'kind' {create} ;;
+        edit-mode) _values 'mode' {edit} ;;
+        export) _values 'format' {export} ;;
+        show) _values 'target' {show} ;;
+        completion) _values 'shell' bash zsh fish ;;
+      esac
+      ;;
+  esac
+}}
+"""

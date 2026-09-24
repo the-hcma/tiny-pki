@@ -4,6 +4,7 @@ from __future__ import annotations
 
 COMMAND_HELP: tuple[tuple[str, str], ...] = (
     ("clear", "Clear the terminal screen."),
+    ("completion", "Print or install bash/zsh/fish tab-completion scripts."),
     ("create", "Issue a certificate: create client|server <name> [options]."),
     ("crl", "Regenerate the CRL from revoked entries."),
     ("delete", "Remove a certificate from the store (revoked or --force)."),

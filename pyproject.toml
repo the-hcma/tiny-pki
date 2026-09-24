@@ -49,6 +49,9 @@ Homepage = "https://github.com/the-hcma/tiny-pki"
 Repository = "https://github.com/the-hcma/tiny-pki"
 Issues = "https://github.com/the-hcma/tiny-pki/issues"
 
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/tiny_pki"]
 
@@ -76,6 +79,7 @@ known-first-party = ["tiny_pki"]
 
 [tool.pyright]
 include = ["src", "tests"]
+exclude = ["hatch_build.py"]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 

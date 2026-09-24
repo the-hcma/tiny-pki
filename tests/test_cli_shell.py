@@ -14,6 +14,7 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.history import InMemoryHistory
 from pytest import CaptureFixture, MonkeyPatch, raises
 
+from tiny_pki import version as version_module
 from tiny_pki.cli import main as main_mod
 from tiny_pki.cli.commands import COMMANDS, PKI_COMMANDS
 from tiny_pki.cli.completer import ArgCtx, CmdCtx, ReplCompleter, parse_completion_buffer
@@ -90,11 +91,14 @@ def test_argument_tokens_keep_fixed_when_store_set(tmp_path: Path) -> None:
     assert_that(show_names, has_item("crl"))
 
 
-def test_version_flag() -> None:
+def test_version_flag(monkeypatch: MonkeyPatch) -> None:
+    version_module.get_build_info.cache_clear()
+    monkeypatch.setenv("TINY_PKI_GIT_SHA", "cafebabe0000")
     buf = StringIO()
     with redirect_stdout(buf):
         main(["--version"])
-    assert_that(buf.getvalue().strip(), equal_to("0.1.0"))
+    assert_that(buf.getvalue().strip(), equal_to("tiny-pki 0.1.0 (cafebabe0000)"))
+    version_module.get_build_info.cache_clear()
 
 
 def test_one_shot_help() -> None:
