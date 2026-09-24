@@ -8,14 +8,16 @@ import socket
 import ssl
 import threading
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import time_machine
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, pkcs12
 from cryptography.x509.oid import ExtendedKeyUsageOID
 from hamcrest import (
+    any_of,
     assert_that,
     contains_inanyorder,
     contains_string,
@@ -37,6 +39,7 @@ from tiny_pki import (
     generate_crl,
     generate_pkcs12,
     generate_server_certificate,
+    get_certificate_expiry,
     get_certificate_fingerprint,
     get_certificate_sans,
     get_certificate_serial_number,
@@ -669,3 +672,76 @@ def test_pkcs12_roundtrip_handshakes(tmp_path: Path) -> None:
         ),
     )
     assert_that(ok, is_(True), f"PKCS#12 client handshake failed: {errors}")
+
+
+def test_expired_client_leaf_is_rejected(tmp_path: Path) -> None:
+    """Expired client leaf fails mTLS; a still-valid client from the same CA works.
+
+    Issue the short-lived client under a frozen past clock so its ``notAfter`` is
+    already behind wall-clock when OpenSSL verifies (stdlib TLS uses OS time).
+    """
+    past = datetime.now(UTC) - timedelta(days=10)
+    with time_machine.travel(past, tick=False):
+        ca_cert, ca_key = generate_ca_certificate("Expiry CA", key_size=2048, validity_days=3650)
+        expired_client, expired_key = generate_client_certificate(
+            ca_cert,
+            ca_key,
+            "stale",
+            key_size=2048,
+            validity_days=1,
+        )
+
+    assert_that(get_certificate_expiry(expired_client), is_not(none()))
+    assert_that(get_certificate_expiry(expired_client) < datetime.now(UTC), is_(True))
+
+    server_pem, server_key_pem = generate_server_certificate(
+        ca_cert,
+        ca_key,
+        "localhost",
+        ["localhost", "127.0.0.1"],
+        key_size=2048,
+    )
+    fresh_client, fresh_key = generate_client_certificate(ca_cert, ca_key, "fresh", key_size=2048)
+    crl = generate_crl(ca_cert, ca_key, [])
+
+    server_cert, server_key = _write_pair(tmp_path, "server", server_pem, server_key_pem)
+    stale_cert, stale_key = _write_pair(tmp_path, "stale", expired_client, expired_key)
+    fresh_cert, fresh_key_path = _write_pair(tmp_path, "fresh", fresh_client, fresh_key)
+    trust = _trust_bundle(tmp_path, "trust.pem", ca_cert, crl)
+
+    ok_stale, stale_errors = _handshake(
+        server_ctx=_server_context(
+            server_cert=server_cert,
+            server_key=server_key,
+            trust=trust,
+            check_crl=True,
+        ),
+        client_ctx=_client_context(
+            client_cert=stale_cert,
+            client_key=stale_key,
+            trust=trust,
+            check_crl=True,
+        ),
+    )
+    assert_that(ok_stale, is_(False), f"expired client should fail: {stale_errors}")
+    joined = "".join(stale_errors).lower()
+    assert_that(
+        joined,
+        any_of(contains_string("expir"), contains_string("certificate verify failed")),
+    )
+
+    ok_fresh, fresh_errors = _handshake(
+        server_ctx=_server_context(
+            server_cert=server_cert,
+            server_key=server_key,
+            trust=trust,
+            check_crl=True,
+        ),
+        client_ctx=_client_context(
+            client_cert=fresh_cert,
+            client_key=fresh_key_path,
+            trust=trust,
+            check_crl=True,
+        ),
+    )
+    assert_that(ok_fresh, is_(True), f"fresh client should succeed: {fresh_errors}")
