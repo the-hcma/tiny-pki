@@ -5,7 +5,10 @@ settings or environment variables.
 
 The Fernet key is derived with a single SHA-256 of the secret (urlsafe
 base64). That is intentional for explicit-secret callers that already
-manage secret strength; it is not a password-hashing KDF.
+manage secret strength; it is not a password-hashing KDF. Encrypting
+requires a secret of at least ``MIN_SECRET_LENGTH`` characters; decrypting
+accepts any non-empty secret so keys stored under a weaker one can still be
+rotated with :func:`reencrypt_private_key`.
 """
 
 from __future__ import annotations
@@ -15,6 +18,8 @@ import hashlib
 
 from cryptography.fernet import Fernet
 
+MIN_SECRET_LENGTH = 32
+
 
 def decrypt_private_key(encrypted_data: bytes, secret: str) -> bytes:
     """Decrypt a Fernet token produced by :func:`encrypt_private_key`."""
@@ -23,14 +28,14 @@ def decrypt_private_key(encrypted_data: bytes, secret: str) -> bytes:
 
 
 def derive_fernet_key(secret: str) -> bytes:
-    """Derive a Fernet-compatible key from an arbitrary secret string."""
-    _require_secret(secret)
+    """Derive a Fernet-compatible key from a high-entropy secret string."""
+    _require_strong_secret(secret)
     return _derive_fernet_key(secret)
 
 
 def encrypt_private_key(pem_data: bytes, secret: str) -> bytes:
     """Encrypt PEM private-key bytes for storage at rest."""
-    _require_secret(secret)
+    _require_strong_secret(secret)
     if not pem_data:
         raise ValueError("Expected non-empty pem_data")
     return Fernet(_derive_fernet_key(secret)).encrypt(pem_data)
@@ -50,3 +55,9 @@ def _derive_fernet_key(secret: str) -> bytes:
 def _require_secret(secret: str) -> None:
     if not secret or not secret.strip():
         raise ValueError("Expected a non-empty secret")
+
+
+def _require_strong_secret(secret: str) -> None:
+    _require_secret(secret)
+    if len(secret) < MIN_SECRET_LENGTH:
+        raise ValueError(f"Expected a secret of at least {MIN_SECRET_LENGTH} characters, got {len(secret)}")

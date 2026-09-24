@@ -1,6 +1,6 @@
 """Shared constants for certificate issuance.
 
-Validity limits follow current industry guidance (see ``docs/api.md`` § Issue):
+Validity limits follow current industry guidance (see ``docs/defaults.md``):
 CA/Browser Forum SC-081 caps public TLS server certificates at 200 days from
 2026-03-15, Let's Encrypt issues 90-day certificates, and Apple platforms reject
 TLS server certificates valid for more than 825 days even from private CAs.
