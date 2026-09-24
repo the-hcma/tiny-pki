@@ -13,9 +13,11 @@ from pathlib import Path
 
 import time_machine
 from cryptography import x509
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, pkcs12
-from cryptography.x509.oid import ExtendedKeyUsageOID
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from hamcrest import (
     any_of,
     assert_that,
@@ -46,6 +48,7 @@ from tiny_pki import (
     get_certificate_subject,
     is_certificate_self_signed,
 )
+from tiny_pki._rsa import load_rsa_private_key
 from tiny_pki.cli.main import main
 from tiny_pki.store import CertificateStore
 
@@ -745,3 +748,65 @@ def test_expired_client_leaf_is_rejected(tmp_path: Path) -> None:
         ),
     )
     assert_that(ok_fresh, is_(True), f"fresh client should succeed: {fresh_errors}")
+
+
+def test_name_constrained_ca_handshakes_and_rejects_rogue_leaf(tmp_path: Path) -> None:
+    """OpenSSL honors the CA's Name Constraints: in-scope leaves work, out-of-scope fail.
+
+    The rogue leaf is signed directly with the CA key, bypassing tiny-pki's own
+    issuance check, to prove relying parties enforce the constraint.
+    """
+    ca_cert, ca_key = generate_ca_certificate(
+        "Constrained CA", key_size=2048, permitted_subtrees=["localhost", "127.0.0.0/8"]
+    )
+    server_pem, server_key_pem = generate_server_certificate(
+        ca_cert, ca_key, "localhost", ["localhost", "127.0.0.1"], key_size=2048
+    )
+    client_pem, client_key_pem = generate_client_certificate(ca_cert, ca_key, "alice", key_size=2048)
+    trust = _trust_bundle(tmp_path, "trust.pem", ca_cert, generate_crl(ca_cert, ca_key, []))
+    client_cert, client_key = _write_pair(tmp_path, "client", client_pem, client_key_pem)
+
+    def attempt(server_cert_pem: bytes, server_key: bytes, *, check_hostname: bool) -> tuple[bool, list[str]]:
+        cert_path, key_path = _write_pair(tmp_path, "server", server_cert_pem, server_key)
+        return _handshake(
+            server_ctx=_server_context(server_cert=cert_path, server_key=key_path, trust=trust, check_crl=True),
+            client_ctx=_client_context(
+                client_cert=client_cert,
+                client_key=client_key,
+                trust=trust,
+                check_crl=True,
+                check_hostname=check_hostname,
+            ),
+        )
+
+    ok, errors = attempt(server_pem, server_key_pem, check_hostname=True)
+    assert_that(ok, is_(True), f"in-scope server should succeed: {errors}")
+
+    rogue_pem, rogue_key_pem = _sign_rogue_server_leaf(ca_cert, ca_key, "evil.example")
+    ok, errors = attempt(rogue_pem, rogue_key_pem, check_hostname=False)
+    assert_that(ok, is_(False), f"out-of-scope server should fail: {errors}")
+    assert_that(
+        "".join(errors).lower(),
+        any_of(contains_string("subtree"), contains_string("certificate verify failed")),
+    )
+
+
+def _sign_rogue_server_leaf(ca_cert_pem: bytes, ca_key_pem: bytes, dns_name: str) -> tuple[bytes, bytes]:
+    ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
+    ca_key = load_rsa_private_key(ca_key_pem)
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    now = datetime.now(UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, dns_name)]))
+        .issuer_name(ca_cert.subject)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - timedelta(minutes=5))
+        .not_valid_after(now + timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(dns_name)]), critical=False)
+        .sign(ca_key, hashes.SHA256())
+    )
+    return cert.public_bytes(Encoding.PEM), _pem_from_private_key(key)

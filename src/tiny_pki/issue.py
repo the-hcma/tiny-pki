@@ -6,6 +6,7 @@ Extracted and generalized from ``the-hcma/my-tracks`` ``app/pki.py`` (MIT).
 from __future__ import annotations
 
 import ipaddress
+import re
 import warnings
 from datetime import UTC, datetime, timedelta
 from typing import Literal
@@ -34,6 +35,7 @@ from tiny_pki.names import (
     MAX_COMMON_NAME_LENGTH,
     MAX_ORGANIZATION_NAME_LENGTH,
     common_name_as_san,
+    normalize_dns_name,
     normalize_san_entries,
     normalize_subject_attribute,
 )
@@ -45,8 +47,16 @@ def generate_ca_certificate(
     organization_name: str = DEFAULT_ORGANIZATION_NAME,
     validity_days: int = DEFAULT_CA_VALIDITY_DAYS,
     key_size: int = DEFAULT_CA_KEY_SIZE,
+    permitted_subtrees: list[str] | None = None,
 ) -> tuple[bytes, bytes]:
     """Generate a self-signed CA certificate and private key.
+
+    The CA may only sign leaves (``BasicConstraints(path_length=0)``).
+    ``permitted_subtrees`` optionally restricts it with a critical Name Constraints
+    extension: DNS suffixes (``"home"`` permits ``home`` and ``*.home``) and IP
+    networks (``"192.168.0.0/16"``; a bare IP means a single host). RFC 5280
+    constraints only apply to the name types listed, so include IP ranges too if
+    leaves will carry IP SANs.
 
     The validity window is backdated by ``CLOCK_SKEW_BACKDATE`` so relying parties
     with slightly slow clocks accept the certificate immediately; the encoded
@@ -56,8 +66,9 @@ def generate_ca_certificate(
         Tuple of ``(certificate_pem, private_key_pem)``.
 
     Raises:
-        ValueError: If ``key_size`` is not in ``ALLOWED_KEY_SIZES`` or a name is
-            empty, too long, or contains control characters.
+        ValueError: If ``key_size`` is not in ``ALLOWED_KEY_SIZES``, a name is
+            empty, too long, or contains control characters, or a permitted subtree
+            is invalid.
     """
     common_name = normalize_subject_attribute(common_name, "common_name", max_length=MAX_COMMON_NAME_LENGTH)
     organization_name = normalize_subject_attribute(
@@ -65,6 +76,7 @@ def generate_ca_certificate(
     )
     _require_key_size(key_size)
     _require_validity_days(validity_days)
+    subtrees = [_permitted_subtree(entry) for entry in permitted_subtrees or []]
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
     subject = issuer = x509.Name(
@@ -74,15 +86,19 @@ def generate_ca_certificate(
         ]
     )
     not_before, not_after = _validity_window(validity_days)
+    builder = x509.CertificateBuilder()
+    if subtrees:
+        builder = builder.add_extension(
+            x509.NameConstraints(permitted_subtrees=subtrees, excluded_subtrees=None), critical=True
+        )
     cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
+        builder.subject_name(subject)
         .issuer_name(issuer)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(not_before)
         .not_valid_after(not_after)
-        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
         .add_extension(
             x509.KeyUsage(
                 digital_signature=True,
@@ -132,6 +148,7 @@ def generate_client_certificate(
     ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
     ca_key = load_rsa_private_key(ca_key_pem)
     org = _leaf_organization(ca_cert, organization_name)
+    _enforce_name_constraints(ca_cert, common_name=common_name, sans=[])
     not_before, not_after = _leaf_validity_window(
         ca_cert, validity_days, kind="client", allow_long_validity=allow_long_validity
     )
@@ -225,6 +242,7 @@ def generate_server_certificate(
     ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
     ca_key = load_rsa_private_key(ca_key_pem)
     org = _leaf_organization(ca_cert, organization_name)
+    _enforce_name_constraints(ca_cert, common_name=common_name, sans=sans)
     not_before, not_after = _leaf_validity_window(
         ca_cert, validity_days, kind="server", allow_long_validity=allow_long_validity
     )
@@ -281,6 +299,76 @@ def generate_server_certificate(
     return _pem_pair(cert, server_key)
 
 
+_CN_DNS_ID = re.compile(r"^[a-z0-9_.-]+$")
+
+
+def _address_in(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    network: ipaddress.IPv4Network | ipaddress.IPv6Network,
+) -> bool:
+    return address.version == network.version and int(address) & int(network.netmask) == int(network.network_address)
+
+
+def _cn_dns_id(common_name: str) -> str | None:
+    """Return the CN as OpenSSL's name-constraint check sees it, or ``None`` if it skips it.
+
+    With no DNS SAN, OpenSSL checks a dotted CN made of letters, digits, ``-``,
+    ``_`` and ``.`` (IP literals included) against the DNS constraints.
+    """
+    text = common_name.strip().lower().removesuffix(".")
+    if "." not in text:
+        return None
+    try:
+        return normalize_dns_name(text)
+    except ValueError:
+        return text if _CN_DNS_ID.fullmatch(text) else None
+
+
+def _dns_within(host: str, root: str) -> bool:
+    """Match like OpenSSL: ``.example.com`` covers subdomains only, ``example.com`` also the apex."""
+    root = root.lower()
+    if root.startswith("."):
+        return host.endswith(root)
+    return host == root or host.endswith("." + root)
+
+
+def _enforce_name_constraints(ca_cert: x509.Certificate, *, common_name: str, sans: list[str]) -> None:
+    """Refuse leaves the CA's Name Constraints would make relying parties reject."""
+    try:
+        constraints = ca_cert.extensions.get_extension_for_class(x509.NameConstraints).value
+    except x509.ExtensionNotFound:
+        return
+    dns_names: list[str] = []
+    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for entry in sans:
+        try:
+            addresses.append(ipaddress.ip_address(entry))
+        except ValueError:
+            dns_names.append(entry)
+    cn_dns_id = _cn_dns_id(common_name) if not dns_names else None
+    if cn_dns_id is not None:
+        dns_names.append(cn_dns_id)
+    permitted = list(constraints.permitted_subtrees or [])
+    excluded = list(constraints.excluded_subtrees or [])
+    permitted_roots = [str(g.value) for g in permitted if isinstance(g, x509.DNSName)]
+    excluded_roots = [str(g.value) for g in excluded if isinstance(g, x509.DNSName)]
+    permitted_networks = [ipaddress.ip_network(g.value) for g in permitted if isinstance(g, x509.IPAddress)]
+    excluded_networks = [ipaddress.ip_network(g.value) for g in excluded if isinstance(g, x509.IPAddress)]
+    for name in dns_names:
+        host = name.removeprefix("*.")
+        if permitted_roots and not any(_dns_within(host, root) for root in permitted_roots):
+            raise ValueError(f"Expected DNS name within the CA's permitted names {permitted_roots}, got {name!r}")
+        if any(_dns_within(host, root) for root in excluded_roots):
+            raise ValueError(f"Expected DNS name outside the CA's excluded names {excluded_roots}, got {name!r}")
+    for address in addresses:
+        if permitted_networks and not any(_address_in(address, network) for network in permitted_networks):
+            permitted_text = [str(n) for n in permitted_networks]
+            raise ValueError(f"Expected IP address within the CA's permitted networks {permitted_text}, got {address}")
+        if any(_address_in(address, network) for network in excluded_networks):
+            excluded_text = [str(n) for n in excluded_networks]
+            raise ValueError(f"Expected IP address outside the CA's excluded networks {excluded_text}, got {address}")
+
+
 def _leaf_organization(ca_cert: x509.Certificate, organization_name: str | None) -> str:
     """Return the leaf O: explicit value, else the CA's O, else the default."""
     if organization_name is not None:
@@ -332,6 +420,22 @@ def _pem_pair(cert: x509.Certificate, key: rsa.RSAPrivateKey) -> tuple[bytes, by
         serialization.NoEncryption(),
     )
     return cert_pem, key_pem
+
+
+def _permitted_subtree(entry: str) -> x509.GeneralName:
+    text = entry.strip()
+    if not text:
+        raise ValueError("Expected a non-empty permitted subtree")
+    if "://" in text:
+        raise ValueError(f"Expected a DNS suffix or IP network, not a URL, got {entry!r}")
+    try:
+        return x509.IPAddress(ipaddress.ip_network(text, strict=True))
+    except ValueError as exc:
+        if "/" in text:
+            raise ValueError(f"Expected an IP network without host bits (e.g. 192.168.0.0/16), got {entry!r}") from exc
+    if "*" in text:
+        raise ValueError(f"Expected a DNS suffix without wildcards (e.g. home), got {entry!r}")
+    return x509.DNSName(normalize_dns_name(text.lstrip(".")))
 
 
 def _require_key_size(key_size: int) -> None:
