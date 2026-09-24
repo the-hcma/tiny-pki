@@ -30,6 +30,13 @@ from tiny_pki.constants import (
     MAX_SERVER_VALIDITY_DAYS,
 )
 from tiny_pki.errors import TinyPkiWarning
+from tiny_pki.names import (
+    MAX_COMMON_NAME_LENGTH,
+    MAX_ORGANIZATION_NAME_LENGTH,
+    common_name_as_san,
+    normalize_san_entries,
+    normalize_subject_attribute,
+)
 
 
 def generate_ca_certificate(
@@ -49,10 +56,13 @@ def generate_ca_certificate(
         Tuple of ``(certificate_pem, private_key_pem)``.
 
     Raises:
-        ValueError: If ``key_size`` is not in ``ALLOWED_KEY_SIZES`` or names are empty.
+        ValueError: If ``key_size`` is not in ``ALLOWED_KEY_SIZES`` or a name is
+            empty, too long, or contains control characters.
     """
-    _require_non_empty(common_name, "common_name")
-    _require_non_empty(organization_name, "organization_name")
+    common_name = normalize_subject_attribute(common_name, "common_name", max_length=MAX_COMMON_NAME_LENGTH)
+    organization_name = normalize_subject_attribute(
+        organization_name, "organization_name", max_length=MAX_ORGANIZATION_NAME_LENGTH
+    )
     _require_key_size(key_size)
     _require_validity_days(validity_days)
 
@@ -111,26 +121,21 @@ def generate_client_certificate(
     back to ``DEFAULT_ORGANIZATION_NAME`` if the CA has no O attribute.
 
     Raises:
-        ValueError: If ``validity_days`` exceeds ``MAX_CLIENT_VALIDITY_DAYS`` without
-            ``allow_long_validity=True``, or the certificate would outlive the CA.
+        ValueError: If a name is invalid, ``validity_days`` exceeds
+            ``MAX_CLIENT_VALIDITY_DAYS`` without ``allow_long_validity=True``, or the
+            certificate would outlive the CA.
     """
-    _require_non_empty(common_name, "common_name")
+    common_name = normalize_subject_attribute(common_name, "common_name", max_length=MAX_COMMON_NAME_LENGTH)
     _require_key_size(key_size)
     _require_validity_days(validity_days)
 
     ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
     ca_key = load_rsa_private_key(ca_key_pem)
+    org = _leaf_organization(ca_cert, organization_name)
     not_before, not_after = _leaf_validity_window(
         ca_cert, validity_days, kind="client", allow_long_validity=allow_long_validity
     )
     client_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
-
-    org = organization_name
-    if org is None:
-        ca_org_attrs = ca_cert.subject.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)
-        org = str(ca_org_attrs[0].value) if ca_org_attrs else DEFAULT_ORGANIZATION_NAME
-    else:
-        _require_non_empty(org, "organization_name")
 
     subject = x509.Name(
         [
@@ -185,38 +190,45 @@ def generate_server_certificate(
     validity_days: int = DEFAULT_SERVER_VALIDITY_DAYS,
     key_size: int = DEFAULT_LEAF_KEY_SIZE,
     allow_long_validity: bool = False,
+    include_common_name_in_sans: bool = True,
 ) -> tuple[bytes, bytes]:
     """Generate a server (SERVER_AUTH) certificate signed by the given CA.
 
-    ``san_entries`` must contain at least one DNS name or IP address.
+    ``san_entries`` must contain at least one DNS name or IP address; entries are
+    normalized (see :func:`tiny_pki.names.normalize_san_entries`). Clients ignore
+    the CN, so when ``common_name`` is itself a valid host/IP that is missing from
+    ``san_entries`` it is appended (with a ``TinyPkiWarning``) unless
+    ``include_common_name_in_sans=False``.
 
     Raises:
-        ValueError: If ``validity_days`` exceeds ``MAX_SERVER_VALIDITY_DAYS`` without
-            ``allow_long_validity=True``, or the certificate would outlive the CA.
+        ValueError: If a name or SAN entry is invalid, ``validity_days`` exceeds
+            ``MAX_SERVER_VALIDITY_DAYS`` without ``allow_long_validity=True``, or the
+            certificate would outlive the CA.
 
     Warns:
-        TinyPkiWarning: When an override exceeds ``APPLE_MAX_SERVER_VALIDITY_DAYS``
-            (Apple platforms reject such server certificates).
+        TinyPkiWarning: When the CN is added to the SANs, or an override exceeds
+            ``APPLE_MAX_SERVER_VALIDITY_DAYS`` (Apple platforms reject it).
     """
-    _require_non_empty(common_name, "common_name")
+    common_name = normalize_subject_attribute(common_name, "common_name", max_length=MAX_COMMON_NAME_LENGTH)
     _require_key_size(key_size)
     _require_validity_days(validity_days)
-    if not san_entries:
-        raise ValueError("Expected at least one SAN entry, got empty list")
+    sans = normalize_san_entries(san_entries)
+    cn_san = common_name_as_san(common_name)
+    if include_common_name_in_sans and cn_san is not None and cn_san not in sans:
+        sans.append(cn_san)
+        warnings.warn(
+            f"Added common_name {common_name!r} to the SANs as {cn_san!r} (TLS clients ignore the CN)",
+            TinyPkiWarning,
+            stacklevel=2,
+        )
 
     ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
     ca_key = load_rsa_private_key(ca_key_pem)
+    org = _leaf_organization(ca_cert, organization_name)
     not_before, not_after = _leaf_validity_window(
         ca_cert, validity_days, kind="server", allow_long_validity=allow_long_validity
     )
     server_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
-
-    org = organization_name
-    if org is None:
-        ca_org_attrs = ca_cert.subject.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)
-        org = str(ca_org_attrs[0].value) if ca_org_attrs else DEFAULT_ORGANIZATION_NAME
-    else:
-        _require_non_empty(org, "organization_name")
 
     subject = x509.Name(
         [
@@ -225,10 +237,9 @@ def generate_server_certificate(
         ]
     )
     san_objects: list[x509.GeneralName] = []
-    for entry in san_entries:
+    for entry in sans:
         try:
-            addr = ipaddress.ip_address(entry)
-            san_objects.append(x509.IPAddress(addr))
+            san_objects.append(x509.IPAddress(ipaddress.ip_address(entry)))
         except ValueError:
             san_objects.append(x509.DNSName(entry))
 
@@ -268,6 +279,16 @@ def generate_server_certificate(
         .sign(ca_key, hashes.SHA256())
     )
     return _pem_pair(cert, server_key)
+
+
+def _leaf_organization(ca_cert: x509.Certificate, organization_name: str | None) -> str:
+    """Return the leaf O: explicit value, else the CA's O, else the default."""
+    if organization_name is not None:
+        return normalize_subject_attribute(
+            organization_name, "organization_name", max_length=MAX_ORGANIZATION_NAME_LENGTH
+        )
+    ca_org_attrs = ca_cert.subject.get_attributes_for_oid(NameOID.ORGANIZATION_NAME)
+    return str(ca_org_attrs[0].value) if ca_org_attrs else DEFAULT_ORGANIZATION_NAME
 
 
 def _leaf_validity_window(
@@ -316,11 +337,6 @@ def _pem_pair(cert: x509.Certificate, key: rsa.RSAPrivateKey) -> tuple[bytes, by
 def _require_key_size(key_size: int) -> None:
     if key_size not in ALLOWED_KEY_SIZES:
         raise ValueError(f"Expected key_size in {ALLOWED_KEY_SIZES}, got {key_size}")
-
-
-def _require_non_empty(value: str, field_name: str) -> None:
-    if not value or not value.strip():
-        raise ValueError(f"Expected a non-empty {field_name}")
 
 
 def _require_validity_days(validity_days: int) -> None:

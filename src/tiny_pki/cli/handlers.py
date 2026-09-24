@@ -35,6 +35,7 @@ from tiny_pki import (
     get_certificate_subject,
 )
 from tiny_pki.cli.theme import Theme
+from tiny_pki.names import common_name_as_san, normalize_san_entries
 from tiny_pki.store import CertificateStore, IssuedCertificate
 
 
@@ -75,6 +76,26 @@ def dispatch(
     handler(args, store=store, theme=theme)
 
 
+def _confirm_cn_in_sans(name: str, sans: list[str], flags: dict[str, str]) -> bool:
+    """Decide whether a host-like CN missing from ``--san`` should be added.
+
+    ``--no-cn-san`` declines, ``--yes`` or a non-interactive stdin accepts (the
+    library then warns), otherwise the operator is asked.
+    """
+    if "no-cn-san" in flags:
+        return False
+    cn_san = common_name_as_san(name)
+    if cn_san is None or cn_san in normalize_san_entries(sans):
+        return True
+    if "yes" in flags or not sys.stdin.isatty():
+        return True
+    try:
+        answer = input(f"CN {name!r} is not in --san; clients ignore the CN. Add it as a SAN? [Y/n] ")
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise ValueError("Expected an answer to the CN-in-SAN prompt; pass --yes or --no-cn-san") from exc
+    return answer.strip().lower() in {"", "y", "yes"}
+
+
 def _require_store(store: CertificateStore | None) -> CertificateStore:
     if store is None:
         raise ValueError("Expected --store / TINY_PKI_STORE for this command")
@@ -109,7 +130,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
     if not args:
         raise ValueError("Expected create client|server <name>")
     kind = args[0]
-    opts = _parse_flags(args[1:], allowed={"allow-long-validity", "days", "key-size", "org", "san"})
+    opts = _parse_flags(args[1:], allowed={"allow-long-validity", "days", "key-size", "no-cn-san", "org", "san", "yes"})
     positional = opts["positional"]
     if kind not in {"client", "server"}:
         raise ValueError(f"Expected create client|server, got {kind!r}")
@@ -118,8 +139,8 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
     name = positional[0]
     if len(positional) > 1:
         raise ValueError("Unexpected extra arguments")
-    if kind == "client" and opts["multi"].get("san"):
-        raise ValueError("--san is only supported for server certificates")
+    if kind == "client" and (opts["multi"].get("san") or "no-cn-san" in opts["flags"]):
+        raise ValueError("--san / --no-cn-san are only supported for server certificates")
     ca_cert, ca_key = store.read_ca()
     default_days = DEFAULT_CLIENT_VALIDITY_DAYS if kind == "client" else DEFAULT_SERVER_VALIDITY_DAYS
     days = _parse_days(opts["flags"].get("days", str(default_days)), default=default_days)
@@ -140,9 +161,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
                 allow_long_validity=allow_long_validity,
             )
         else:
-            sans = [s for s in opts["multi"].get("san", []) if s]
-            if not sans:
-                sans = [name]
+            sans = [s for s in opts["multi"].get("san", []) if s] or [name]
             cert_pem, key_pem = generate_server_certificate(
                 ca_cert,
                 ca_key,
@@ -152,6 +171,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
                 validity_days=days,
                 key_size=key_size,
                 allow_long_validity=allow_long_validity,
+                include_common_name_in_sans=_confirm_cn_in_sans(name, sans, opts["flags"]),
             )
     for warning in caught:
         print(theme.warn(f"warning: {warning.message}"), file=sys.stderr)
@@ -464,7 +484,7 @@ def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
     positional: list[str] = []
     flags: dict[str, str] = {}
     multi: dict[str, list[str]] = {}
-    valueless = frozenset({"allow-long-validity", "force"})
+    valueless = frozenset({"allow-long-validity", "force", "no-cn-san", "yes"})
     i = 0
     while i < len(args):
         token = args[i]

@@ -29,6 +29,33 @@ Lifetime policy:
   fresh certificates. The encoded period (`notAfter - notBefore`) is exactly
   `validity_days`, so the caps and Apple's limit apply to what is actually issued.
 
+Name rules (`tiny_pki.names`):
+
+- CN and O are stripped; empty values, more than 64 characters (the X.509
+  upper bound), and control / format characters (including zero-width) are
+  rejected. Other Unicode is allowed.
+- SAN entries are normalized to what TLS clients compare: lower-case DNS names
+  without a trailing dot, IDNs as punycode A-labels, canonical IP literals, and
+  duplicates dropped. URLs, `host:port`, CIDR ranges, IPv6 zone IDs, underscores,
+  empty or over-long labels, and numeric last labels (malformed IPs) raise
+  `ValueError`. Wildcards must be the whole leftmost label followed by at least
+  two labels (`*.lan.example`); OpenSSL won't match shorter patterns.
+- TLS clients ignore the CN, so a server CN that is itself a valid host/IP and
+  missing from `san_entries` is appended with a `TinyPkiWarning`. Pass
+  `include_common_name_in_sans=False` to opt out. The CLI asks first on a TTY;
+  `--yes` accepts and `--no-cn-san` declines.
+- The store matches identities case-insensitively, but certificates keep the CN
+  exactly as given (after stripping).
+- Client certificates carry no SAN: nginx (`$ssl_client_s_dn`) and Mosquitto
+  (`use_identity_as_username`) identify clients by CN.
+
+| Function (`tiny_pki.names`) | Returns |
+| --- | --- |
+| `normalize_san_entries(entries)` | normalized, de-duplicated `list[str]` |
+| `normalize_san_entry(entry)` / `normalize_dns_name(name)` | one normalized entry |
+| `normalize_subject_attribute(value, field_name, *, max_length)` | stripped, validated CN/O |
+| `common_name_as_san(common_name)` | the SAN form of a host-like CN, else `None` |
+
 ## Revoke
 
 | Function | Returns |

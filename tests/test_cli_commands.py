@@ -306,7 +306,7 @@ def test_create_client_rejects_san(tmp_path: Path, capsys: CaptureFixture[str]) 
         capsys=capsys,
         expect_ok=False,
     )
-    assert_that(err, contains_string("--san is only supported for server"))
+    assert_that(err, contains_string("only supported for server certificates"))
     assert_that(out, equal_to(""))
 
 
