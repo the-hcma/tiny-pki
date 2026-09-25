@@ -166,6 +166,40 @@ def test_init_create_show_revoke_delete_export(
     assert_that(out, contains_string("deleted api.example"))
 
 
+def test_create_rejects_common_name_with_path_separator(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    store = tmp_path / "ca"
+    _run(store, "init", "--key-size", "2048", capsys=capsys)
+    _, err = _run(store, "create", "client", "../../../tmp/evil", capsys=capsys, expect_ok=False)
+    assert_that(err, contains_string("path separators"))
+    assert_that(CertificateStore(store).list_certificates(), has_length(0))
+
+
+def test_export_pem_default_name_sanitizes_tampered_common_name(
+    tmp_path: Path, capsys: CaptureFixture[str], monkeypatch: MonkeyPatch
+) -> None:
+    """A hand-edited index.json can't smuggle a `/`-bearing CN past `_safe_export_name`."""
+    store = tmp_path / "ca"
+    _run(store, "init", "--key-size", "2048", capsys=capsys)
+    _run(store, "create", "client", "alice", "--key-size", "2048", capsys=capsys)
+    cs = CertificateStore(store)
+    entry = cs.get_certificate("alice")
+    assert_that(entry, is_(not_none()))
+    tampered = json.loads(cs.index_path.read_text(encoding="utf-8"))
+    tampered[0]["common_name"] = "../../../../tmp/evil"
+    cs.index_path.write_text(json.dumps(tampered), encoding="utf-8")
+
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+    monkeypatch.chdir(workdir)
+    out, err = _run(store, "export", "pem", "../../../../tmp/evil", capsys=capsys)
+    assert_that(err, equal_to(""))
+    assert_that(out, contains_string("wrote"))
+    written = list(workdir.iterdir())
+    assert_that(written, has_length(1))
+    assert_that(written[0].name, is_not(contains_string("/")))
+    assert_that((tmp_path / "tmp" / "evil.pem").exists(), is_(False))
+
+
 def test_list_filters_and_json(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
     empty = tmp_path / "empty-store"
     out, err = _run(empty, "list", capsys=capsys)

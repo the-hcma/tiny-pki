@@ -103,7 +103,13 @@ def normalize_san_entry(entry: str) -> str:
 
 
 def normalize_subject_attribute(value: str, field_name: str, *, max_length: int) -> str:
-    """Strip ``value`` and reject empty, over-long, or control-character input.
+    """Strip ``value`` and reject empty, over-long, control-character, or path-separator input.
+
+    Path separators are rejected because a subject attribute (typically the
+    common name) can end up as a filename component — e.g. the CLI's
+    ``export pem`` defaults its output path to ``f"{common_name}.pem"`` — and
+    ``/`` or ``\\`` there would let a crafted name write outside the intended
+    directory.
 
     Raises:
         TinyPkiError: With the field name and the offending value.
@@ -116,6 +122,8 @@ def normalize_subject_attribute(value: str, field_name: str, *, max_length: int)
     for ch in text:
         if unicodedata.category(ch) in _FORBIDDEN_CATEGORIES:
             raise TinyPkiError(f"Expected {field_name} without control or format characters, got {text!r}")
+    if "/" in text or "\\" in text:
+        raise TinyPkiError(f"Expected {field_name} without path separators, got {text!r}")
     return text
 
 

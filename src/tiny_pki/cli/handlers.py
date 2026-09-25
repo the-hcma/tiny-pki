@@ -483,7 +483,7 @@ def _cmd_export(args: list[str], *, store: CertificateStore | None, theme: Theme
     ca_cert, _ = store.read_ca()
 
     if fmt == "pem":
-        out = Path(opts["flags"].get("out", f"{entry.common_name}.pem"))
+        out = Path(opts["flags"].get("out", f"{_safe_export_name(entry.common_name)}.pem"))
         _write_secret_file(out, cert_pem.decode() + key_pem.decode())
         print(theme.ok(f"wrote {out}"))
         return
@@ -875,6 +875,17 @@ def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
         positional.append(token)
         i += 1
     return {"positional": positional, "flags": flags, "multi": multi}
+
+
+def _safe_export_name(common_name: str) -> str:
+    """Escape path separators for a default export filename.
+
+    ``normalize_subject_attribute`` already rejects ``/`` and ``\\`` for
+    newly issued certificates, but a hand-edited or legacy ``index.json``
+    entry could still carry one — this keeps ``export pem``'s default
+    output path a single component either way.
+    """
+    return common_name.replace("/", "_").replace("\\", "_")
 
 
 def _write_secret_file(path: Path, data: str | bytes) -> None:
