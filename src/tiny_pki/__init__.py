@@ -33,7 +33,7 @@ from tiny_pki.constants import (
     MIN_PKCS12_PASSWORD_LENGTH,
     VALIDITY_PRESETS,
 )
-from tiny_pki.errors import TinyPkiWarning
+from tiny_pki.errors import TinyPkiError, TinyPkiWarning
 from tiny_pki.inspect import (
     get_certificate_expiry,
     get_certificate_fingerprint,
@@ -72,6 +72,7 @@ __all__ = [
     "MAX_SERVER_VALIDITY_DAYS",
     "MIN_PKCS12_PASSWORD_LENGTH",
     "Status",
+    "TinyPkiError",
     "TinyPkiWarning",
     "VALIDITY_PRESETS",
     "__version__",

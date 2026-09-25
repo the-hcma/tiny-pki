@@ -30,7 +30,7 @@ from tiny_pki.constants import (
     MAX_CLIENT_VALIDITY_DAYS,
     MAX_SERVER_VALIDITY_DAYS,
 )
-from tiny_pki.errors import TinyPkiWarning
+from tiny_pki.errors import TinyPkiError, TinyPkiWarning
 from tiny_pki.names import (
     MAX_COMMON_NAME_LENGTH,
     MAX_ORGANIZATION_NAME_LENGTH,
@@ -66,7 +66,7 @@ def generate_ca_certificate(
         Tuple of ``(certificate_pem, private_key_pem)``.
 
     Raises:
-        ValueError: If ``key_size`` is not in ``ALLOWED_KEY_SIZES``, a name is
+        TinyPkiError: If ``key_size`` is not in ``ALLOWED_KEY_SIZES``, a name is
             empty, too long, or contains control characters, or a permitted subtree
             is invalid.
     """
@@ -137,7 +137,7 @@ def generate_client_certificate(
     back to ``DEFAULT_ORGANIZATION_NAME`` if the CA has no O attribute.
 
     Raises:
-        ValueError: If a name is invalid, ``validity_days`` exceeds
+        TinyPkiError: If a name is invalid, ``validity_days`` exceeds
             ``MAX_CLIENT_VALIDITY_DAYS`` without ``allow_long_validity=True``, or the
             certificate would outlive the CA.
     """
@@ -218,7 +218,7 @@ def generate_server_certificate(
     ``include_common_name_in_sans=False``.
 
     Raises:
-        ValueError: If a name or SAN entry is invalid, ``validity_days`` exceeds
+        TinyPkiError: If a name or SAN entry is invalid, ``validity_days`` exceeds
             ``MAX_SERVER_VALIDITY_DAYS`` without ``allow_long_validity=True``, or the
             certificate would outlive the CA.
 
@@ -357,16 +357,18 @@ def _enforce_name_constraints(ca_cert: x509.Certificate, *, common_name: str, sa
     for name in dns_names:
         host = name.removeprefix("*.")
         if permitted_roots and not any(_dns_within(host, root) for root in permitted_roots):
-            raise ValueError(f"Expected DNS name within the CA's permitted names {permitted_roots}, got {name!r}")
+            raise TinyPkiError(f"Expected DNS name within the CA's permitted names {permitted_roots}, got {name!r}")
         if any(_dns_within(host, root) for root in excluded_roots):
-            raise ValueError(f"Expected DNS name outside the CA's excluded names {excluded_roots}, got {name!r}")
+            raise TinyPkiError(f"Expected DNS name outside the CA's excluded names {excluded_roots}, got {name!r}")
     for address in addresses:
         if permitted_networks and not any(_address_in(address, network) for network in permitted_networks):
             permitted_text = [str(n) for n in permitted_networks]
-            raise ValueError(f"Expected IP address within the CA's permitted networks {permitted_text}, got {address}")
+            raise TinyPkiError(
+                f"Expected IP address within the CA's permitted networks {permitted_text}, got {address}"
+            )
         if any(_address_in(address, network) for network in excluded_networks):
             excluded_text = [str(n) for n in excluded_networks]
-            raise ValueError(f"Expected IP address outside the CA's excluded networks {excluded_text}, got {address}")
+            raise TinyPkiError(f"Expected IP address outside the CA's excluded networks {excluded_text}, got {address}")
 
 
 def _leaf_organization(ca_cert: x509.Certificate, organization_name: str | None) -> str:
@@ -389,7 +391,7 @@ def _leaf_validity_window(
     """Return ``(not_before, not_after)`` after enforcing lifetime policy."""
     cap = MAX_SERVER_VALIDITY_DAYS if kind == "server" else MAX_CLIENT_VALIDITY_DAYS
     if validity_days > cap and not allow_long_validity:
-        raise ValueError(
+        raise TinyPkiError(
             f"Expected validity_days <= {cap} for {kind} certificates, got {validity_days}; "
             "pass allow_long_validity=True (CLI: --allow-long-validity) to override"
         )
@@ -404,7 +406,7 @@ def _leaf_validity_window(
     ca_not_after = ca_cert.not_valid_after_utc
     if not_after > ca_not_after:
         remaining_days = max((ca_not_after - not_before).days, 0)
-        raise ValueError(
+        raise TinyPkiError(
             f"Expected {kind} certificate to expire by the CA's notAfter "
             f"({ca_not_after.isoformat()}), got validity_days={validity_days}; "
             f"use validity_days <= {remaining_days} or renew the CA"
@@ -425,27 +427,29 @@ def _pem_pair(cert: x509.Certificate, key: rsa.RSAPrivateKey) -> tuple[bytes, by
 def _permitted_subtree(entry: str) -> x509.GeneralName:
     text = entry.strip()
     if not text:
-        raise ValueError("Expected a non-empty permitted subtree")
+        raise TinyPkiError("Expected a non-empty permitted subtree")
     if "://" in text:
-        raise ValueError(f"Expected a DNS suffix or IP network, not a URL, got {entry!r}")
+        raise TinyPkiError(f"Expected a DNS suffix or IP network, not a URL, got {entry!r}")
     try:
         return x509.IPAddress(ipaddress.ip_network(text, strict=True))
     except ValueError as exc:
         if "/" in text:
-            raise ValueError(f"Expected an IP network without host bits (e.g. 192.168.0.0/16), got {entry!r}") from exc
+            raise TinyPkiError(
+                f"Expected an IP network without host bits (e.g. 192.168.0.0/16), got {entry!r}"
+            ) from exc
     if "*" in text:
-        raise ValueError(f"Expected a DNS suffix without wildcards (e.g. home), got {entry!r}")
+        raise TinyPkiError(f"Expected a DNS suffix without wildcards (e.g. home), got {entry!r}")
     return x509.DNSName(normalize_dns_name(text.lstrip(".")))
 
 
 def _require_key_size(key_size: int) -> None:
     if key_size not in ALLOWED_KEY_SIZES:
-        raise ValueError(f"Expected key_size in {ALLOWED_KEY_SIZES}, got {key_size}")
+        raise TinyPkiError(f"Expected key_size in {ALLOWED_KEY_SIZES}, got {key_size}")
 
 
 def _require_validity_days(validity_days: int) -> None:
     if validity_days <= 0:
-        raise ValueError(f"Expected validity_days > 0, got {validity_days}")
+        raise TinyPkiError(f"Expected validity_days > 0, got {validity_days}")
 
 
 def _validity_window(validity_days: int) -> tuple[datetime, datetime]:

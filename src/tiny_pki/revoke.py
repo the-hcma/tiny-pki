@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from tiny_pki._rsa import load_rsa_private_key
 from tiny_pki.constants import CLOCK_SKEW_BACKDATE
+from tiny_pki.errors import TinyPkiError
 
 
 def generate_crl(
@@ -39,16 +40,16 @@ def generate_crl(
         CRL in PEM format.
 
     Raises:
-        ValueError: If ``validity_days`` is not positive or ``crl_number`` is
+        TinyPkiError: If ``validity_days`` is not positive or ``crl_number`` is
             negative or longer than 20 octets.
     """
     if validity_days <= 0:
-        raise ValueError(f"Expected validity_days > 0, got {validity_days}")
+        raise TinyPkiError(f"Expected validity_days > 0, got {validity_days}")
 
     now = datetime.now(UTC)
     number = crl_number if crl_number is not None else (now - _EPOCH) // timedelta(microseconds=1)
     if number < 0 or number.bit_length() > _MAX_CRL_NUMBER_BITS:
-        raise ValueError(f"Expected crl_number between 0 and 2**{_MAX_CRL_NUMBER_BITS} - 1, got {number}")
+        raise TinyPkiError(f"Expected crl_number between 0 and 2**{_MAX_CRL_NUMBER_BITS} - 1, got {number}")
 
     ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
     ca_key = load_rsa_private_key(ca_key_pem)

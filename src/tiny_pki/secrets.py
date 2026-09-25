@@ -18,6 +18,8 @@ import hashlib
 
 from cryptography.fernet import Fernet
 
+from tiny_pki.errors import TinyPkiError
+
 MIN_SECRET_LENGTH = 32
 
 
@@ -37,7 +39,7 @@ def encrypt_private_key(pem_data: bytes, secret: str) -> bytes:
     """Encrypt PEM private-key bytes for storage at rest."""
     _require_strong_secret(secret)
     if not pem_data:
-        raise ValueError("Expected non-empty pem_data")
+        raise TinyPkiError("Expected non-empty pem_data")
     return Fernet(_derive_fernet_key(secret)).encrypt(pem_data)
 
 
@@ -54,10 +56,10 @@ def _derive_fernet_key(secret: str) -> bytes:
 
 def _require_secret(secret: str) -> None:
     if not secret or not secret.strip():
-        raise ValueError("Expected a non-empty secret")
+        raise TinyPkiError("Expected a non-empty secret")
 
 
 def _require_strong_secret(secret: str) -> None:
     _require_secret(secret)
     if len(secret) < MIN_SECRET_LENGTH:
-        raise ValueError(f"Expected a secret of at least {MIN_SECRET_LENGTH} characters, got {len(secret)}")
+        raise TinyPkiError(f"Expected a secret of at least {MIN_SECRET_LENGTH} characters, got {len(secret)}")

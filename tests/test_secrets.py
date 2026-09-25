@@ -10,7 +10,7 @@ import hashlib
 from cryptography.fernet import Fernet, InvalidToken
 from hamcrest import assert_that, calling, equal_to, is_not, raises
 
-from tiny_pki import generate_ca_certificate
+from tiny_pki import TinyPkiError, generate_ca_certificate
 from tiny_pki.secrets import (
     MIN_SECRET_LENGTH,
     decrypt_private_key,
@@ -41,14 +41,14 @@ def test_derive_fernet_key_uses_verbatim_secret() -> None:
 def test_empty_pem_data_rejected() -> None:
     assert_that(
         calling(encrypt_private_key).with_args(b"", _SECRET),
-        raises(ValueError, "non-empty pem_data"),
+        raises(TinyPkiError, "non-empty pem_data"),
     )
 
 
 def test_empty_secret_rejected() -> None:
     assert_that(
         calling(encrypt_private_key).with_args(b"pem", "  "),
-        raises(ValueError, "non-empty secret"),
+        raises(TinyPkiError, "non-empty secret"),
     )
 
 
@@ -66,7 +66,7 @@ def test_reencrypt_rotates_off_a_short_secret() -> None:
     assert_that(decrypt_private_key(rotated, _NEW), equal_to(key_pem))
     assert_that(
         calling(reencrypt_private_key).with_args(rotated, _NEW, "short"),
-        raises(ValueError, f"at least {MIN_SECRET_LENGTH} characters, got 5"),
+        raises(TinyPkiError, f"at least {MIN_SECRET_LENGTH} characters, got 5"),
     )
 
 
@@ -82,7 +82,7 @@ def test_short_secret_rejected() -> None:
     for fn, args in ((derive_fernet_key, (short,)), (encrypt_private_key, (b"pem", short))):
         assert_that(
             calling(fn).with_args(*args),
-            raises(ValueError, f"at least {MIN_SECRET_LENGTH} characters, got {len(short)}"),
+            raises(TinyPkiError, f"at least {MIN_SECRET_LENGTH} characters, got {len(short)}"),
         )
 
 

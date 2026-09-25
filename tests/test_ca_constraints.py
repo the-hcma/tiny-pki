@@ -17,6 +17,7 @@ from pytest import CaptureFixture
 from pytest import raises as pytest_raises
 
 from tiny_pki import (
+    TinyPkiError,
     generate_ca_certificate,
     generate_client_certificate,
     generate_server_certificate,
@@ -71,7 +72,7 @@ def test_ca_name_constraints_extension() -> None:
 def test_ca_rejects_invalid_permitted_subtree(entry: str, message: str) -> None:
     assert_that(
         calling(generate_ca_certificate).with_args(key_size=2048, permitted_subtrees=[entry]),
-        raises(ValueError, message),
+        raises(TinyPkiError, message),
     )
 
 
@@ -95,7 +96,7 @@ def test_client_cn_checked_only_when_host_like() -> None:
     generate_client_certificate(ca_cert, ca_key, "phone.alice.home", key_size=2048)
     assert_that(
         calling(generate_client_certificate).with_args(ca_cert, ca_key, "phone.example", key_size=2048),
-        raises(ValueError, "within the CA's permitted names"),
+        raises(TinyPkiError, "within the CA's permitted names"),
     )
 
 
@@ -104,7 +105,7 @@ def test_leading_dot_constraint_excludes_apex() -> None:
     generate_server_certificate(ca_cert, ca_key, "api.example.com", ["api.example.com"], key_size=2048)
     assert_that(
         calling(generate_server_certificate).with_args(ca_cert, ca_key, "example.com", ["example.com"], key_size=2048),
-        raises(ValueError, "within the CA's permitted names"),
+        raises(TinyPkiError, "within the CA's permitted names"),
     )
 
 
@@ -124,7 +125,7 @@ def test_server_sans_must_fit_constraints() -> None:
             calling(generate_server_certificate).with_args(
                 ca_cert, ca_key, "api.home", sans, key_size=2048, include_common_name_in_sans=False
             ),
-            raises(ValueError, message),
+            raises(TinyPkiError, message),
         )
 
 
@@ -135,11 +136,11 @@ def test_server_host_like_cn_checked_without_dns_san(common_name: str) -> None:
         calling(generate_server_certificate).with_args(
             ca_cert, ca_key, common_name, ["192.168.1.1"], key_size=2048, include_common_name_in_sans=False
         ),
-        raises(ValueError, "within the CA's permitted names"),
+        raises(TinyPkiError, "within the CA's permitted names"),
     )
     assert_that(
         calling(generate_client_certificate).with_args(ca_cert, ca_key, common_name, key_size=2048),
-        raises(ValueError, "within the CA's permitted names"),
+        raises(TinyPkiError, "within the CA's permitted names"),
     )
     generate_client_certificate(ca_cert, ca_key, "alice_phone.home", key_size=2048)
     generate_client_certificate(ca_cert, ca_key, "Alice Smith (phone)", key_size=2048)

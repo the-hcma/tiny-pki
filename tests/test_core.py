@@ -30,6 +30,7 @@ from hamcrest import (
 
 from tiny_pki import (
     ALLOWED_KEY_SIZES,
+    TinyPkiError,
     generate_ca_certificate,
     generate_client_certificate,
     generate_crl,
@@ -90,13 +91,13 @@ class TestGenerateCaCertificate:
     def test_invalid_key_size(self) -> None:
         assert_that(
             calling(generate_ca_certificate).with_args(key_size=1024),
-            raises(ValueError, "Expected key_size in"),
+            raises(TinyPkiError, "Expected key_size in"),
         )
 
     def test_empty_common_name(self) -> None:
         assert_that(
             calling(generate_ca_certificate).with_args(common_name="  "),
-            raises(ValueError, "non-empty common_name"),
+            raises(TinyPkiError, "non-empty common_name"),
         )
 
     def test_allowed_key_sizes_constant(self) -> None:
@@ -105,11 +106,11 @@ class TestGenerateCaCertificate:
     def test_invalid_validity_days(self) -> None:
         assert_that(
             calling(generate_ca_certificate).with_args(validity_days=0),
-            raises(ValueError, "validity_days > 0"),
+            raises(TinyPkiError, "validity_days > 0"),
         )
         assert_that(
             calling(generate_ca_certificate).with_args(validity_days=-1),
-            raises(ValueError, "validity_days > 0"),
+            raises(TinyPkiError, "validity_days > 0"),
         )
 
     def test_self_signed(self) -> None:
@@ -164,7 +165,7 @@ class TestGenerateServerCertificate:
         ca_cert, ca_key = generate_ca_certificate(key_size=2048)
         assert_that(
             calling(generate_server_certificate).with_args(ca_cert, ca_key, "cn", []),
-            raises(ValueError, "SAN entry"),
+            raises(TinyPkiError, "SAN entry"),
         )
 
 
@@ -186,7 +187,7 @@ class TestGenerateClientCertificate:
         ca_cert, ca_key = generate_ca_certificate(key_size=2048)
         assert_that(
             calling(generate_client_certificate).with_args(ca_cert, ca_key, ""),
-            raises(ValueError, "non-empty common_name"),
+            raises(TinyPkiError, "non-empty common_name"),
         )
 
 
@@ -218,7 +219,7 @@ class TestInspectAndCrlAndPkcs12:
         ca_cert, ca_key = generate_ca_certificate(key_size=2048)
         assert_that(
             calling(generate_crl).with_args(ca_cert, ca_key, [], validity_days=0),
-            raises(ValueError, "validity_days > 0"),
+            raises(TinyPkiError, "validity_days > 0"),
         )
 
     def test_generate_pkcs12_roundtrip(self) -> None:
@@ -239,11 +240,11 @@ class TestInspectAndCrlAndPkcs12:
         cert_pem, key_pem = generate_client_certificate(ca_cert, ca_key, "carol", key_size=2048)
         assert_that(
             calling(generate_pkcs12).with_args(cert_pem, key_pem, ca_cert, "", b"secret-pw"),
-            raises(ValueError, "friendly_name"),
+            raises(TinyPkiError, "friendly_name"),
         )
         assert_that(
             calling(generate_pkcs12).with_args(cert_pem, key_pem, ca_cert, "carol", b""),
-            raises(ValueError, "password"),
+            raises(TinyPkiError, "password"),
         )
 
     def test_load_rsa_private_key_rejects_encrypted_pem(self) -> None:
@@ -256,5 +257,5 @@ class TestInspectAndCrlAndPkcs12:
         )
         assert_that(
             calling(load_rsa_private_key).with_args(encrypted_pem),
-            raises(ValueError, "encrypted"),
+            raises(TinyPkiError, "encrypted"),
         )
