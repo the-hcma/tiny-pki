@@ -15,6 +15,7 @@ The library needs only `cryptography` (`pip install tiny-pki`); none of the modu
 | `generate_ca_certificate(common_name="Private CA", *, organization_name="tiny-pki", validity_days=3650, key_size=4096, permitted_subtrees=None)` | `(ca_cert_pem, ca_key_pem)` — self-signed, `BasicConstraints(ca=True, path_length=0)` (signs leaves only), `keyCertSign` + `cRLSign`; optional critical Name Constraints |
 | `generate_client_certificate(ca_cert_pem, ca_key_pem, common_name, *, organization_name=None, validity_days=397, key_size=3072, allow_long_validity=False)` | `(cert_pem, key_pem)` — `CLIENT_AUTH` EKU; CN is the identity |
 | `generate_server_certificate(ca_cert_pem, ca_key_pem, common_name, san_entries, *, organization_name=None, validity_days=90, key_size=3072, allow_long_validity=False, include_common_name_in_sans=True)` | `(cert_pem, key_pem)` — `SERVER_AUTH` EKU; `san_entries` are DNS names or IP literals (at least one) |
+| `max_leaf_validity_days(ca_cert_pem, *, kind="server", allow_long_validity=False)` | `int` — the largest `validity_days` issuing a `kind` leaf under this CA accepts right now (CA `notAfter` with the `CLOCK_SKEW_BACKDATE` backdate, and the per-kind cap unless `allow_long_validity`); `0` once the CA cannot sign any leaf. Use it to clamp or grey out `VALIDITY_PRESETS` in UIs |
 
 `organization_name=None` on leaves inherits the CA's `O`. `key_size` must be one of
 `ALLOWED_KEY_SIZES` (`2048`, `3072`, `4096`); `validity_days` must be positive.
@@ -159,7 +160,7 @@ Expiry and validity checks for alerting (`tiny_pki.check`, re-exported from `tin
 | `MAX_LEAF_WARNING_DAYS` | `30` |
 | `MAX_SERVER_VALIDITY_DAYS` | `200` |
 | `MIN_PKCS12_PASSWORD_LENGTH` | `8` |
-| `VALIDITY_PRESETS` | `[(90, "90 days"), …, (825, "825 days")]` for UI pickers |
+| `VALIDITY_PRESETS` | `[(90, "90 days"), …, (825, "825 days")]` for UI pickers; clamp with `max_leaf_validity_days(ca_cert_pem)` |
 
 ## Errors and warnings
 

@@ -302,6 +302,34 @@ def generate_server_certificate(
     return _pem_pair(cert, server_key)
 
 
+def max_leaf_validity_days(
+    ca_cert_pem: bytes,
+    *,
+    kind: Literal["client", "server"] = "server",
+    allow_long_validity: bool = False,
+) -> int:
+    """Return the largest ``validity_days`` that issuing a ``kind`` leaf under this CA accepts now.
+
+    Mirrors issuance: the leaf's window is backdated by ``CLOCK_SKEW_BACKDATE`` and
+    must end by the CA's ``notAfter``, and unless ``allow_long_validity`` it is also
+    capped at ``MAX_SERVER_VALIDITY_DAYS`` / ``MAX_CLIENT_VALIDITY_DAYS``. Returns
+    ``0`` once the CA cannot sign any leaf (it has expired or has less than a day
+    left). The answer is for the current time and shrinks as the CA ages, so use
+    it to clamp UI choices, not as a value to cache.
+
+    Raises:
+        TinyPkiError: If ``kind`` is not ``"client"`` or ``"server"``.
+    """
+    if kind not in ("client", "server"):
+        raise TinyPkiError(f"Expected kind 'client' or 'server', got {kind!r}")
+    ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
+    not_before, _ = _validity_window(0)
+    remaining = max((ca_cert.not_valid_after_utc - not_before).days, 0)
+    if allow_long_validity:
+        return remaining
+    return min(remaining, MAX_SERVER_VALIDITY_DAYS if kind == "server" else MAX_CLIENT_VALIDITY_DAYS)
+
+
 _CN_DNS_ID = re.compile(r"^[a-z0-9_.-]+$")
 
 
