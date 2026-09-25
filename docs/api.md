@@ -120,6 +120,23 @@ All take a certificate PEM.
 | `get_certificate_subject(cert_pem)` | subject CN (or full DN if no CN) |
 | `is_certificate_self_signed(cert_pem)` | `True` only if issuer == subject **and** the signature verifies with its own key |
 
+## Check
+
+Expiry and validity checks for alerting (`tiny_pki.check`, re-exported from `tiny_pki`).
+
+| Function | Returns |
+| --- | --- |
+| `check_certificate(cert_pem, *, now=None, within=None, by=None, ca_cert_pem=None, crl_pem=None)` | `CertificateStatus` |
+| `check_crl(crl_pem, *, now=None, within=None, by=None, ca_cert_pem=None)` | `CertificateStatus` for the CRL's `nextUpdate` |
+| `default_warning_window(kind, lifetime)` | `timedelta`: one third of `lifetime`, capped at `MAX_CA_WARNING_DAYS` (180) for a CA and `MAX_LEAF_WARNING_DAYS` (30) for leaves; CRLs are not capped |
+| `worst_status(results)` | the most severe `Status` (`OK` for an empty list) |
+
+- The **cutoff** is `now + within`, `by`, or the earlier of the two. With neither, it is `now + default_warning_window(kind, lifetime)`, where `lifetime` is the certificate's own `notAfter - notBefore`.
+- `Status` is a `StrEnum`, declared from least to most severe: `ok`, `expiring` (valid now, gone by the cutoff), `not_yet_valid`, `expired`, `revoked`, `untrusted`. `Status.severity` gives the position.
+- `CertificateStatus` fields: `kind` (`ca` / `client` / `server` / `crl` / `unknown`, from `BasicConstraints` and the EKU), `subject`, `issuer`, `serial_number` (the CRL number for CRLs), `not_before`, `not_after`, `cutoff`, `days_remaining` (whole days until `not_after`, negative once expired), `status`, and `reasons` (human-readable explanations, including informational notes such as "CA expires first").
+- With `ca_cert_pem`, a certificate not signed by that CA is `untrusted`, and a CA that expires first becomes the effective `not_after`. With `crl_pem` (which requires `ca_cert_pem`), a listed serial is `revoked`. A CRL not signed by the given CA raises `ValueError` from `check_certificate` and is `untrusted` from `check_crl`.
+- `now` and `by` must be timezone-aware; `within` must not be negative.
+
 ## Constants
 
 | Name | Value |
@@ -133,7 +150,9 @@ All take a certificate PEM.
 | `DEFAULT_LEAF_KEY_SIZE` | `3072` |
 | `DEFAULT_ORGANIZATION_NAME` | `"tiny-pki"` |
 | `DEFAULT_SERVER_VALIDITY_DAYS` | `90` |
+| `MAX_CA_WARNING_DAYS` | `180` |
 | `MAX_CLIENT_VALIDITY_DAYS` | `825` |
+| `MAX_LEAF_WARNING_DAYS` | `30` |
 | `MAX_SERVER_VALIDITY_DAYS` | `200` |
 | `MIN_PKCS12_PASSWORD_LENGTH` | `8` |
 | `VALIDITY_PRESETS` | `[(90, "90 days"), …, (825, "825 days")]` for UI pickers |

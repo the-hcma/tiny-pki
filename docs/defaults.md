@@ -30,6 +30,7 @@ ECDSA P-256 keys are tracked separately in
 | Leaf outliving CA | rejected | n/a | none | A leaf that expires after its CA fails validation for its last stretch. `ValueError` says which `validity_days` still fits, or tells you to renew the CA. |
 | Clock-skew backdate | 5 minutes (`CLOCK_SKEW_BACKDATE`) | n/a | none | `notBefore` and a CRL's `lastUpdate` are backdated so devices with slightly slow clocks accept fresh artifacts. The whole window shifts, so the encoded lifetime still equals `validity_days`. |
 | CRL `nextUpdate` | 30 days | none | `validity_days=` on `generate_crl` | Relying parties reject an expired CRL, so republish well within the window. |
+| Expiry warning window | one third of the lifetime | 30 days for leaves (`MAX_LEAF_WARNING_DAYS`), 180 days for the CA (`MAX_CA_WARNING_DAYS`), uncapped for CRLs | `within=` / `by=` on `check_certificate` and `check_crl` | Let's Encrypt renews at a third of the lifetime remaining. The CA gets a longer runway because replacing it means re-installing the root on every device. |
 
 ## Names
 
