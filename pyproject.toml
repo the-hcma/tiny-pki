@@ -38,7 +38,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "cryptography>=50.0.1",
+    "cryptography>=43.0.1",
     "prompt-toolkit>=3.0.53",
 ]
 

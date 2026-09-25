@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# .github/ci/ gate — the-hcma/repository-helpers convention; run by ci.yml.
+# Runs the suite on the oldest supported Python with the oldest cryptography that
+# pyproject.toml allows, so the published minimum cannot silently drift.
+set -euo pipefail
+
+minimum="$(sed -nE 's/^ *"cryptography>=([0-9]+\.[0-9]+\.[0-9]+)",?$/\1/p' pyproject.toml)"
+python_minimum="$(sed -nE 's/^requires-python = ">=([0-9]+\.[0-9]+)"$/\1/p' pyproject.toml)"
+if [[ -z "$minimum" || -z "$python_minimum" ]]; then
+  echo "Expected 'cryptography>=X.Y.Z' and 'requires-python = \">=X.Y\"' in pyproject.toml" >&2
+  exit 1
+fi
+
+timeout 120 uv python install "$python_minimum"
+run=(uv run --isolated --python "$python_minimum" --with "cryptography==$minimum")
+installed="$(timeout 300 "${run[@]}" python -c 'import cryptography; print(cryptography.__version__)')"
+if [[ "$installed" != "$minimum" ]]; then
+  echo "Expected cryptography $minimum in the test environment, got $installed" >&2
+  exit 1
+fi
+
+echo "pytest on Python $python_minimum with cryptography $installed"
+timeout 900 "${run[@]}" pytest -q -p no:cacheprovider
