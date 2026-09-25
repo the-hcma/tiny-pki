@@ -149,8 +149,9 @@ def generate_client_certificate(
     ca_key = load_rsa_private_key(ca_key_pem)
     org = _leaf_organization(ca_cert, organization_name)
     _enforce_name_constraints(ca_cert, common_name=common_name, sans=[])
+    pending_warnings: list[str] = []
     not_before, not_after = _leaf_validity_window(
-        ca_cert, validity_days, kind="client", allow_long_validity=allow_long_validity
+        ca_cert, validity_days, kind="client", allow_long_validity=allow_long_validity, warn=pending_warnings
     )
     client_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
 
@@ -194,6 +195,7 @@ def generate_client_certificate(
         )
         .sign(ca_key, hashes.SHA256())
     )
+    _emit_warnings(pending_warnings)
     return _pem_pair(cert, client_key)
 
 
@@ -224,19 +226,19 @@ def generate_server_certificate(
 
     Warns:
         TinyPkiWarning: When the CN is added to the SANs, or an override exceeds
-            ``APPLE_MAX_SERVER_VALIDITY_DAYS`` (Apple platforms reject it).
+            ``APPLE_MAX_SERVER_VALIDITY_DAYS`` (Apple platforms reject it). Warnings
+            are emitted only after the certificate is issued, never for a rejection.
     """
     common_name = normalize_subject_attribute(common_name, "common_name", max_length=MAX_COMMON_NAME_LENGTH)
     _require_key_size(key_size)
     _require_validity_days(validity_days)
     sans = normalize_san_entries(san_entries)
+    pending_warnings: list[str] = []
     cn_san = common_name_as_san(common_name)
     if include_common_name_in_sans and cn_san is not None and cn_san not in sans:
         sans.append(cn_san)
-        warnings.warn(
-            f"Added common_name {common_name!r} to the SANs as {cn_san!r} (TLS clients ignore the CN)",
-            TinyPkiWarning,
-            stacklevel=2,
+        pending_warnings.append(
+            f"Added common_name {common_name!r} to the SANs as {cn_san!r} (TLS clients ignore the CN)"
         )
 
     ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
@@ -244,7 +246,7 @@ def generate_server_certificate(
     org = _leaf_organization(ca_cert, organization_name)
     _enforce_name_constraints(ca_cert, common_name=common_name, sans=sans)
     not_before, not_after = _leaf_validity_window(
-        ca_cert, validity_days, kind="server", allow_long_validity=allow_long_validity
+        ca_cert, validity_days, kind="server", allow_long_validity=allow_long_validity, warn=pending_warnings
     )
     server_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
 
@@ -296,6 +298,7 @@ def generate_server_certificate(
         )
         .sign(ca_key, hashes.SHA256())
     )
+    _emit_warnings(pending_warnings)
     return _pem_pair(cert, server_key)
 
 
@@ -330,6 +333,12 @@ def _dns_within(host: str, root: str) -> bool:
     if root.startswith("."):
         return host.endswith(root)
     return host == root or host.endswith("." + root)
+
+
+def _emit_warnings(messages: list[str]) -> None:
+    """Emit held-back ``TinyPkiWarning``s, attributed to the public API's caller."""
+    for message in messages:
+        warnings.warn(message, TinyPkiWarning, stacklevel=3)
 
 
 def _enforce_name_constraints(ca_cert: x509.Certificate, *, common_name: str, sans: list[str]) -> None:
@@ -387,8 +396,13 @@ def _leaf_validity_window(
     *,
     kind: Literal["client", "server"],
     allow_long_validity: bool,
+    warn: list[str],
 ) -> tuple[datetime, datetime]:
-    """Return ``(not_before, not_after)`` after enforcing lifetime policy."""
+    """Return ``(not_before, not_after)`` after enforcing lifetime policy.
+
+    Warning messages are appended to ``warn`` rather than emitted, so callers can
+    hold them back until issuance is certain to succeed.
+    """
     cap = MAX_SERVER_VALIDITY_DAYS if kind == "server" else MAX_CLIENT_VALIDITY_DAYS
     if validity_days > cap and not allow_long_validity:
         raise TinyPkiError(
@@ -396,11 +410,9 @@ def _leaf_validity_window(
             "pass allow_long_validity=True (CLI: --allow-long-validity) to override"
         )
     if kind == "server" and validity_days > APPLE_MAX_SERVER_VALIDITY_DAYS:
-        warnings.warn(
+        warn.append(
             f"Server certificate validity {validity_days} days exceeds "
-            f"{APPLE_MAX_SERVER_VALIDITY_DAYS}; Apple platforms will reject it",
-            TinyPkiWarning,
-            stacklevel=3,
+            f"{APPLE_MAX_SERVER_VALIDITY_DAYS}; Apple platforms will reject it"
         )
     not_before, not_after = _validity_window(validity_days)
     ca_not_after = ca_cert.not_valid_after_utc
