@@ -13,6 +13,7 @@ from hamcrest import assert_that, calling, equal_to, has_length, is_, none, not_
 from tiny_pki import (
     generate_ca_certificate,
     generate_client_certificate,
+    generate_crl,
     generate_server_certificate,
     get_certificate_expiry,
     get_certificate_fingerprint,
@@ -370,6 +371,63 @@ def test_write_ca_refuses_overwrite_without_force(tmp_path: Path) -> None:
     assert_that(store.read_ca()[0], equal_to(other_cert))
     assert_that(store.read_ca()[1], equal_to(other_key))
     assert_that(oct(store.ca_key_path.stat().st_mode & 0o777), equal_to("0o600"))
+
+
+def test_write_ca_rejects_symlinked_ca_key(tmp_path: Path) -> None:
+    store = CertificateStore(tmp_path / "ca")
+    store.ca_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.key"
+    store.ca_key_path.symlink_to(outside)
+    ca_cert, ca_key = generate_ca_certificate(key_size=2048)
+    assert_that(calling(store.write_ca).with_args(ca_cert, ca_key), raises(ValueError, "symlink"))
+    assert_that(outside.exists(), is_(False))
+
+
+def test_write_ca_rejects_symlinked_ca_cert(tmp_path: Path) -> None:
+    store = CertificateStore(tmp_path / "ca")
+    store.ca_dir.mkdir(parents=True)
+    outside = tmp_path / "outside.crt"
+    outside.write_bytes(b"sentinel")
+    store.ca_cert_path.symlink_to(outside)
+    ca_cert, ca_key = generate_ca_certificate(key_size=2048)
+    assert_that(calling(store.write_ca).with_args(ca_cert, ca_key), raises(ValueError, "symlink"))
+    assert_that(outside.read_bytes(), equal_to(b"sentinel"))
+
+
+def test_write_crl_rejects_symlinked_crl_path(tmp_path: Path) -> None:
+    store = CertificateStore(tmp_path / "ca")
+    ca_cert, ca_key = generate_ca_certificate(key_size=2048)
+    store.write_ca(ca_cert, ca_key)
+    outside = tmp_path / "outside.pem"
+    outside.write_bytes(b"sentinel")
+    store.crl_path.symlink_to(outside)
+    crl_pem = generate_crl(ca_cert, ca_key, [])
+    assert_that(calling(store.write_crl).with_args(crl_pem), raises(ValueError, "symlink"))
+    assert_that(outside.read_bytes(), equal_to(b"sentinel"))
+
+
+def test_add_certificate_rejects_symlinked_index_tmp(tmp_path: Path) -> None:
+    store = CertificateStore(tmp_path / "ca")
+    ca_cert, ca_key = generate_ca_certificate(key_size=2048)
+    store.write_ca(ca_cert, ca_key)
+    outside = tmp_path / "outside-index.json"
+    outside.write_bytes(b"sentinel")
+    store.index_path.with_suffix(".json.tmp").symlink_to(outside)
+    client_cert, client_key = generate_client_certificate(ca_cert, ca_key, "alice", key_size=2048)
+    assert_that(
+        calling(store.add_certificate).with_args(
+            common_name="alice",
+            kind="client",
+            serial_number=get_certificate_serial_number(client_cert),
+            cert_pem=client_cert,
+            key_pem=client_key,
+            not_valid_after=get_certificate_expiry(client_cert),
+            fingerprint=get_certificate_fingerprint(client_cert),
+        ),
+        raises(ValueError, "symlink"),
+    )
+    assert_that(outside.read_bytes(), equal_to(b"sentinel"))
+    assert_that(store.index_path.is_symlink(), is_(False))
 
 
 def test_crl_roundtrip(tmp_path: Path) -> None:
