@@ -9,7 +9,7 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from hamcrest import assert_that, contains_string, equal_to, has_item, instance_of, is_
+from hamcrest import assert_that, contains_string, equal_to, has_item, instance_of, is_, is_not
 from prompt_toolkit.document import Document
 from prompt_toolkit.history import InMemoryHistory
 from pytest import CaptureFixture, MonkeyPatch, raises
@@ -154,15 +154,35 @@ def test_one_shot_exit_succeeds() -> None:
     main(["--color", "never", "exit"])
 
 
-def test_repl_history_falls_back(monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]) -> None:
+def test_repl_history_falls_back(tmp_path: Path, monkeypatch: MonkeyPatch, capsys: CaptureFixture[str]) -> None:
     def boom_history(_path: str) -> InMemoryHistory:
         raise OSError("cannot create history file")
 
+    monkeypatch.setattr(main_mod, "_HISTORY_PATH", tmp_path / "cache" / "tiny-pki" / "history")
     monkeypatch.setattr(main_mod, "FileHistory", boom_history)
     hist = main_mod._repl_history(Theme(enabled=False))  # pyright: ignore[reportPrivateUsage]
     assert_that(hist, instance_of(InMemoryHistory))
     err = capsys.readouterr().err
     assert_that(err, contains_string("history disabled"))
+
+
+def test_repl_history_file_is_created_with_mode_0600(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    history_path = tmp_path / "cache" / "tiny-pki" / "history"
+    monkeypatch.setattr(main_mod, "_HISTORY_PATH", history_path)
+    hist = main_mod._repl_history(Theme(enabled=False))  # pyright: ignore[reportPrivateUsage]
+    assert_that(hist, is_not(instance_of(InMemoryHistory)))
+    assert_that(history_path.is_file(), is_(True))
+    assert_that(oct(history_path.stat().st_mode & 0o777), equal_to("0o600"))
+
+
+def test_repl_history_tightens_preexisting_loose_permissions(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    history_path = tmp_path / "cache" / "tiny-pki" / "history"
+    history_path.parent.mkdir(parents=True)
+    history_path.write_text("tiny-pki > init\n")
+    history_path.chmod(0o644)
+    monkeypatch.setattr(main_mod, "_HISTORY_PATH", history_path)
+    main_mod._repl_history(Theme(enabled=False))  # pyright: ignore[reportPrivateUsage]
+    assert_that(oct(history_path.stat().st_mode & 0o777), equal_to("0o600"))
 
 
 def test_clear_works_with_color_never(capsys: CaptureFixture[str], monkeypatch: MonkeyPatch) -> None:
