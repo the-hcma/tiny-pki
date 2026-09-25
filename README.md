@@ -26,15 +26,22 @@ Intended consumers:
 
 ## Install
 
+The library depends only on `cryptography`. The `tiny-pki` command-line tool (REPL and
+one-shot commands) also needs `prompt-toolkit`, which comes with the `cli` extra:
+
 ```bash
-uv add tiny-pki            # or: pip install tiny-pki
+uv add tiny-pki                      # library, or: pip install tiny-pki
+pipx install 'tiny-pki[cli]'         # CLI, or: uv tool install 'tiny-pki[cli]'
 ```
+
+Without the extra, `tiny-pki` exits with a message telling you to install it.
 
 Until 0.1.0 is on PyPI ([#11](https://github.com/the-hcma/tiny-pki/issues/11)),
 install from Git:
 
 ```bash
 uv add git+https://github.com/the-hcma/tiny-pki
+pipx install 'tiny-pki[cli] @ git+https://github.com/the-hcma/tiny-pki'
 ```
 
 For development in this repo:

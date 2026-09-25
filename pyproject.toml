@@ -39,11 +39,15 @@ classifiers = [
 ]
 dependencies = [
     "cryptography>=43.0.1",
+]
+
+[project.optional-dependencies]
+cli = [
     "prompt-toolkit>=3.0.53",
 ]
 
 [project.scripts]
-tiny-pki = "tiny_pki.cli.main:main"
+tiny-pki = "tiny_pki.cli.entry:main"
 
 [project.urls]
 Homepage = "https://github.com/the-hcma/tiny-pki"
@@ -63,6 +67,7 @@ dev = [
     "pytest>=9.1.1",
     "ruff>=0.16.7",
     "time-machine>=3.5.1",
+    "tiny-pki[cli]",
 ]
 
 [tool.uv]

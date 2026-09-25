@@ -337,6 +337,10 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
+]
+
+[package.optional-dependencies]
+cli = [
     { name = "prompt-toolkit" },
 ]
 
@@ -347,13 +351,15 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
     { name = "time-machine" },
+    { name = "tiny-pki", extra = ["cli"] },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=43.0.1" },
-    { name = "prompt-toolkit", specifier = ">=3.0.53" },
+    { name = "prompt-toolkit", marker = "extra == 'cli'", specifier = ">=3.0.53" },
 ]
+provides-extras = ["cli"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -362,6 +368,7 @@ dev = [
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.16.7" },
     { name = "time-machine", specifier = ">=3.5.1" },
+    { name = "tiny-pki", extras = ["cli"] },
 ]
 
 [[package]]

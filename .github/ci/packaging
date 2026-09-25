@@ -30,4 +30,30 @@ timeout 120 uv venv --quiet --python "$(tr -d '[:space:]' < .python-version)" "$
 timeout 300 uv pip install --quiet --python "$typed_venv/bin/python" "$wheel" "mypy==$mypy_version"
 (cd "$dist" && "$typed_venv/bin/mypy" --strict -c "import tiny_pki; import tiny_pki.secrets")
 
+python_version="$(tr -d '[:space:]' < .python-version)"
+
+library_venv="$dist/library"
+timeout 120 uv venv --quiet --python "$python_version" "$library_venv"
+timeout 300 uv pip install --quiet --python "$library_venv/bin/python" "$wheel"
+installed="$(uv pip freeze --quiet --python "$library_venv/bin/python" | sed -E 's/[=@ ].*//' | tr '[:upper:]_' '[:lower:]-' | sort | tr '\n' ' ')"
+if [[ "$installed" != "cffi cryptography pycparser tiny-pki " ]]; then
+  echo "Expected plain 'tiny-pki' to install only tiny-pki + cryptography (cffi, pycparser), got: $installed" >&2
+  exit 1
+fi
+(cd "$dist" && "$library_venv/bin/python" -c "import tiny_pki, tiny_pki.secrets, tiny_pki.store")
+if hint="$("$library_venv/bin/tiny-pki" --version 2>&1)"; then
+  echo "Expected tiny-pki without the [cli] extra to fail, but it printed: $hint" >&2
+  exit 1
+fi
+if [[ "$hint" != *"pipx install 'tiny-pki[cli]'"* ]]; then
+  echo "Expected an install hint for the [cli] extra, got: $hint" >&2
+  exit 1
+fi
+
+cli_venv="$dist/cli"
+timeout 120 uv venv --quiet --python "$python_version" "$cli_venv"
+timeout 300 uv pip install --quiet --python "$cli_venv/bin/python" "${wheel}[cli]"
+"$cli_venv/bin/tiny-pki" --version
+"$cli_venv/bin/tiny-pki" --help > /dev/null
+
 echo "packaging checks passed"

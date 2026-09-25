@@ -5,6 +5,8 @@ keys are **PEM `bytes`**; private keys must be **unencrypted** RSA PEM (decrypt
 before calling — see [`security.md`](security.md)). Invalid input raises
 `ValueError` with the expected and actual values in the message.
 
+The library needs only `cryptography` (`pip install tiny-pki`); none of the modules below import the CLI's `prompt-toolkit`, which is installed only with the `tiny-pki[cli]` extra.
+
 ## Issue
 
 | Function | Returns |
