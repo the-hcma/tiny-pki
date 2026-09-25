@@ -134,7 +134,7 @@ def test_store_with_offline_ca_key(tmp_path: Path, capsys: CaptureFixture[str]) 
         (("--by", "31/12/2026"), "Expected --by YYYY-MM-DD"),
         (("--kind", "leaf"), "Expected --kind in ca, client, crl, server, got leaf"),
         (("--within",), "Expected a non-empty value for --within"),
-        (("extra",), "Unexpected arguments"),
+        (("--ca", "ca.crt"), "--ca / --password-file apply to file targets"),
     ],
 )
 def test_usage_errors_exit_unknown(

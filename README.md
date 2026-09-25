@@ -122,6 +122,12 @@ YYYY-MM-DD` (end of that day, local time), or by default a third of each certifi
 output with `--json`. Exit codes follow the Nagios convention, so it drops into cron or a
 monitoring agent unchanged.
 
+`check PATH...` checks files instead of the store: PEM or DER certificates, chain files (each
+certificate is checked), CRLs, PKCS#12 bundles (`--password-file PATH`), and directories
+(`*.pem`, `*.crt`, `*.cer`, `*.crl`, `*.p12`, `*.pfx`, one level deep; unreadable entries are
+skipped with a note). No store is needed. Add `--ca PATH` to also flag certificates and CRLs not
+issued by that CA.
+
 ### Store layout
 
 ```text
