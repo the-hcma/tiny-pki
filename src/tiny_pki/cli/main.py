@@ -96,10 +96,24 @@ def _repl_history(theme: Theme) -> History:
     """Return FileHistory when the cache dir is writable, else in-memory history."""
     try:
         _HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _ensure_history_file_mode()
         return FileHistory(str(_HISTORY_PATH))
     except OSError as exc:
         print(theme.warn(f"history disabled ({exc}); using in-memory history"), file=sys.stderr)
         return InMemoryHistory()
+
+
+def _ensure_history_file_mode() -> None:
+    """Create the history file with mode 0600 (or tighten an existing one).
+
+    Every other on-disk artifact this codebase writes (keys, bundles, the
+    store index) is 0600 from creation; FileHistory itself only opens the
+    file lazily on the first command, with whatever mode the platform
+    default/umask gives it, so this closes that gap up front.
+    """
+    fd = os.open(_HISTORY_PATH, os.O_CREAT | os.O_APPEND, 0o600)
+    os.close(fd)
+    os.chmod(_HISTORY_PATH, 0o600)
 
 
 def _run_repl(*, store: CertificateStore | None, theme: Theme, edit_mode: str) -> None:

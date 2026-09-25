@@ -3,6 +3,14 @@ name: Dependabot Auto Merge
 # Enable GitHub auto-merge (squash) so Dependabot PRs enter the native
 # merge queue once required checks pass. Do not use the merge-it label —
 # that enqueues Graphite MQ on repos that still have it wired.
+#
+# pull_request_target runs with the base repo's write-scoped token/secrets by
+# design, which is safe here only because this job never checks out or
+# executes the PR's head ref — it just calls `gh pr merge`. Do not add an
+# actions/checkout of the head ref (or anything else that runs code from the
+# PR) to this job; that would reintroduce the classic pull_request_target
+# code-execution pattern (see the tj-actions/changed-files-style attack
+# referenced in cve-check.yml's SHA-pinning comment).
 on:
   pull_request_target:
     types: [opened, reopened, synchronize, ready_for_review]
