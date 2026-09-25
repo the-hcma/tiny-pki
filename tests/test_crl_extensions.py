@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.x509.oid import NameOID
 from hamcrest import assert_that, calling, equal_to, greater_than, is_, raises
 
-from tiny_pki import generate_ca_certificate, generate_crl
+from tiny_pki import TinyPkiError, generate_ca_certificate, generate_crl
 from tiny_pki._rsa import load_rsa_private_key
 
 _CA = generate_ca_certificate("CRL Ext CA", key_size=2048)
@@ -76,5 +76,5 @@ def test_crl_number_out_of_range(number: int) -> None:
     ca_cert, ca_key = _CA
     assert_that(
         calling(generate_crl).with_args(ca_cert, ca_key, [], crl_number=number),
-        raises(ValueError, "Expected crl_number between 0 and 2\\*\\*159 - 1"),
+        raises(TinyPkiError, "Expected crl_number between 0 and 2\\*\\*159 - 1"),
     )

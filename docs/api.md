@@ -3,7 +3,8 @@
 Everything below is importable from `tiny_pki` unless noted. All certificates and
 keys are **PEM `bytes`**; private keys must be **unencrypted** RSA PEM (decrypt
 before calling — see [`security.md`](security.md)). Invalid input raises
-`ValueError` with the expected and actual values in the message.
+`TinyPkiError` (a `ValueError`) with the expected and actual values in the message;
+see [Errors and warnings](#errors-and-warnings).
 
 The library needs only `cryptography` (`pip install tiny-pki`); none of the modules below import the CLI's `prompt-toolkit`, which is installed only with the `tiny-pki[cli]` extra.
 
@@ -26,7 +27,7 @@ Lifetime policy:
   (825). Pass `allow_long_validity=True` to exceed the cap; a server certificate
   over `APPLE_MAX_SERVER_VALIDITY_DAYS` (825) also emits a `TinyPkiWarning`
   because Apple platforms reject it.
-- A leaf may not outlive its CA: issuance raises `ValueError` naming the maximum
+- A leaf may not outlive its CA: issuance raises `TinyPkiError` naming the maximum
   `validity_days` still possible.
 - The validity window (and a CRL's `lastUpdate`) is backdated by
   `CLOCK_SKEW_BACKDATE` (5 minutes) so devices with slightly slow clocks accept
@@ -54,7 +55,7 @@ Name rules (`tiny_pki.names`):
   without a trailing dot, IDNs as punycode A-labels, canonical IP literals, and
   duplicates dropped. URLs, `host:port`, CIDR ranges, IPv6 zone IDs, underscores,
   empty or over-long labels, and numeric last labels (malformed IPs) raise
-  `ValueError`, as do IDN labels that IDNA2003 would silently remap (`faß` →
+  `TinyPkiError`, as do IDN labels that IDNA2003 would silently remap (`faß` →
   `fass`); pass their `xn--` form instead. Wildcards must be the whole leftmost label followed by at least
   two labels (`*.lan.example`); OpenSSL won't match shorter patterns.
 - TLS clients ignore the CN, so a server CN that is itself a valid host/IP and
@@ -136,7 +137,7 @@ Expiry and validity checks for alerting (`tiny_pki.check`, re-exported from `tin
 - The **cutoff** is `now + within`, `by`, or the earlier of the two. With neither, it is `now + default_warning_window(kind, lifetime)`, where `lifetime` is the certificate's own `notAfter - notBefore`.
 - `Status` is a `StrEnum`, declared from least to most severe: `ok`, `expiring` (valid now, gone by the cutoff), `not_yet_valid`, `expired`, `revoked`, `untrusted`. `Status.severity` gives the position.
 - `CertificateStatus` fields: `kind` (`ca` / `client` / `server` / `crl` / `unknown`, from `BasicConstraints` and the EKU), `subject`, `issuer`, `serial_number` (the CRL number for CRLs), `not_before`, `not_after`, `cutoff`, `days_remaining` (whole days until `not_after`, negative once expired), `status`, and `reasons` (human-readable explanations, including informational notes such as "CA expires first").
-- With `ca_cert_pem`, a certificate not signed by that CA is `untrusted`, and a CA that expires first becomes the effective `not_after`. With `crl_pem` (which requires `ca_cert_pem`), a listed serial is `revoked`. A CRL not signed by the given CA raises `ValueError` from `check_certificate` and is `untrusted` from `check_crl`.
+- With `ca_cert_pem`, a certificate not signed by that CA is `untrusted`, and a CA that expires first becomes the effective `not_after`. With `crl_pem` (which requires `ca_cert_pem`), a listed serial is `revoked`. A CRL not signed by the given CA raises `TinyPkiError` from `check_certificate` and is `untrusted` from `check_crl`.
 - `now` and `by` must be timezone-aware; `within` must not be negative.
 - The `tiny-pki check` CLI wraps these for the store or for files; see [monitoring.md](monitoring.md) for its exit codes, JSON output, and scheduling recipes.
 
@@ -160,8 +161,13 @@ Expiry and validity checks for alerting (`tiny_pki.check`, re-exported from `tin
 | `MIN_PKCS12_PASSWORD_LENGTH` | `8` |
 | `VALIDITY_PRESETS` | `[(90, "90 days"), …, (825, "825 days")]` for UI pickers |
 
-`TinyPkiWarning` (a `UserWarning`) flags certificates that were issued but that
-some relying parties may reject.
+## Errors and warnings
+
+`TinyPkiError` (a subclass of `ValueError`, so `except ValueError` keeps working) is raised for every input or policy rejection in `issue`, `revoke`, `bundle`, `names`, `check`, and `secrets`: a bad key size, name, or SAN, a leaf that would outlive its CA, a name-constraint violation, a short PKCS#12 password or Fernet secret, a key that is not an unencrypted RSA key, a naive datetime, and so on. Its message says what was expected and what was received and never contains key material, so it is safe to show to end users.
+
+Other `ValueError`s still come from `cryptography` itself, for example PEM or DER input that cannot be parsed at all or a wrong password when loading a PKCS#12 bundle; `tiny_pki.store` also raises plain `ValueError`, `KeyError`, and `FileNotFoundError` for store operations.
+
+`TinyPkiWarning` (a `UserWarning`) flags certificates that were issued but that some relying parties may reject.
 
 ## Optional: `tiny_pki.secrets`
 
@@ -180,7 +186,7 @@ from tiny_pki.secrets import decrypt_private_key, encrypt_private_key, reencrypt
 
 The secret is used verbatim (no salt / KDF stretching), so it must already be
 high-entropy — e.g. Django's `SECRET_KEY`, not a human password.
-`encrypt_private_key` and `derive_fernet_key` raise `ValueError` for secrets
+`encrypt_private_key` and `derive_fernet_key` raise `TinyPkiError` for secrets
 shorter than `MIN_SECRET_LENGTH` (32 characters). The length check is a floor,
 not a strength test: 32 random characters are fine, 32 repeated letters are not.
 `decrypt_private_key` accepts any non-empty secret, so

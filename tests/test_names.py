@@ -28,6 +28,7 @@ from hamcrest import (
 from pytest import CaptureFixture, MonkeyPatch
 
 from tiny_pki import (
+    TinyPkiError,
     TinyPkiWarning,
     generate_ca_certificate,
     generate_client_certificate,
@@ -89,7 +90,7 @@ def test_normalize_san_entry_accepts(raw: str, expected: str) -> None:
     ],
 )
 def test_normalize_san_entry_rejects(raw: str, message: str) -> None:
-    assert_that(calling(normalize_san_entry).with_args(raw), raises(ValueError, message))
+    assert_that(calling(normalize_san_entry).with_args(raw), raises(TinyPkiError, message))
 
 
 def test_normalize_san_entries_dedupes_in_order() -> None:
@@ -97,7 +98,7 @@ def test_normalize_san_entries_dedupes_in_order() -> None:
         normalize_san_entries(["a.home", "A.HOME.", "10.0.0.1", "a.home"]),
         equal_to(["a.home", "10.0.0.1"]),
     )
-    assert_that(calling(normalize_san_entries).with_args([]), raises(ValueError, "at least one SAN"))
+    assert_that(calling(normalize_san_entries).with_args([]), raises(TinyPkiError, "at least one SAN"))
 
 
 def test_normalize_dns_name_randomized_idempotent_and_case_insensitive() -> None:
@@ -126,7 +127,7 @@ def test_normalize_dns_name_randomized_idempotent_and_case_insensitive() -> None
 def test_normalize_subject_attribute_rejects(raw: str, message: str) -> None:
     assert_that(
         calling(normalize_subject_attribute).with_args(raw, "common_name", max_length=MAX_COMMON_NAME_LENGTH),
-        raises(ValueError, message),
+        raises(TinyPkiError, message),
     )
 
 
@@ -148,11 +149,11 @@ def test_issuance_strips_cn_and_rejects_bad_org() -> None:
         calling(generate_client_certificate).with_args(
             ca_cert, ca_key, "alice", organization_name="Ac\tme", key_size=2048
         ),
-        raises(ValueError, "organization_name without control"),
+        raises(TinyPkiError, "organization_name without control"),
     )
     assert_that(
         calling(generate_ca_certificate).with_args("x" * 65, key_size=2048),
-        raises(ValueError, "common_name of at most 64"),
+        raises(TinyPkiError, "common_name of at most 64"),
     )
 
 
@@ -180,7 +181,7 @@ def test_server_rejects_invalid_san() -> None:
         calling(generate_server_certificate).with_args(
             ca_cert, ca_key, "api.home", ["https://api.home"], key_size=2048
         ),
-        raises(ValueError, "not a URL"),
+        raises(TinyPkiError, "not a URL"),
     )
 
 

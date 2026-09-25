@@ -8,6 +8,7 @@ from cryptography.hazmat.primitives.serialization import pkcs12
 
 from tiny_pki._rsa import load_rsa_private_key
 from tiny_pki.constants import MIN_PKCS12_PASSWORD_LENGTH
+from tiny_pki.errors import TinyPkiError
 
 
 def generate_pkcs12(
@@ -27,13 +28,13 @@ def generate_pkcs12(
     that cannot import the modern format; only use it when a device requires it.
 
     Raises:
-        ValueError: If ``friendly_name`` is empty or ``password`` is shorter than
+        TinyPkiError: If ``friendly_name`` is empty or ``password`` is shorter than
             ``MIN_PKCS12_PASSWORD_LENGTH`` bytes.
     """
     if not friendly_name or not friendly_name.strip():
-        raise ValueError("Expected a non-empty friendly_name")
+        raise TinyPkiError("Expected a non-empty friendly_name")
     if len(password) < MIN_PKCS12_PASSWORD_LENGTH:
-        raise ValueError(f"Expected a password of at least {MIN_PKCS12_PASSWORD_LENGTH} bytes, got {len(password)}")
+        raise TinyPkiError(f"Expected a password of at least {MIN_PKCS12_PASSWORD_LENGTH} bytes, got {len(password)}")
 
     cert = x509.load_pem_x509_certificate(cert_pem)
     key = load_rsa_private_key(key_pem)

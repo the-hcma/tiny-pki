@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from tiny_pki.constants import MAX_CA_WARNING_DAYS, MAX_LEAF_WARNING_DAYS
+from tiny_pki.errors import TinyPkiError
 
 type CertificateKind = Literal["ca", "client", "crl", "server", "unknown"]
 
@@ -85,7 +86,7 @@ def check_certificate(
             verified.
 
     Raises:
-        ValueError: On naive datetimes, a negative ``within``, a ``ca_cert_pem``
+        TinyPkiError: On naive datetimes, a negative ``within``, a ``ca_cert_pem``
             that is not a CA certificate, a CRL without a CA, or a CRL not signed
             by the given CA.
     """
@@ -98,7 +99,7 @@ def check_certificate(
     reasons: list[tuple[Status, str]] = []
 
     if crl_pem is not None and ca_cert_pem is None:
-        raise ValueError("Expected ca_cert_pem with crl_pem so the CRL signature can be verified")
+        raise TinyPkiError("Expected ca_cert_pem with crl_pem so the CRL signature can be verified")
     if ca_cert_pem is not None:
         ca_cert = _load_ca(ca_cert_pem)
         if not _is_issued_by(cert, ca_cert):
@@ -109,7 +110,7 @@ def check_certificate(
         if crl_pem is not None:
             crl = x509.load_pem_x509_crl(crl_pem)
             if not _crl_signed_by(crl, ca_cert):
-                raise ValueError(f"Expected a CRL signed by {_name_label(ca_cert.subject)}")
+                raise TinyPkiError(f"Expected a CRL signed by {_name_label(ca_cert.subject)}")
             revoked = crl.get_revoked_certificate_by_serial_number(cert.serial_number)
             if revoked is not None:
                 reasons.append((Status.REVOKED, f"revoked on {revoked.revocation_date_utc.isoformat()}"))
@@ -143,7 +144,7 @@ def check_crl(
     without ``nextUpdate`` never goes stale and is reported as ``OK``.
 
     Raises:
-        ValueError: On naive datetimes, a negative ``within``, or a
+        TinyPkiError: On naive datetimes, a negative ``within``, or a
             ``ca_cert_pem`` that is not a CA certificate.
     """
     now = _require_aware(now or datetime.now(UTC), "now")
@@ -228,7 +229,7 @@ def _crl_signed_by(crl: x509.CertificateRevocationList, ca_cert: x509.Certificat
 
 def _cutoff(now: datetime, *, within: timedelta | None, by: datetime | None, default: timedelta) -> datetime:
     if within is not None and within < timedelta(0):
-        raise ValueError(f"Expected a non-negative within, got {within}")
+        raise TinyPkiError(f"Expected a non-negative within, got {within}")
     candidates: list[datetime] = []
     if within is not None:
         candidates.append(now + within)
@@ -253,7 +254,7 @@ def _load_ca(ca_cert_pem: bytes) -> x509.Certificate:
     except x509.ExtensionNotFound:
         is_ca = False
     if not is_ca:
-        raise ValueError(
+        raise TinyPkiError(
             f"Expected a CA certificate (BasicConstraints ca=True) for ca_cert_pem, got {_name_label(ca_cert.subject)}"
         )
     return ca_cert
@@ -266,7 +267,7 @@ def _name_label(name: x509.Name) -> str:
 
 def _require_aware(value: datetime, field_name: str) -> datetime:
     if value.tzinfo is None:
-        raise ValueError(f"Expected a timezone-aware {field_name}, got naive {value.isoformat()}")
+        raise TinyPkiError(f"Expected a timezone-aware {field_name}, got naive {value.isoformat()}")
     return value.astimezone(UTC)
 
 

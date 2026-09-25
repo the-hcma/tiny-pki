@@ -32,6 +32,7 @@ from tiny_pki import (
     DEFAULT_SERVER_VALIDITY_DAYS,
     MAX_CLIENT_VALIDITY_DAYS,
     MAX_SERVER_VALIDITY_DAYS,
+    TinyPkiError,
     TinyPkiWarning,
     generate_ca_certificate,
     generate_client_certificate,
@@ -84,7 +85,7 @@ def test_client_cap_and_override() -> None:
     too_long = MAX_CLIENT_VALIDITY_DAYS + 1
     assert_that(
         calling(generate_client_certificate).with_args(ca_cert, ca_key, "alice", key_size=2048, validity_days=too_long),
-        raises(ValueError, f"validity_days <= {MAX_CLIENT_VALIDITY_DAYS} for client"),
+        raises(TinyPkiError, f"validity_days <= {MAX_CLIENT_VALIDITY_DAYS} for client"),
     )
     cert_pem, _ = generate_client_certificate(
         ca_cert, ca_key, "alice", key_size=2048, validity_days=too_long, allow_long_validity=True
@@ -115,7 +116,7 @@ def test_leaf_cannot_outlive_ca() -> None:
     ):
         assert_that(
             calling(issue).with_args(short_ca, short_key, *extra, key_size=2048, validity_days=31),
-            raises(ValueError, r"use validity_days <= (29|30) or renew the CA"),
+            raises(TinyPkiError, r"use validity_days <= (29|30) or renew the CA"),
         )
     cert_pem, _ = generate_client_certificate(short_ca, short_key, "alice", key_size=2048, validity_days=29)
     assert_that(_lifetime_days(x509.load_pem_x509_certificate(cert_pem)), equal_to(29))
@@ -128,7 +129,7 @@ def test_server_cap_override_and_apple_warning() -> None:
         calling(generate_server_certificate).with_args(
             ca_cert, ca_key, "api.home", ["api.home"], key_size=2048, validity_days=too_long
         ),
-        raises(ValueError, "allow_long_validity=True"),
+        raises(TinyPkiError, "allow_long_validity=True"),
     )
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")

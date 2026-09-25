@@ -19,6 +19,7 @@ from pytest import raises as pytest_raises
 
 from tiny_pki import (
     MIN_PKCS12_PASSWORD_LENGTH,
+    TinyPkiError,
     generate_ca_certificate,
     generate_client_certificate,
     generate_pkcs12,
@@ -185,7 +186,7 @@ def test_password_minimum_length() -> None:
     too_short = b"x" * (MIN_PKCS12_PASSWORD_LENGTH - 1)
     assert_that(
         calling(generate_pkcs12).with_args(_LEAF[0], _LEAF[1], _CA[0], "carol", too_short),
-        raises(ValueError, f"at least {MIN_PKCS12_PASSWORD_LENGTH} bytes, got {len(too_short)}"),
+        raises(TinyPkiError, f"at least {MIN_PKCS12_PASSWORD_LENGTH} bytes, got {len(too_short)}"),
     )
     generate_pkcs12(_LEAF[0], _LEAF[1], _CA[0], "carol", b"x" * MIN_PKCS12_PASSWORD_LENGTH)
 

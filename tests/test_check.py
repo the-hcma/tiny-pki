@@ -35,6 +35,7 @@ from tiny_pki import (
     CertificateKind,
     CertificateStatus,
     Status,
+    TinyPkiError,
     check_certificate,
     check_crl,
     default_warning_window,
@@ -115,8 +116,8 @@ def test_cli_inspect_reports_revoked_identity(tmp_path: Path, capsys: CaptureFix
 def test_ca_cert_pem_must_be_a_ca() -> None:
     crl = generate_crl(_CA[0], _CA[1], [])
     message = re.escape("Expected a CA certificate (BasicConstraints ca=True) for ca_cert_pem, got api.home")
-    assert_that(calling(check_certificate).with_args(_CLIENT[0], ca_cert_pem=_SERVER[0]), raises(ValueError, message))
-    assert_that(calling(check_crl).with_args(crl, ca_cert_pem=_SERVER[0]), raises(ValueError, message))
+    assert_that(calling(check_certificate).with_args(_CLIENT[0], ca_cert_pem=_SERVER[0]), raises(TinyPkiError, message))
+    assert_that(calling(check_crl).with_args(crl, ca_cert_pem=_SERVER[0]), raises(TinyPkiError, message))
 
 
 def test_cli_inspect_shows_expiring_and_expired(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
@@ -186,11 +187,11 @@ def test_crl_requires_a_ca_and_a_matching_signature() -> None:
     crl = generate_crl(_CA[0], _CA[1], [])
     assert_that(
         calling(check_certificate).with_args(_CLIENT[0], crl_pem=crl),
-        raises(ValueError, "Expected ca_cert_pem with crl_pem"),
+        raises(TinyPkiError, "Expected ca_cert_pem with crl_pem"),
     )
     assert_that(
         calling(check_certificate).with_args(_CLIENT[0], ca_cert_pem=_OTHER_CA[0], crl_pem=crl),
-        raises(ValueError, "Expected a CRL signed by Other CA"),
+        raises(TinyPkiError, "Expected a CRL signed by Other CA"),
     )
 
 
@@ -253,7 +254,7 @@ def test_kinds_and_labels() -> None:
     ],
 )
 def test_rejects_invalid_arguments(kwargs: dict[str, object], message: str) -> None:
-    assert_that(calling(check_certificate).with_args(_SERVER[0], **kwargs), raises(ValueError, message))
+    assert_that(calling(check_certificate).with_args(_SERVER[0], **kwargs), raises(TinyPkiError, message))
 
 
 def test_randomized_statuses_match_reference() -> None:
