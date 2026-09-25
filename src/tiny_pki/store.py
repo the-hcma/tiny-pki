@@ -399,12 +399,12 @@ class CertificateStore:
         self.ensure_layout()
         if self.has_ca() and not force:
             raise ValueError(f"CA already exists under {self.root}; pass force=True to replace")
-        _write_plain(self.ca_cert_path, cert_pem)
-        _write_secret(self.ca_key_path, key_pem)
+        _write_plain(self._validated_write_path("ca/ca.crt"), cert_pem)
+        _write_secret(self._validated_write_path("ca/ca.key"), key_pem)
 
     def write_crl(self, crl_pem: bytes) -> None:
         self.ensure_layout()
-        _write_plain(self.crl_path, crl_pem)
+        _write_plain(self._validated_write_path("ca/crl.pem"), crl_pem)
 
     def _is_legacy_layout(self) -> bool:
         """True when any flat-root CA material or ``certs/`` index paths remain."""
@@ -490,7 +490,7 @@ class CertificateStore:
         for name in ("ca.crt", "ca.key", "crl.pem"):
             src = self.root / name
             if src.is_file():
-                dest = self.ca_dir / name
+                dest = self._validated_write_path(f"ca/{name}")
                 if not dest.exists():
                     shutil.move(str(src), str(dest))
 
@@ -508,6 +508,28 @@ class CertificateStore:
         except ValueError as exc:
             raise ValueError(f"Expected path under store root {self.root}, got {resolved}") from exc
         return resolved
+
+    def _validated_write_path(self, relative: str) -> Path:
+        """Resolve ``relative`` under the store root for a fresh write, refusing a symlink anywhere in it.
+
+        ``_path_under_root`` alone only rejects a symlink whose *target*
+        escapes the store root — a symlink at any component of ``relative``
+        (leaf or intermediate directory, e.g. ``ca`` or ``ca.key``) whose
+        target still resolves inside the root would pass it. Since the
+        caller then writes through the *resolved* path, ``_open_new_file``'s
+        own symlink check never sees the original symlink either — it only
+        ever inspects the final component too, and by then that component
+        is already the resolved (non-symlink) target. Walking every
+        component of the *unresolved* path and checking ``is_symlink()``
+        catches a symlink anywhere, regardless of where it points, before
+        any of it is resolved.
+        """
+        current = self.root
+        for part in Path(relative).parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError(f"Expected {current} to not already exist as a symlink")
+        return self._path_under_root(relative)
 
     def _read_index(self) -> list[IssuedCertificate]:
         self._maybe_migrate_legacy_layout()
@@ -529,10 +551,12 @@ class CertificateStore:
     def _write_index(self, entries: list[IssuedCertificate]) -> None:
         self.ca_dir.mkdir(parents=True, exist_ok=True)
         payload = [asdict(e) for e in entries]
-        tmp = self.index_path.with_suffix(".json.tmp")
-        # index_path itself doesn't need this: replace() below is a rename(2),
-        # which swaps the destination directory entry rather than following a
-        # symlink there. The tmp path is opened directly, though, so it does.
+        # _validated_write_path rejects a symlink at index.json.tmp itself
+        # (wherever it points) and, via _path_under_root, one at ca/ that
+        # would resolve outside the store root. index_path itself doesn't
+        # need this: replace() below is a rename(2), which swaps the
+        # destination directory entry rather than following a symlink there.
+        tmp = self._validated_write_path("ca/index.json.tmp")
         _write_plain(tmp, (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"))
         tmp.replace(self.index_path)
 
@@ -594,13 +618,15 @@ def _safe_filename(common_name: str) -> str:
     return cleaned
 
 
-# A fixed store path (ca.key, ca.crt, crl.pem, index.json.tmp) isn't validated
-# by _path_under_root the way leaf cert/key paths are, so a pre-planted symlink
-# there would otherwise be followed on write. O_NOFOLLOW makes the open() call
-# itself fail (ELOOP) rather than write through the link, closing the race
-# between the is_symlink() check below and the open() call. Missing on
-# Windows; there is no equivalent flag, so a symlink at a fixed path is
-# written through as before.
+# write_ca/write_crl/_write_index/_migrate_legacy_layout resolve their target
+# through _validated_write_path before calling this, which rejects a symlink
+# at the target itself (wherever it points) and, via _path_under_root, one at
+# a parent component like "ca/" that would resolve outside the store root.
+# This is the last-component backstop for the TOCTOU gap that check-then-open
+# leaves open: a symlink planted at the same path between that check and this
+# open() call. O_NOFOLLOW makes the open() itself fail (ELOOP) rather than
+# write through such a link. Missing on Windows; there is no equivalent flag,
+# so that race is not closed there.
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
 
