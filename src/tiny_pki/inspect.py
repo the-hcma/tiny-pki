@@ -33,12 +33,12 @@ def get_certificate_fingerprint(cert_pem: bytes) -> str:
 
 
 def get_certificate_issuer(cert_pem: bytes) -> str:
-    """Return the issuer common name, or the full issuer DN if CN is absent."""
+    """Return the issuer common name, or the full issuer DN (RFC 4514) if CN is absent."""
     cert = x509.load_pem_x509_certificate(cert_pem)
     cn_attrs = cert.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)
     if cn_attrs:
         return str(cn_attrs[0].value)
-    return str(cert.issuer)
+    return cert.issuer.rfc4514_string()
 
 
 def get_certificate_metadata(cert_pem: bytes) -> dict[str, str]:
@@ -74,12 +74,12 @@ def get_certificate_serial_number(cert_pem: bytes) -> int:
 
 
 def get_certificate_subject(cert_pem: bytes) -> str:
-    """Return the subject common name, or the full subject DN if CN is absent."""
+    """Return the subject common name, or the full subject DN (RFC 4514) if CN is absent."""
     cert = x509.load_pem_x509_certificate(cert_pem)
     cn_attrs = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
     if cn_attrs:
         return str(cn_attrs[0].value)
-    return str(cert.subject)
+    return cert.subject.rfc4514_string()
 
 
 def is_certificate_self_signed(cert_pem: bytes) -> bool:
