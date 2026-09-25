@@ -91,6 +91,7 @@ Every function returns bytes (or plain values); writing them to disk, a
 database, or nginx is up to you. See [`docs/api.md`](docs/api.md) for the full
 API, [`docs/security.md`](docs/security.md) for CA-key handling, and
 [`docs/defaults.md`](docs/defaults.md) for every default and the reason behind it.
+To report a vulnerability, see [`SECURITY.md`](SECURITY.md).
 
 ## Quick start (CLI)
 
