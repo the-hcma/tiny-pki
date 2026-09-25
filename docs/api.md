@@ -167,7 +167,7 @@ Expiry and validity checks for alerting (`tiny_pki.check`, re-exported from `tin
 
 Other `ValueError`s still come from `cryptography` itself, for example PEM or DER input that cannot be parsed at all or a wrong password when loading a PKCS#12 bundle; `tiny_pki.store` also raises plain `ValueError`, `KeyError`, and `FileNotFoundError` for store operations.
 
-`TinyPkiWarning` (a `UserWarning`) flags certificates that were issued but that some relying parties may reject.
+`TinyPkiWarning` (a `UserWarning`) flags certificates that were issued but that some relying parties may reject. It is emitted only once issuance has succeeded: a call that raises `TinyPkiError` emits no warnings.
 
 ## Optional: `tiny_pki.secrets`
 

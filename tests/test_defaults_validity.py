@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -106,6 +107,35 @@ def test_default_leaf_validity() -> None:
     server_pem, _ = generate_server_certificate(ca_cert, ca_key, "api.home", ["api.home"], key_size=2048)
     assert_that(_lifetime_days(x509.load_pem_x509_certificate(client_pem)), equal_to(DEFAULT_CLIENT_VALIDITY_DAYS))
     assert_that(_lifetime_days(x509.load_pem_x509_certificate(server_pem)), equal_to(DEFAULT_SERVER_VALIDITY_DAYS))
+
+
+def test_failed_issuance_emits_no_warnings() -> None:
+    ca_cert, ca_key = _CA
+    home_ca, home_key = generate_ca_certificate("Home CA", key_size=2048, permitted_subtrees=["home"])
+    failing: list[Callable[[], object]] = [
+        lambda: generate_server_certificate(
+            ca_cert, ca_key, "x", ["a.lan"], validity_days=36500, key_size=2048, allow_long_validity=True
+        ),
+        lambda: generate_server_certificate(home_ca, home_key, "api.home", ["other.lan"], key_size=2048),
+        lambda: generate_client_certificate(
+            ca_cert, ca_key, "alice", validity_days=36500, key_size=2048, allow_long_validity=True
+        ),
+    ]
+    for issue in failing:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert_that(calling(issue), raises(TinyPkiError))
+        assert_that(caught, has_length(0))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        generate_server_certificate(
+            ca_cert, ca_key, "x", ["a.lan"], validity_days=900, key_size=2048, allow_long_validity=True
+        )
+    assert_that(caught, has_length(2))
+    for warning in caught:
+        assert_that(warning.category, equal_to(TinyPkiWarning))
+        assert_that(warning.filename, contains_string("test_defaults_validity"))
 
 
 def test_leaf_cannot_outlive_ca() -> None:
