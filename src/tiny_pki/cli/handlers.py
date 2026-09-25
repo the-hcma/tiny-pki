@@ -10,7 +10,6 @@ import json
 import os
 import sys
 import warnings
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict
 
@@ -34,6 +33,7 @@ from tiny_pki import (
     get_certificate_serial_number,
     get_certificate_subject,
 )
+from tiny_pki.check import CertificateStatus, Status, check_certificate, check_crl
 from tiny_pki.cli.theme import Theme
 from tiny_pki.names import common_name_as_san, normalize_san_entries
 from tiny_pki.store import CertificateStore, IssuedCertificate
@@ -364,7 +364,8 @@ def _cmd_inspect(args: list[str], *, store: CertificateStore | None, theme: Them
     entry = store.get_certificate(target)
     if entry is None:
         raise KeyError(f"Expected PEM path or store identity, got {target!r}")
-    _print_cert_summary(store.read_certificate_pem(entry), theme)
+    ca_cert, crl = _store_trust_anchors(store, theme)
+    _print_cert_summary(store.read_certificate_pem(entry), theme, ca_cert_pem=ca_cert, crl_pem=crl)
 
 
 def _cmd_revoke(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
@@ -487,23 +488,67 @@ def _cmd_crl(args: list[str], *, store: CertificateStore | None, theme: Theme) -
     print(theme.ok(f"crl regenerated: {store.crl_path}"))
 
 
-def _print_cert_summary(cert_pem: bytes, theme: Theme) -> None:
+def _print_cert_summary(
+    cert_pem: bytes, theme: Theme, *, ca_cert_pem: bytes | None = None, crl_pem: bytes | None = None
+) -> None:
+    result = check_certificate(cert_pem, ca_cert_pem=ca_cert_pem, crl_pem=crl_pem)
     expiry = get_certificate_expiry(cert_pem)
-    now = datetime.now(UTC)
-    if expiry <= now:
-        status = theme.error("expired")
-    elif (expiry - now).days <= 30:
-        status = theme.warn("expiring soon")
-    else:
-        status = theme.ok("valid")
+    status = _styled_status(result, theme)
     print(f"subject   {get_certificate_subject(cert_pem)}")
     print(f"issuer    {get_certificate_issuer(cert_pem)}")
     print(f"serial    {format(get_certificate_serial_number(cert_pem), 'x')}")
     print(f"expires   {expiry.isoformat()} ({status})")
+    for reason in result.reasons:
+        print(theme.dim(f"          {reason}"))
     print(f"fingerprint {get_certificate_fingerprint(cert_pem)}")
     sans = get_certificate_sans(cert_pem)
     if sans:
         print(f"sans      {', '.join(sans)}")
+
+
+def _days(count: int) -> str:
+    return f"{count} day" if count == 1 else f"{count} days"
+
+
+def _store_trust_anchors(store: CertificateStore, theme: Theme) -> tuple[bytes | None, bytes | None]:
+    """Return the store's CA certificate and CRL, dropping either when unusable.
+
+    Only the CA certificate is read, so stores that keep the CA key offline still work.
+    """
+    crl = store.read_crl()
+    if not store.ca_cert_path.is_file():
+        return None, None
+    ca_cert = store.ca_cert_path.read_bytes()
+    try:
+        check_certificate(ca_cert, ca_cert_pem=ca_cert)
+    except ValueError as exc:
+        print(theme.warn(f"ignoring the store CA and CRL: {exc}"), file=sys.stderr)
+        return None, None
+    if crl is None:
+        return ca_cert, None
+    try:
+        untrusted = check_crl(crl, ca_cert_pem=ca_cert).status is Status.UNTRUSTED
+    except ValueError as exc:
+        print(theme.warn(f"ignoring the store CRL: {exc}"), file=sys.stderr)
+        return ca_cert, None
+    if untrusted:
+        print(theme.warn("ignoring the store CRL: it is not signed by the store CA"), file=sys.stderr)
+        return ca_cert, None
+    return ca_cert, crl
+
+
+def _styled_status(result: CertificateStatus, theme: Theme) -> str:
+    """Render a status for humans, e.g. ``expiring in 12 days`` or ``expired 3 days ago``."""
+    days = result.days_remaining
+    match result.status:
+        case Status.OK:
+            return theme.ok("valid" if days is None else f"valid, {_days(days)} left")
+        case Status.EXPIRING:
+            return theme.warn(f"expiring in {_days(days or 0)}")
+        case Status.EXPIRED:
+            return theme.error(f"expired {_days(-(days or 0))} ago")
+        case _:
+            return theme.error(result.status.value.replace("_", " "))
 
 
 def _parse_days(raw: str, *, default: int) -> int:
