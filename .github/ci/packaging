@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# .github/ci/ gate — the-hcma/repository-helpers convention; run by ci.yml.
+# Builds the wheel and sdist and checks them the way a consumer would see them.
+set -euo pipefail
+
+# Pinned so the gate is deterministic; bump deliberately (never `latest`).
+mypy_version="2.3.1"
+
+dist="$(mktemp -d)"
+trap 'rm -rf "$dist"' EXIT
+
+timeout 300 uv build --quiet --out-dir "$dist"
+wheel="$(ls "$dist"/*.whl)"
+sdist="$(ls "$dist"/*.tar.gz)"
+
+# Capture listings first: `producer | grep -q` fails under pipefail when grep exits early.
+wheel_files="$(unzip -Z1 "$wheel")"
+sdist_files="$(tar -tzf "$sdist")"
+if ! grep -qx 'tiny_pki/py.typed' <<< "$wheel_files"; then
+  echo "Expected tiny_pki/py.typed in $(basename "$wheel") (PEP 561)" >&2
+  exit 1
+fi
+if ! grep -q '/src/tiny_pki/py.typed$' <<< "$sdist_files"; then
+  echo "Expected src/tiny_pki/py.typed in $(basename "$sdist") (PEP 561)" >&2
+  exit 1
+fi
+
+typed_venv="$dist/typed"
+timeout 120 uv venv --quiet --python "$(tr -d '[:space:]' < .python-version)" "$typed_venv"
+timeout 300 uv pip install --quiet --python "$typed_venv/bin/python" "$wheel" "mypy==$mypy_version"
+(cd "$dist" && "$typed_venv/bin/mypy" --strict -c "import tiny_pki; import tiny_pki.secrets")
+
+echo "packaging checks passed"
