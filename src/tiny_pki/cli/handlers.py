@@ -38,8 +38,6 @@ from tiny_pki.cli.theme import Theme
 from tiny_pki.names import common_name_as_san, normalize_san_entries
 from tiny_pki.store import CertificateStore, IssuedCertificate
 
-P12_PASSWORD_ENV = "TINY_PKI_P12_PASSWORD"
-
 
 class HandlerNotReadyError(RuntimeError):
     """Kept for the shell dispatch contract; not raised by real handlers."""
@@ -400,9 +398,9 @@ def _cmd_delete(args: list[str], *, store: CertificateStore | None, theme: Theme
 def _cmd_export(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     store = _require_store(store)
     if len(args) < 2:
-        raise ValueError("Expected export pem|p12 <identity> [--out PATH] [--legacy] [--password ...]")
+        raise ValueError("Expected export pem|p12 <identity> [--out PATH] [--legacy] [--password-file PATH]")
     fmt = args[0]
-    opts = _parse_flags(args[1:], allowed={"legacy", "out", "password"})
+    opts = _parse_flags(args[1:], allowed={"legacy", "out", "password-file"})
     if not opts["positional"]:
         raise ValueError("Expected identity after export format")
     identity = opts["positional"][0]
@@ -419,24 +417,8 @@ def _cmd_export(args: list[str], *, store: CertificateStore | None, theme: Theme
         print(theme.ok(f"wrote {out}"))
         return
     if fmt == "p12":
-        password = opts["flags"].get("password")
-        if password is not None:
-            print(
-                theme.warn(
-                    "warning: --password is visible in shell/REPL history and process listings; "
-                    f"prefer the prompt or {P12_PASSWORD_ENV}"
-                ),
-                file=sys.stderr,
-            )
-        else:
-            password = os.environ.get(P12_PASSWORD_ENV)
-        if password is None:
-            try:
-                password = getpass.getpass("PKCS#12 password: ")
-            except (EOFError, KeyboardInterrupt) as exc:
-                raise ValueError("Expected a non-empty password") from exc
-        if not password:
-            raise ValueError("Expected a non-empty password")
+        password_file = opts["flags"].get("password-file")
+        password = _read_password_file(Path(password_file)) if password_file else _prompt_p12_password()
         p12 = generate_pkcs12(
             cert_pem, key_pem, ca_cert, entry.common_name, password.encode(), legacy="legacy" in opts["flags"]
         )
@@ -447,8 +429,54 @@ def _cmd_export(args: list[str], *, store: CertificateStore | None, theme: Theme
         else:
             path = store.write_bundle(entry.common_name, p12, serial_number=entry.serial_number)
         print(theme.ok(f"wrote {path}"))
+        if password_file:
+            _offer_to_remove_password_file(Path(password_file), theme)
         return
     raise ValueError(f"Expected export pem|p12, got {fmt!r}")
+
+
+def _offer_to_remove_password_file(path: Path, theme: Theme) -> None:
+    """Warn that ``path`` holds the bundle password in plaintext and offer to delete it."""
+    print(theme.warn(f"warning: {path} holds the bundle password in plaintext"), file=sys.stderr)
+    remove = False
+    if sys.stdin.isatty():
+        try:
+            answer = input(f"Remove {path} now? [Y/n] ")
+        except (EOFError, KeyboardInterrupt):
+            answer = "n"
+        remove = answer.strip().lower() in {"", "y", "yes"}
+    if remove:
+        path.unlink(missing_ok=True)
+        print(theme.ok(f"removed {path}"))
+    else:
+        print(theme.warn(f"warning: left {path} in place; delete it once the device has the bundle"), file=sys.stderr)
+
+
+def _prompt_p12_password() -> str:
+    try:
+        password = getpass.getpass("PKCS#12 password: ")
+        if password and getpass.getpass("Repeat password: ") != password:
+            raise ValueError("Expected the repeated password to match")
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise ValueError("Expected a non-empty password") from exc
+    if not password:
+        raise ValueError("Expected a non-empty password")
+    return password
+
+
+def _read_password_file(path: Path) -> str:
+    """Read the first line of ``path`` (trailing newline dropped) as the bundle password."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"Expected a readable --password-file, got {path} ({exc.strerror})") from exc
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Expected a UTF-8 --password-file, got undecodable bytes in {path}") from exc
+    lines = text.splitlines()
+    password = lines[0] if lines else ""
+    if not password:
+        raise ValueError(f"Expected a password on the first line of {path}, got an empty line")
+    return password
 
 
 def _cmd_crl(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
@@ -518,9 +546,9 @@ def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
             else:
                 value = ""
                 i += 1
+            if not value and name in {"out", "password-file", "permit", "san"}:
+                raise ValueError(f"Expected a non-empty value for --{name}")
             if name in {"permit", "san"}:
-                if not value:
-                    raise ValueError(f"Expected a non-empty value for --{name}")
                 multi.setdefault(name, []).append(value)
             else:
                 flags[name] = value

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import cast
 
@@ -47,7 +48,9 @@ def test_init_create_show_revoke_delete_export(
     tmp_path: Path, capsys: CaptureFixture[str], monkeypatch: MonkeyPatch
 ) -> None:
     store = tmp_path / "ca"
-    monkeypatch.setenv("TINY_PKI_P12_PASSWORD", "secret-pw")
+    password_file = tmp_path / "p12-password"
+    password_file.write_text("secret-pw\n")
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     out, err = _run(store, "init", "--cn", "Test CA", "--key-size", "2048", capsys=capsys)
     assert_that(err, equal_to(""))
     assert_that(out, contains_string("CA created"))
@@ -114,14 +117,16 @@ def test_init_create_show_revoke_delete_export(
         "alice",
         "--out",
         str(p12_out),
+        "--password-file",
+        str(password_file),
         capsys=capsys,
     )
-    assert_that(err, equal_to(""))
+    assert_that(err, contains_string(f"left {password_file} in place"))
     assert_that(p12_out.is_file(), is_(True))
     assert_that(oct(p12_out.stat().st_mode & 0o777), equal_to("0o600"))
 
-    out, err = _run(store, "export", "p12", "alice", capsys=capsys)
-    assert_that(err, equal_to(""))
+    out, err = _run(store, "export", "p12", "alice", "--password-file", str(password_file), capsys=capsys)
+    assert_that(password_file.is_file(), is_(True))
     alice = cs.get_certificate("alice")
     assert_that(alice, is_(not_none()))
     alice_entry = cast(IssuedCertificate, alice)

@@ -99,9 +99,11 @@ that window. Pass the **full** revoked set every time; the CRL is not incrementa
 - `legacy=True` (CLI `export p12 --legacy`) switches to 3DES with a SHA-1 MAC,
   for older Android or Apple keychains that can't import the modern format. Use
   it only when a device needs it.
-- The CLI takes the password from a prompt, from `TINY_PKI_P12_PASSWORD`, or from
-  `--password`. The last one warns, because it ends up in shell/REPL history and
-  process listings.
+- The CLI never takes the password as an argument, because arguments end up in
+  shell/REPL history and process listings. It prompts twice (the entries must match)
+  or reads the first line of `--password-file PATH`. After exporting from a file, it
+  warns that the file holds the password in plaintext and, on a terminal, offers to
+  delete it. Otherwise it leaves the file in place and says so.
 
 ## Inspect
 
