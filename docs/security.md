@@ -36,7 +36,8 @@ key after revocation.
 
 The PKCS#12 password protects the key in transit. Use a long, random one: the
 bundle can be attacked offline. Send the password separately from the file.
-Prefer the interactive prompt or `TINY_PKI_P12_PASSWORD` over `--password`.
+Prefer the interactive prompt. If you use `--password-file`, let the CLI delete
+the file afterwards, or delete it yourself once the device has the bundle.
 Reserve `--legacy` (3DES/SHA-1) for devices that can't import the default
 AES-256 bundle.
 
