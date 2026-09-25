@@ -10,6 +10,9 @@ import json
 import os
 import sys
 import warnings
+from collections import Counter
+from collections.abc import Callable
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import TypedDict
 
@@ -33,10 +36,16 @@ from tiny_pki import (
     get_certificate_serial_number,
     get_certificate_subject,
 )
-from tiny_pki.check import CertificateStatus, Status, check_certificate, check_crl
+from tiny_pki.check import CertificateStatus, Status, check_certificate, check_crl, worst_status
 from tiny_pki.cli.theme import Theme
 from tiny_pki.names import common_name_as_san, normalize_san_entries
 from tiny_pki.store import CertificateStore, IssuedCertificate
+
+CHECK_EXIT_CRITICAL = 2
+CHECK_EXIT_OK = 0
+CHECK_EXIT_UNKNOWN = 3
+CHECK_EXIT_WARNING = 1
+_CHECK_KINDS = ("ca", "client", "crl", "server")
 
 
 class HandlerNotReadyError(RuntimeError):
@@ -55,11 +64,15 @@ def dispatch(
     *,
     store: CertificateStore | None,
     theme: Theme,
-) -> None:
-    """Dispatch a PKI verb. Raises ValueError/KeyError/FileNotFoundError on user errors."""
+) -> int:
+    """Dispatch a PKI verb and return its exit status.
+
+    Raises ValueError/KeyError/FileNotFoundError on user errors.
+    """
     if command == "renew-crl":
         command = "crl"
-    handlers = {
+    handlers: dict[str, Callable[..., int | None]] = {
+        "check": _cmd_check,
         "create": _cmd_create,
         "crl": _cmd_crl,
         "delete": _cmd_delete,
@@ -73,7 +86,7 @@ def dispatch(
     handler = handlers.get(command)
     if handler is None:
         raise ValueError(f"Unknown command {command!r}; type help")
-    handler(args, store=store, theme=theme)
+    return handler(args, store=store, theme=theme) or 0
 
 
 def _confirm_cn_in_sans(name: str, sans: list[str], flags: dict[str, str]) -> bool:
@@ -124,6 +137,39 @@ def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) 
     store.write_crl(generate_crl(cert_pem, key_pem, []))
     print(theme.ok(f"CA created: {get_certificate_subject(cert_pem)}"))
     print(theme.dim(f"fingerprint {get_certificate_fingerprint(cert_pem)}"))
+
+
+def _cmd_check(args: list[str], *, store: CertificateStore | None, theme: Theme) -> int:
+    """Check the store for expired, expiring, revoked, or untrusted artifacts.
+
+    Exit status follows the monitoring-plugin convention: 0 all OK, 1 something
+    expiring, 2 something expired / not yet valid / revoked / untrusted.
+    """
+    opts = _parse_flags(args, allowed={"by", "include-revoked", "json", "kind", "quiet", "within"})
+    if opts["positional"]:
+        raise ValueError(f"Unexpected arguments {opts['positional']}; check scans --store")
+    store = _require_store(store)
+    within = _parse_within(opts["flags"]["within"]) if "within" in opts["flags"] else None
+    by = _parse_by(opts["flags"]["by"]) if "by" in opts["flags"] else None
+    kinds = set(opts["multi"].get("kind", [])) or set(_CHECK_KINDS)
+    unknown_kinds = kinds - set(_CHECK_KINDS)
+    if unknown_kinds:
+        raise ValueError(f"Expected --kind in {', '.join(_CHECK_KINDS)}, got {', '.join(sorted(unknown_kinds))}")
+
+    rows = _check_store(store, within=within, by=by, kinds=kinds, include_revoked="include-revoked" in opts["flags"])
+    rows.sort(key=lambda row: (row[1].not_after is None, row[1].not_after or datetime.max.replace(tzinfo=UTC)))
+    worst = worst_status([result for _, result in rows])
+    if "json" in opts["flags"]:
+        payload = {"status": worst.value, "results": [_check_row_json(name, result) for name, result in rows]}
+        print(json.dumps(payload, indent=2))
+    else:
+        shown = [row for row in rows if row[1].status is not Status.OK] if "quiet" in opts["flags"] else rows
+        _print_check_table(shown, theme)
+        if shown or "quiet" not in opts["flags"]:
+            print(_check_summary(rows, within=within, by=by))
+    if worst is Status.OK:
+        return CHECK_EXIT_OK
+    return CHECK_EXIT_WARNING if worst is Status.EXPIRING else CHECK_EXIT_CRITICAL
 
 
 def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
@@ -506,6 +552,69 @@ def _print_cert_summary(
         print(f"sans      {', '.join(sans)}")
 
 
+def _check_row_json(name: str, result: CertificateStatus) -> dict[str, object]:
+    serial = result.serial_number
+    return {
+        "name": name,
+        "kind": result.kind,
+        "status": result.status.value,
+        "subject": result.subject,
+        "issuer": result.issuer,
+        "serial_number": None if serial is None else format(serial, "x"),
+        "not_before": result.not_before.isoformat(),
+        "not_after": None if result.not_after is None else result.not_after.isoformat(),
+        "cutoff": result.cutoff.isoformat(),
+        "days_remaining": result.days_remaining,
+        "reasons": list(result.reasons),
+    }
+
+
+def _check_store(
+    store: CertificateStore,
+    *,
+    within: timedelta | None,
+    by: datetime | None,
+    kinds: set[str],
+    include_revoked: bool,
+) -> list[tuple[str, CertificateStatus]]:
+    """Check the CA, the CRL, and every issued leaf (revoked ones only on request)."""
+    crl_pem = store.read_crl()
+    if not store.ca_cert_path.is_file():
+        raise FileNotFoundError(f"Expected a CA certificate at {store.ca_cert_path}")
+    ca_cert = store.ca_cert_path.read_bytes()
+    rows: list[tuple[str, CertificateStatus]] = []
+    if "ca" in kinds:
+        rows.append(("ca", check_certificate(ca_cert, within=within, by=by, ca_cert_pem=ca_cert)))
+    trusted_crl: bytes | None = None
+    if crl_pem is not None:
+        crl_result = check_crl(crl_pem, within=within, by=by, ca_cert_pem=ca_cert)
+        if crl_result.status is not Status.UNTRUSTED:
+            trusted_crl = crl_pem
+        if "crl" in kinds:
+            rows.append(("crl", crl_result))
+    for entry in store.list_certificates(status="all" if include_revoked else "active"):
+        if entry.kind not in kinds:
+            continue
+        cert_pem = store.read_certificate_pem(entry)
+        result = check_certificate(cert_pem, within=within, by=by, ca_cert_pem=ca_cert, crl_pem=trusted_crl)
+        rows.append((entry.common_name, result))
+    return rows
+
+
+def _check_summary(rows: list[tuple[str, CertificateStatus]], *, within: timedelta | None, by: datetime | None) -> str:
+    counts = Counter(result.status for _, result in rows)
+    parts = [f"{counts[status]} {status.value.replace('_', ' ')}" for status in reversed(Status) if counts[status]]
+    if within is not None and by is not None:
+        window = f"within {_days(within.days)} or by {by.date().isoformat()}, whichever is earlier"
+    elif within is not None:
+        window = f"within {_days(within.days)}"
+    elif by is not None:
+        window = f"by {by.date().isoformat()}"
+    else:
+        window = "default window (a third of each lifetime, capped)"
+    return f"check: {', '.join(parts) or 'nothing to check'}; {window}"
+
+
 def _days(count: int) -> str:
     return f"{count} day" if count == 1 else f"{count} days"
 
@@ -537,6 +646,12 @@ def _store_trust_anchors(store: CertificateStore, theme: Theme) -> tuple[bytes |
     return ca_cert, crl
 
 
+def _style_for(status: Status, theme: Theme) -> Callable[[str], str]:
+    if status is Status.OK:
+        return theme.ok
+    return theme.warn if status is Status.EXPIRING else theme.error
+
+
 def _styled_status(result: CertificateStatus, theme: Theme) -> str:
     """Render a status for humans, e.g. ``expiring in 12 days`` or ``expired 3 days ago``."""
     days = result.days_remaining
@@ -549,6 +664,38 @@ def _styled_status(result: CertificateStatus, theme: Theme) -> str:
             return theme.error(f"expired {_days(-(days or 0))} ago")
         case _:
             return theme.error(result.status.value.replace("_", " "))
+
+
+def _parse_by(raw: str) -> datetime:
+    """``YYYY-MM-DD`` → the end of that day in local time (timezone-aware)."""
+    try:
+        day = date.fromisoformat(raw)
+    except ValueError as exc:
+        raise ValueError(f"Expected --by YYYY-MM-DD, got {raw!r}") from exc
+    return datetime.combine(day, time.max).astimezone()
+
+
+def _parse_within(raw: str) -> timedelta:
+    try:
+        days = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"Expected --within as a whole number of days, got {raw!r}") from exc
+    if days < 0:
+        raise ValueError(f"Expected --within of zero or more days, got {days}")
+    return timedelta(days=days)
+
+
+def _print_check_table(rows: list[tuple[str, CertificateStatus]], theme: Theme) -> None:
+    if not rows:
+        return
+    name_width = max(len("name"), *(len(name) for name, _ in rows))
+    print(theme.dim(f"{'status':<14}{'kind':<8}{'name':<{name_width + 2}}{'expires':<18}remaining"))
+    for name, result in rows:
+        expires = "-" if result.not_after is None else result.not_after.astimezone().strftime("%Y-%m-%d %H:%M")
+        remaining = "-" if result.days_remaining is None else _days(result.days_remaining)
+        label = result.status.value.replace("_", " ")
+        styled = _style_for(result.status, theme)(f"{label:<14}")
+        print(f"{styled}{result.kind:<8}{name:<{name_width + 2}}{expires:<18}{remaining}")
 
 
 def _parse_days(raw: str, *, default: int) -> int:
@@ -574,7 +721,9 @@ def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
     positional: list[str] = []
     flags: dict[str, str] = {}
     multi: dict[str, list[str]] = {}
-    valueless = frozenset({"allow-long-validity", "force", "legacy", "no-cn-san", "yes"})
+    valueless = frozenset(
+        {"allow-long-validity", "force", "include-revoked", "json", "legacy", "no-cn-san", "quiet", "yes"}
+    )
     i = 0
     while i < len(args):
         token = args[i]
@@ -591,9 +740,9 @@ def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
             else:
                 value = ""
                 i += 1
-            if not value and name in {"out", "password-file", "permit", "san"}:
+            if not value and name in {"by", "kind", "out", "password-file", "permit", "san", "within"}:
                 raise ValueError(f"Expected a non-empty value for --{name}")
-            if name in {"permit", "san"}:
+            if name in {"kind", "permit", "san"}:
                 multi.setdefault(name, []).append(value)
             else:
                 flags[name] = value

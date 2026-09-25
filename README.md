@@ -97,6 +97,7 @@ tiny-pki --store ./stores/ca export p12 alice   # prompts for the bundle passwor
 tiny-pki --store ./stores/ca revoke alice   # regenerates stores/ca/ca/crl.pem
 tiny-pki --store ./stores/ca list clients
 tiny-pki --store ./stores/ca show certs
+tiny-pki --store ./stores/ca check --within 30   # exit 0 ok, 1 expiring, 2 expired/revoked/untrusted, 3 error
 ```
 
 Or drop into the REPL (Vim keys by default; `edit-mode emacs` to switch):
@@ -112,6 +113,14 @@ re-run `tiny-pki --store ./stores/ca crl` (and reload nginx) before it expires.
 Server certificates default to 90 days and client certificates to 397 days
 (capped at 200 / 825; `--allow-long-validity` overrides). Re-issue with `create`
 before they expire — see [`docs/defaults.md`](docs/defaults.md#lifetimes) for the rationale.
+
+`check` lists the CA, the CRL, and every live leaf, soonest expiry first, and flags anything
+expired, expiring, revoked, or not signed by the CA. The window is `--within DAYS`, `--by
+YYYY-MM-DD` (end of that day, local time), or by default a third of each certificate's lifetime
+(capped at 30 days for leaves and 180 for the CA). Filter with `--kind ca|client|server|crl`
+(repeatable), add `--include-revoked`, print only problems with `--quiet`, or get machine-readable
+output with `--json`. Exit codes follow the Nagios convention, so it drops into cron or a
+monitoring agent unchanged.
 
 ### Store layout
 
