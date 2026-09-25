@@ -126,7 +126,8 @@ monitoring agent unchanged.
 certificate is checked), CRLs, PKCS#12 bundles (`--password-file PATH`), and directories
 (`*.pem`, `*.crt`, `*.cer`, `*.crl`, `*.p12`, `*.pfx`, one level deep; unreadable entries are
 skipped with a note). No store is needed. Add `--ca PATH` to also flag certificates and CRLs not
-issued by that CA.
+issued by that CA. See [`docs/monitoring.md`](docs/monitoring.md) for the JSON schema and
+cron / systemd-timer recipes.
 
 ### Store layout
 
