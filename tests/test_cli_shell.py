@@ -14,6 +14,7 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.history import InMemoryHistory
 from pytest import CaptureFixture, MonkeyPatch, raises
 
+import tiny_pki
 from tiny_pki import version as version_module
 from tiny_pki.cli import main as main_mod
 from tiny_pki.cli.commands import COMMANDS, PKI_COMMANDS
@@ -106,7 +107,7 @@ def test_version_flag(monkeypatch: MonkeyPatch) -> None:
     buf = StringIO()
     with redirect_stdout(buf):
         main(["--version"])
-    assert_that(buf.getvalue().strip(), equal_to("tiny-pki 0.1.0 (cafebabe0000)"))
+    assert_that(buf.getvalue().strip(), equal_to(f"tiny-pki {tiny_pki.__version__} (cafebabe0000)"))
     version_module.get_build_info.cache_clear()
 
 
