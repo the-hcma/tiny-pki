@@ -48,8 +48,9 @@ def main(argv: list[str] | None = None) -> None:
     edit_mode = _normalize_edit_mode(args.edit_mode)
 
     if rest:
-        if _dispatch_parts(rest, store=store, theme=theme, edit_mode_holder=[edit_mode]) is False:
-            raise SystemExit(1)
+        exit_code = _dispatch_parts(rest, store=store, theme=theme, edit_mode_holder=[edit_mode])
+        if exit_code:
+            raise SystemExit(exit_code)
         return
 
     _run_repl(store=store, theme=theme, edit_mode=edit_mode)
@@ -175,13 +176,13 @@ def _dispatch_parts(
     store: CertificateStore | None,
     theme: Theme,
     edit_mode_holder: list[str],
-) -> bool | None:
+) -> int | None:
     """Handle one REPL/one-shot argv list.
 
-    Returns ``True`` on success, ``False`` on failure, ``None`` to leave the REPL.
+    Returns the exit status (``0`` on success), or ``None`` to leave the REPL.
     """
     if not parts:
-        return True
+        return 0
 
     command = parts[0]
     args = parts[1:]
@@ -190,27 +191,27 @@ def _dispatch_parts(
         return None
     if command == "help":
         _print_help(theme)
-        return True
+        return 0
     if command == "completion":
-        return run_completion(args) == 0
+        return run_completion(args)
     if command == "clear":
         # Screen control is independent of color theming (--color never / NO_COLOR).
         if sys.stdout.isatty():
             print("\033[2J\033[H", end="", flush=True)
-        return True
+        return 0
     if command == "edit-mode":
         if not args:
             print(theme.dim(f"edit-mode is {edit_mode_holder[0]}"))
-            return True
+            return 0
         edit_mode_holder[0] = _normalize_edit_mode(args[0])
         print(theme.ok(f"edit-mode {edit_mode_holder[0]}"))
-        return True
+        return 0
 
     if command in PKI_COMMANDS:
         return _dispatch_pki(command, args, store=store, theme=theme)
 
     print(theme.error(f"Unknown command {command!r}; type help"), file=sys.stderr)
-    return False
+    return 1
 
 
 def _dispatch_pki(
@@ -219,19 +220,22 @@ def _dispatch_pki(
     *,
     store: CertificateStore | None,
     theme: Theme,
-) -> bool:
-    """Delegate to command handlers (filled in by the CLI-commands layer)."""
+) -> int:
+    """Delegate to command handlers and return their exit status.
+
+    Errors exit ``1``, except ``check``, whose ``3`` means "could not check"
+    (monitoring-plugin convention).
+    """
     from tiny_pki.cli import handlers
 
     try:
-        handlers.dispatch(command, args, store=store, theme=theme)
+        return handlers.dispatch(command, args, store=store, theme=theme)
     except handlers.HandlerNotReadyError as exc:
         print(theme.warn(str(exc)), file=sys.stderr)
-        return False
+        return 1
     except (FileNotFoundError, KeyError, ValueError, OSError) as exc:
         print(theme.error(str(exc)), file=sys.stderr)
-        return False
-    return True
+        return handlers.CHECK_EXIT_UNKNOWN if command == "check" else 1
 
 
 def _print_help(theme: Theme) -> None:

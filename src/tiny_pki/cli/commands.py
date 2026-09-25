@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 COMMAND_HELP: tuple[tuple[str, str], ...] = (
+    ("check", "Flag expired/expiring certs and CRL: check [--within DAYS | --by YYYY-MM-DD] [--json]."),
     ("clear", "Clear the terminal screen."),
     ("completion", "Print or install bash/zsh/fish tab-completion scripts."),
     ("create", "Issue a certificate: create client|server <name> [options]."),
@@ -25,6 +26,7 @@ COMMANDS: tuple[str, ...] = tuple(sorted({name for name, _ in COMMAND_HELP}))
 
 PKI_COMMANDS: frozenset[str] = frozenset(
     {
+        "check",
         "create",
         "crl",
         "delete",
