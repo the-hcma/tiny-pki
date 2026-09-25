@@ -7,7 +7,8 @@
 
 Small **private CA** toolkit for Python: issue CA / server / client certificates,
 generate CRLs, export PKCS#12 bundles, and inspect PEMs. Built on
-[`cryptography`](https://cryptography.io/).
+[`cryptography`](https://cryptography.io/) 43.0.1 or newer; CI runs the suite against both
+that minimum (on Python 3.12) and the latest release.
 
 Two layers, pick one:
 

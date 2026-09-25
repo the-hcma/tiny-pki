@@ -132,6 +132,24 @@ jobs:
       - name: Packaging
         run: bash .github/ci/packaging
 
+  test-cryptography-minimum:
+    name: Pytest (cryptography minimum)
+    needs: guard
+    if: needs.guard.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
+
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: latest
+
+      - name: Pytest (cryptography minimum)
+        run: bash .github/ci/pytest-cryptography-minimum
+
   secret-scan:
     name: Secret Scan
     needs: guard
