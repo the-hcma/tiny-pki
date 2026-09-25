@@ -117,11 +117,11 @@ All take a certificate PEM.
 | --- | --- |
 | `get_certificate_expiry(cert_pem)` | `datetime` (UTC, `notAfter`) |
 | `get_certificate_fingerprint(cert_pem)` | SHA-256, colon-separated upper-case hex |
-| `get_certificate_issuer(cert_pem)` | issuer CN (or full DN if no CN) |
+| `get_certificate_issuer(cert_pem)` | issuer CN (or the full RFC 4514 DN, e.g. `OU=PKI,O=Acme,C=US`, if no CN) |
 | `get_certificate_metadata(cert_pem)` | `dict` of subject fields present: `CN`, `O`, `OU`, `C`, `ST`, `L` |
 | `get_certificate_sans(cert_pem)` | `list[str]` of DNS + IP SANs (empty if none) |
 | `get_certificate_serial_number(cert_pem)` | `int` |
-| `get_certificate_subject(cert_pem)` | subject CN (or full DN if no CN) |
+| `get_certificate_subject(cert_pem)` | subject CN (or the full RFC 4514 DN if no CN) |
 | `is_certificate_self_signed(cert_pem)` | `True` only if issuer == subject **and** the signature verifies with its own key |
 
 ## Check
