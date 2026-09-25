@@ -50,8 +50,9 @@ from tiny_pki.issue import (
     generate_server_certificate,
 )
 from tiny_pki.revoke import generate_crl
+from tiny_pki.version import package_version
 
-__version__ = "0.1.0"
+__version__ = package_version()
 
 __all__ = [
     "ALLOWED_KEY_SIZES",
