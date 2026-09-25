@@ -136,6 +136,7 @@ Expiry and validity checks for alerting (`tiny_pki.check`, re-exported from `tin
 - `CertificateStatus` fields: `kind` (`ca` / `client` / `server` / `crl` / `unknown`, from `BasicConstraints` and the EKU), `subject`, `issuer`, `serial_number` (the CRL number for CRLs), `not_before`, `not_after`, `cutoff`, `days_remaining` (whole days until `not_after`, negative once expired), `status`, and `reasons` (human-readable explanations, including informational notes such as "CA expires first").
 - With `ca_cert_pem`, a certificate not signed by that CA is `untrusted`, and a CA that expires first becomes the effective `not_after`. With `crl_pem` (which requires `ca_cert_pem`), a listed serial is `revoked`. A CRL not signed by the given CA raises `ValueError` from `check_certificate` and is `untrusted` from `check_crl`.
 - `now` and `by` must be timezone-aware; `within` must not be negative.
+- The `tiny-pki check` CLI wraps these for the store or for files; see [monitoring.md](monitoring.md) for its exit codes, JSON output, and scheduling recipes.
 
 ## Constants
 
