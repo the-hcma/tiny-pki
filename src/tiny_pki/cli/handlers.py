@@ -16,6 +16,10 @@ from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import TypedDict
 
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.serialization import pkcs12
+
 from tiny_pki import (
     DEFAULT_CA_KEY_SIZE,
     DEFAULT_CA_VALIDITY_DAYS,
@@ -46,6 +50,7 @@ CHECK_EXIT_OK = 0
 CHECK_EXIT_UNKNOWN = 3
 CHECK_EXIT_WARNING = 1
 _CHECK_KINDS = ("ca", "client", "crl", "server")
+_CHECK_SUFFIXES = frozenset({".cer", ".crl", ".crt", ".p12", ".pem", ".pfx"})
 
 
 class HandlerNotReadyError(RuntimeError):
@@ -140,23 +145,42 @@ def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) 
 
 
 def _cmd_check(args: list[str], *, store: CertificateStore | None, theme: Theme) -> int:
-    """Check the store for expired, expiring, revoked, or untrusted artifacts.
+    """Check the store, or the given files and directories, for expiry and trust problems.
 
     Exit status follows the monitoring-plugin convention: 0 all OK, 1 something
     expiring, 2 something expired / not yet valid / revoked / untrusted.
     """
-    opts = _parse_flags(args, allowed={"by", "include-revoked", "json", "kind", "quiet", "within"})
-    if opts["positional"]:
-        raise ValueError(f"Unexpected arguments {opts['positional']}; check scans --store")
-    store = _require_store(store)
-    within = _parse_within(opts["flags"]["within"]) if "within" in opts["flags"] else None
-    by = _parse_by(opts["flags"]["by"]) if "by" in opts["flags"] else None
+    opts = _parse_flags(
+        args, allowed={"by", "ca", "include-revoked", "json", "kind", "password-file", "quiet", "within"}
+    )
+    flags = opts["flags"]
+    within = _parse_within(flags["within"]) if "within" in flags else None
+    by = _parse_by(flags["by"]) if "by" in flags else None
     kinds = set(opts["multi"].get("kind", [])) or set(_CHECK_KINDS)
     unknown_kinds = kinds - set(_CHECK_KINDS)
     if unknown_kinds:
         raise ValueError(f"Expected --kind in {', '.join(_CHECK_KINDS)}, got {', '.join(sorted(unknown_kinds))}")
 
-    rows = _check_store(store, within=within, by=by, kinds=kinds, include_revoked="include-revoked" in opts["flags"])
+    if opts["positional"]:
+        if "include-revoked" in flags:
+            raise ValueError("--include-revoked applies to the store only, not to file targets")
+        ca_cert_pem = _read_ca_file(Path(flags["ca"])) if "ca" in flags else None
+        password = _read_password_file(Path(flags["password-file"])) if "password-file" in flags else None
+        rows = _check_targets(
+            [Path(target) for target in opts["positional"]],
+            within=within,
+            by=by,
+            ca_cert_pem=ca_cert_pem,
+            password=password,
+            theme=theme,
+        )
+        if "kind" in opts["multi"]:
+            rows = [row for row in rows if row[1].kind in kinds]
+    else:
+        if {"ca", "password-file"} & flags.keys():
+            raise ValueError("--ca / --password-file apply to file targets; the store uses its own CA")
+        store = _require_store(store)
+        rows = _check_store(store, within=within, by=by, kinds=kinds, include_revoked="include-revoked" in flags)
     rows.sort(key=lambda row: (row[1].not_after is None, row[1].not_after or datetime.max.replace(tzinfo=UTC)))
     worst = worst_status([result for _, result in rows])
     if "json" in opts["flags"]:
@@ -511,6 +535,21 @@ def _prompt_p12_password() -> str:
     return password
 
 
+def _read_ca_file(path: Path) -> bytes:
+    data = path.read_bytes()
+    try:
+        cert = x509.load_pem_x509_certificate(data)
+    except ValueError as exc:
+        raise ValueError(f"Expected a PEM CA certificate for --ca, got {path}") from exc
+    try:
+        is_ca = cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca
+    except x509.ExtensionNotFound:
+        is_ca = False
+    if not is_ca:
+        raise ValueError(f"Expected a CA certificate (BasicConstraints ca=True) for --ca, got {path}")
+    return data
+
+
 def _read_password_file(path: Path) -> str:
     """Read the first line of ``path`` (trailing newline dropped) as the bundle password."""
     try:
@@ -550,6 +589,33 @@ def _print_cert_summary(
     sans = get_certificate_sans(cert_pem)
     if sans:
         print(f"sans      {', '.join(sans)}")
+
+
+def _check_file(
+    path: Path,
+    *,
+    within: timedelta | None,
+    by: datetime | None,
+    ca_cert_pem: bytes | None,
+    password: str | None,
+) -> list[tuple[str, CertificateStatus]]:
+    data = path.read_bytes()
+    if path.suffix.lower() in {".p12", ".pfx"}:
+        if password is None:
+            raise ValueError(f"Expected --password-file to open the PKCS#12 bundle {path}")
+        certs = _pkcs12_certificates(data, password, path)
+        crls: list[bytes] = []
+    else:
+        certs, crls = _pem_or_der_artifacts(data, path)
+    rows: list[tuple[str, CertificateStatus]] = []
+    count = len(certs) + len(crls)
+    for index, cert_pem in enumerate(certs, start=1):
+        name = str(path) if count == 1 else f"{path} #{index}"
+        rows.append((name, check_certificate(cert_pem, within=within, by=by, ca_cert_pem=ca_cert_pem)))
+    for index, crl_pem in enumerate(crls, start=len(certs) + 1):
+        name = str(path) if count == 1 else f"{path} #{index}"
+        rows.append((name, check_crl(crl_pem, within=within, by=by, ca_cert_pem=ca_cert_pem)))
+    return rows
 
 
 def _check_row_json(name: str, result: CertificateStatus) -> dict[str, object]:
@@ -613,6 +679,31 @@ def _check_summary(rows: list[tuple[str, CertificateStatus]], *, within: timedel
     else:
         window = "default window (a third of each lifetime, capped)"
     return f"check: {', '.join(parts) or 'nothing to check'}; {window}"
+
+
+def _check_targets(
+    targets: list[Path],
+    *,
+    within: timedelta | None,
+    by: datetime | None,
+    ca_cert_pem: bytes | None,
+    password: str | None,
+    theme: Theme,
+) -> list[tuple[str, CertificateStatus]]:
+    """Check certificate, chain, CRL, and PKCS#12 files; directories are scanned one level deep."""
+    rows: list[tuple[str, CertificateStatus]] = []
+    for target in targets:
+        if target.is_dir():
+            for path in sorted(p for p in target.iterdir() if p.is_file() and p.suffix.lower() in _CHECK_SUFFIXES):
+                try:
+                    rows.extend(_check_file(path, within=within, by=by, ca_cert_pem=ca_cert_pem, password=password))
+                except ValueError as exc:
+                    print(theme.dim(f"skipped {path}: {exc}"), file=sys.stderr)
+        elif target.exists():
+            rows.extend(_check_file(target, within=within, by=by, ca_cert_pem=ca_cert_pem, password=password))
+        else:
+            raise FileNotFoundError(f"Expected a file or directory to check, got {target}")
+    return rows
 
 
 def _days(count: int) -> str:
@@ -685,6 +776,40 @@ def _parse_within(raw: str) -> timedelta:
     return timedelta(days=days)
 
 
+def _pem_or_der_artifacts(data: bytes, path: Path) -> tuple[list[bytes], list[bytes]]:
+    """Split a file into certificate PEMs and CRL PEMs (DER is accepted for a single object)."""
+    pem = serialization.Encoding.PEM
+    if b"-----BEGIN" not in data:
+        try:
+            return [x509.load_der_x509_certificate(data).public_bytes(pem)], []
+        except ValueError:
+            pass
+        try:
+            return [], [x509.load_der_x509_crl(data).public_bytes(pem)]
+        except ValueError as exc:
+            raise ValueError(f"Expected a PEM or DER certificate or CRL in {path}") from exc
+    certs: list[bytes] = []
+    if b"-----BEGIN CERTIFICATE-----" in data:
+        certs = [cert.public_bytes(pem) for cert in x509.load_pem_x509_certificates(data)]
+    crls: list[bytes] = []
+    for block in data.split(b"-----BEGIN X509 CRL-----")[1:]:
+        crls.append(x509.load_pem_x509_crl(b"-----BEGIN X509 CRL-----" + block).public_bytes(pem))
+    if not certs and not crls:
+        raise ValueError(f"Expected a certificate or CRL in {path}, found neither")
+    return certs, crls
+
+
+def _pkcs12_certificates(data: bytes, password: str, path: Path) -> list[bytes]:
+    try:
+        _, cert, additional = pkcs12.load_key_and_certificates(data, password.encode())
+    except ValueError as exc:
+        raise ValueError(f"Expected a PKCS#12 bundle that opens with --password-file, got {path}") from exc
+    certs = ([cert] if cert is not None else []) + list(additional)
+    if not certs:
+        raise ValueError(f"Expected a certificate in the PKCS#12 bundle {path}, found none")
+    return [c.public_bytes(serialization.Encoding.PEM) for c in certs]
+
+
 def _print_check_table(rows: list[tuple[str, CertificateStatus]], theme: Theme) -> None:
     if not rows:
         return
@@ -740,7 +865,7 @@ def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
             else:
                 value = ""
                 i += 1
-            if not value and name in {"by", "kind", "out", "password-file", "permit", "san", "within"}:
+            if not value and name in {"by", "ca", "kind", "out", "password-file", "permit", "san", "within"}:
                 raise ValueError(f"Expected a non-empty value for --{name}")
             if name in {"kind", "permit", "san"}:
                 multi.setdefault(name, []).append(value)
