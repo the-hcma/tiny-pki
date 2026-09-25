@@ -85,7 +85,7 @@ defends the CLI specifically. Add a regression test mirroring
 
 ---
 
-### 2. [HIGH] The CA cert/key, CRL, and index files follow pre-planted symlinks; only leaf cert/key paths are hardened
+### 2. [HIGH] The CA cert/key and CRL files follow pre-planted symlinks; only leaf cert/key paths (and, incidentally, `index.json` itself) are hardened
 
 **Where:** `CertificateStore.write_ca`, `write_crl`, `_write_index`, and the
 `ca_cert_path` / `ca_key_path` / `crl_path` / `index_path` properties in
@@ -97,14 +97,36 @@ checks the *resolved* path is still under the store root — this correctly
 rejects a pre-planted symlink at a leaf cert/key path, and is already covered
 by `tests/test_store.py::test_add_certificate_rejects_symlink_escape`.
 
-The CA certificate/key, the CRL, and `index.json` do **not** go through that
-helper. `ca_cert_path`, `ca_key_path`, `crl_path`, and `index_path` are plain
-`self.root / "ca" / "<fixed name>"` properties, and `write_ca` / `write_crl` /
-`_write_index` call `write_bytes()` / `os.open(..., O_CREAT | O_TRUNC, 0o600)`
-directly on them — both follow an existing symlink at that exact path, and
-neither passes `O_NOFOLLOW`.
+`ca_cert_path`, `ca_key_path`, and `crl_path` do **not** go through that
+helper: they're plain `self.root / "ca" / "<fixed name>"` properties, and
+`write_ca` / `write_crl` call `write_bytes()` / `os.open(..., O_CREAT |
+O_TRUNC, 0o600)` directly on them — both follow an existing symlink at that
+exact path, and neither passes `O_NOFOLLOW`.
 
-**Proof of concept:**
+**`index.json` itself is not affected the same way** — an earlier version of
+this finding claimed it was; `mergestorm-vortex`'s review of PR #75 correctly
+caught the error, and a follow-up PoC confirmed the correction below.
+`_write_index` never opens `index_path` directly: it writes a sibling
+`index.json.tmp` and calls `tmp.replace(self.index_path)`, i.e. `os.replace` /
+`rename(2)`, which does **not** dereference a symlink at the destination — it
+atomically swaps the directory entry itself. A pre-planted symlink *at*
+`ca/index.json` is silently replaced by a regular file; the external target it
+pointed to is left untouched (confirmed: `init` against a dangling symlink at
+`index.json` left the symlink's target file never created, and `index.json`
+came back as a plain file).
+
+The adjacent **`index.json.tmp`** path *is* vulnerable, by the same mechanism
+as `ca.key`/`ca.crt`/`crl.pem`: `tmp.write_text(...)` follows a pre-planted
+symlink there and writes the index content through it to the external target,
+and the subsequent `tmp.replace(self.index_path)` then renames *the symlink
+itself* on top of `index.json` — so the store's `index.json` permanently
+becomes a symlink to the attacker's chosen external file from then on.
+Confirmed: planting a symlink at `ca/index.json.tmp` before `init` caused the
+external target to receive the serialized `[]` index content, and left
+`store/ca/index.json` as a symlink to that external file afterward.
+
+**Proof of concept** (`ca.key`; `crl.pem`/`ca.crt` follow the same shape, and
+`index.json.tmp` follows the shape described above):
 
 ```bash
 mkdir -p /tmp/tpki-sym/store/ca
@@ -127,23 +149,28 @@ silently operates on the external target.
 *before* `init`/a later `write_ca`/`write_crl` runs (e.g. a shared multi-tenant
 host, a store path under a world-writable parent, or a setup race where the
 directory is created before the real owner's `init`). Given that
-precondition, this is a **CA private-key confidentiality/integrity** issue:
-the attacker chooses where the CA key lands (potentially a location only they
-can read) or corrupts an arbitrary file the invoking user can write, which
+precondition, this is a **CA private-key confidentiality/integrity** issue for
+`ca.key`/`ca.crt`/`crl.pem`, and an **index-integrity/persistence** issue for
+`index.json.tmp` — the attacker chooses where the CA key lands (potentially a
+location only they can read), corrupts an arbitrary file the invoking user can
+write, or durably redirects the store's index to a file they control. This
 lines up with this issue's "path traversal and symlink attacks under
 `--store`" and "TOCTOU window on secret writes" scope items. It is a real gap
 relative to the protection the codebase already gives leaf cert/key paths —
 the fix that exists for leaves (`_path_under_root`) does not need reinventing,
 it needs applying (or an explicit `O_NOFOLLOW` / `path.is_symlink()` guard,
 the same pattern `tiny_pki.cli.completion.run_completion` already uses for
-completion-script installs) to the four fixed CA/CRL/index paths.
+completion-script installs) to `ca_cert_path` / `ca_key_path` / `crl_path` and
+to the `index.json.tmp` write in `_write_index`.
 
-**Suggested fix:** Refuse (or explicitly resolve-and-revalidate) a symlink at
-`ca_cert_path` / `ca_key_path` / `crl_path` / `index_path` before writing —
-either route them through `_path_under_root`-style resolution, or check
+**Suggested fix:** Refuse (or explicitly canonicalize-then-check) a symlink at
+`ca_cert_path` / `ca_key_path` / `crl_path` before writing, and do the same for
+the `index.json.tmp` path `_write_index` writes before its `replace()` — either
+route them through `_path_under_root`-style resolution, or check
 `path.is_symlink()` and raise before opening, matching `completion.py`'s
 existing pattern. Add a test parallel to
-`test_add_certificate_rejects_symlink_escape` for `write_ca`/`write_crl`.
+`test_add_certificate_rejects_symlink_escape` for `write_ca`/`write_crl`/
+`_write_index`'s tmp file.
 
 ---
 
