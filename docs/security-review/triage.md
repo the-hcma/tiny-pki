@@ -11,7 +11,7 @@ below is provisional until that report lands and is merged in; do not close
 
 | # | Finding | Severity | Reviewer(s) | Disposition | Tracking |
 | --- | --- | --- | --- | --- | --- |
-| 1 | CN with `../` accepted by `normalize_subject_attribute`; `export pem`'s default output path uses the raw CN, letting a crafted identity write cert+key outside the intended directory | High | Claude | Fix required | follow-up issue (fix) |
+| 1 | CN with `../` accepted by `normalize_subject_attribute`; `export pem`'s default output path uses the raw CN, letting a crafted identity write cert+key outside the intended directory | High | Claude | **Fixed** — `normalize_subject_attribute` now rejects `/`/`\`; `_cmd_export`'s default filename is also sanitized as defense in depth for a hand-edited `index.json` | the-hcma/tiny-pki#79 |
 | 2 | `write_ca` / `write_crl` follow a pre-planted symlink at the fixed `ca.key` / `ca.crt` / `crl.pem` paths, and `_write_index` follows one at the adjacent `index.json.tmp` path (unlike leaf cert/key paths, and unlike `index.json` itself, which `rename(2)` replaces rather than follows — all already hardened, or immune, via `_path_under_root` / `os.replace` semantics) | High | Claude | Fix required | follow-up issue (fix) |
 | 3 | `tiny_pki.secrets` Fernet derivation has no domain separation; README's own example (Django `SECRET_KEY`) invites reusing an already multi-purpose secret | Medium | Claude | Fix or accept-with-rationale — needs @thehcma decision | follow-up issue |
 | 4 | `MIN_PKCS12_PASSWORD_LENGTH = 8` is a low enforced floor for an offline-attackable bundle (docs already recommend long/random) | Low | Claude | Fix or accept — needs @thehcma decision | follow-up issue |
@@ -21,8 +21,10 @@ below is provisional until that report lands and is merged in; do not close
 ## Not yet triaged
 
 - **Repo governance audit** (branch protection, Actions allowlist, CODEOWNERS,
-  trusted-publishing config vs. `SECURITY.md`'s claims) — blocked on a GitHub
-  API rate limit during the Claude pass; needs a follow-up run.
+  trusted-publishing config vs. `SECURITY.md`'s claims) — done as part of
+  writing `SECURITY.md`: every claim there was checked live against the repo's
+  GitHub settings. It surfaced one real gap (`allowed_actions: all` rather
+  than an explicit allowlist), tracked as the-hcma/tiny-pki#83.
 - **Second-vendor reviewer's findings** — none yet; this table will grow a
   `Reviewer(s)` value of "Claude + <vendor>" or a new row once that report
   exists.
@@ -30,7 +32,8 @@ below is provisional until that report lands and is merged in; do not close
 ## Closing criteria (from issue #34)
 
 - Every Critical/High finding (rows 1–2 today) fixed with a test, or
-  explicitly accepted by @thehcma, before #34 closes.
+  explicitly accepted by @thehcma, before #34 closes. Row 1 is fixed; row 2
+  is tracked at the-hcma/tiny-pki#80.
 - Every Medium/Low finding (rows 3–6) either fixed or filed as a tracked
   follow-up issue — this table's "Tracking" column is the source of truth for
   which.

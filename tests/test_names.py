@@ -122,6 +122,9 @@ def test_normalize_dns_name_randomized_idempotent_and_case_insensitive() -> None
         ("ali\x00ce", "control or format characters"),
         ("ali\nce", "control or format characters"),
         ("ali\u200bce", "control or format characters"),
+        ("../../../tmp/evil", "path separators"),
+        ("alice/bob", "path separators"),
+        ("alice\\bob", "path separators"),
     ],
 )
 def test_normalize_subject_attribute_rejects(raw: str, message: str) -> None:
