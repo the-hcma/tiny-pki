@@ -399,12 +399,12 @@ class CertificateStore:
         self.ensure_layout()
         if self.has_ca() and not force:
             raise ValueError(f"CA already exists under {self.root}; pass force=True to replace")
-        self.ca_cert_path.write_bytes(cert_pem)
+        _write_plain(self.ca_cert_path, cert_pem)
         _write_secret(self.ca_key_path, key_pem)
 
     def write_crl(self, crl_pem: bytes) -> None:
         self.ensure_layout()
-        self.crl_path.write_bytes(crl_pem)
+        _write_plain(self.crl_path, crl_pem)
 
     def _is_legacy_layout(self) -> bool:
         """True when any flat-root CA material or ``certs/`` index paths remain."""
@@ -530,7 +530,10 @@ class CertificateStore:
         self.ca_dir.mkdir(parents=True, exist_ok=True)
         payload = [asdict(e) for e in entries]
         tmp = self.index_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        # index_path itself doesn't need this: replace() below is a rename(2),
+        # which swaps the destination directory entry rather than following a
+        # symlink there. The tmp path is opened directly, though, so it does.
+        _write_plain(tmp, (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"))
         tmp.replace(self.index_path)
 
 
@@ -591,16 +594,46 @@ def _safe_filename(common_name: str) -> str:
     return cleaned
 
 
+# A fixed store path (ca.key, ca.crt, crl.pem, index.json.tmp) isn't validated
+# by _path_under_root the way leaf cert/key paths are, so a pre-planted symlink
+# there would otherwise be followed on write. O_NOFOLLOW makes the open() call
+# itself fail (ELOOP) rather than write through the link, closing the race
+# between the is_symlink() check below and the open() call. Missing on
+# Windows; there is no equivalent flag, so a symlink at a fixed path is
+# written through as before.
+_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
+def _open_new_file(path: Path, *, mode: int) -> int:
+    """Open ``path`` for a fresh write, refusing to follow a symlink already there."""
+    if path.is_symlink():
+        raise ValueError(f"Expected {path} to not already exist as a symlink")
+    return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW, mode)
+
+
+def _write_all(fd: int, data: bytes, *, path: Path) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError(f"Expected progress writing {path}, got {written} bytes")
+        view = view[written:]
+
+
+def _write_plain(path: Path, data: bytes) -> None:
+    """Write non-secret bytes (cert/CRL/index), refusing to follow a pre-planted symlink at ``path``."""
+    fd = _open_new_file(path, mode=0o644)
+    try:
+        _write_all(fd, data, path=path)
+    finally:
+        os.close(fd)
+
+
 def _write_secret(path: Path, data: bytes) -> None:
     """Write secret bytes with mode 0600 from creation (no world-readable window)."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = _open_new_file(path, mode=0o600)
     try:
-        view = memoryview(data)
-        while view:
-            written = os.write(fd, view)
-            if written <= 0:
-                raise OSError(f"Expected progress writing {path}, got {written} bytes")
-            view = view[written:]
+        _write_all(fd, data, path=path)
     finally:
         os.close(fd)
     os.chmod(path, 0o600)
