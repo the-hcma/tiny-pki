@@ -42,6 +42,13 @@ Two defaults narrow that:
   issue such certificates itself, but an attacker holding the key is not using
   tiny-pki, so constrain **both** DNS and IP if you want a stolen key to be
   unable to impersonate public sites.
+- Name constraints only cover DNS names and IP addresses. They do not limit
+  client identities, which are usually just a CN such as `alice`: a stolen CA
+  key constrained with `--permit home` can still sign a client certificate for
+  any single-label CN like `alice` or `admin`. OpenSSL checks a dotted CN
+  (`alice.home`) against the DNS constraints, so naming clients inside the
+  permitted domain is covered. Servers that authorize clients by a single-label
+  CN trust the CA key completely.
 
 ## Leaf keys and bundles
 

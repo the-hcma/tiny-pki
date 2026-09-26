@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 COMMAND_HELP: tuple[tuple[str, str], ...] = (
-    ("check", "Flag expired/expiring certs and CRL: check [PATH...] [--within DAYS | --by YYYY-MM-DD] [--json]."),
+    (
+        "check",
+        "Flag expired/expiring/revoked certs and CRLs: check [PATH... [--ca CA] [--crl CRL]] [--within DAYS] [--json].",
+    ),
     ("clear", "Clear the terminal screen."),
     ("completion", "Print or install bash/zsh/fish tab-completion scripts."),
     ("create", "Issue a certificate: create client|server <name> [options]."),

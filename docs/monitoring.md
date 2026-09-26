@@ -11,6 +11,7 @@
   - PKCS#12 bundles (`*.p12`, `*.pfx`), opened with `--password-file PATH` (first line of the file; never pass the password as an argument);
   - directories, scanned one level deep for `*.pem`, `*.crt`, `*.cer`, `*.crl`, `*.p12`, and `*.pfx`. Files that cannot be checked (such as private keys, or PKCS#12 bundles without `--password-file` or with the wrong password) are skipped with a note on stderr and do not change the exit code. If a directory must not be skipped silently, list its files explicitly.
 - `--ca PATH` (file targets only) also flags certificates and CRLs not directly issued by that CA as `untrusted`.
+- `--crl PATH` (file targets only; requires `--ca`) checks certificates against that CRL (PEM or DER, signed by `--ca`): a listed serial reports `revoked`, and a CRL past its `nextUpdate` makes certificates `untrusted` (revocation status unknown). Without `--crl`, file checks cover expiry and issuer only, never revocation.
 - `--kind ca|client|server|crl` restricts the results; repeat it to select several kinds.
 
 ## Alert window
@@ -137,8 +138,16 @@ List everything that is not `ok`:
 tiny-pki --store /srv/pki check --json | jq -r '.results[] | select(.status != "ok") | "\(.status)\t\(.name)\t\(.not_after)"'
 ```
 
-Check the certificates nginx serves, against the CA that issued them:
+Check the certificates nginx serves, against the CA that issued them and its CRL:
 
 ```bash
-tiny-pki check /etc/nginx/certs --ca /srv/pki/ca/ca.crt --within 14
+tiny-pki check /etc/nginx/certs --ca /srv/pki/ca/ca.crt --crl /srv/pki/ca/crl.pem --within 14
+```
+
+Expiry and revocation are separate questions: drop `--crl` and the same command
+still exits 0 for a revoked certificate. Check the CRL nginx loads (`ssl_crl`)
+too, so an expired CRL is caught before nginx starts rejecting every client:
+
+```bash
+tiny-pki check /srv/pki/ca/crl.pem --ca /srv/pki/ca/ca.crt
 ```
