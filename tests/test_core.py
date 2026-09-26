@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import functools
 import ipaddress
 from datetime import UTC, datetime, timedelta
 from typing import cast
@@ -106,11 +107,21 @@ class TestGenerateCaCertificate:
     def test_invalid_validity_days(self) -> None:
         assert_that(
             calling(generate_ca_certificate).with_args(validity_days=0),
-            raises(TinyPkiError, "validity_days > 0"),
+            raises(TinyPkiError, "validity_days between 1 and 36500"),
         )
         assert_that(
             calling(generate_ca_certificate).with_args(validity_days=-1),
-            raises(TinyPkiError, "validity_days > 0"),
+            raises(TinyPkiError, "validity_days between 1 and 36500"),
+        )
+        assert_that(
+            calling(generate_ca_certificate).with_args(validity_days=10**12),
+            raises(TinyPkiError, "validity_days between 1 and 36500"),
+        )
+        assert_that(
+            calling(generate_client_certificate).with_args(
+                *_huge_validity_ca(), "alice", validity_days=10**12, allow_long_validity=True
+            ),
+            raises(TinyPkiError, "validity_days between 1 and 36500"),
         )
 
     def test_self_signed(self) -> None:
@@ -219,7 +230,11 @@ class TestInspectAndCrlAndPkcs12:
         ca_cert, ca_key = generate_ca_certificate(key_size=2048)
         assert_that(
             calling(generate_crl).with_args(ca_cert, ca_key, [], validity_days=0),
-            raises(TinyPkiError, "validity_days > 0"),
+            raises(TinyPkiError, "validity_days between 1 and 36500"),
+        )
+        assert_that(
+            calling(generate_crl).with_args(ca_cert, ca_key, [], validity_days=10**12),
+            raises(TinyPkiError, "validity_days between 1 and 36500"),
         )
 
     def test_generate_pkcs12_roundtrip(self) -> None:
@@ -259,3 +274,8 @@ class TestInspectAndCrlAndPkcs12:
             calling(load_rsa_private_key).with_args(encrypted_pem),
             raises(TinyPkiError, "encrypted"),
         )
+
+
+@functools.cache
+def _huge_validity_ca() -> tuple[bytes, bytes]:
+    return generate_ca_certificate(key_size=2048)
