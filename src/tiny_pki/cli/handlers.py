@@ -139,7 +139,7 @@ def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) 
         permitted_subtrees=opts["multi"].get("permit"),
     )
     store.write_ca(cert_pem, key_pem)
-    store.write_crl(generate_crl(cert_pem, key_pem, []))
+    _publish_crl(store, cert_pem, key_pem, revoked=[])
     print(theme.ok(f"CA created: {get_certificate_subject(cert_pem)}"))
     print(theme.dim(f"fingerprint {get_certificate_fingerprint(cert_pem)}"))
 
@@ -259,7 +259,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
         fingerprint=get_certificate_fingerprint(cert_pem),
     )
     # Re-issue may auto-revoke a prior live CN — keep crl.pem aligned with the index.
-    store.write_crl(generate_crl(ca_cert, ca_key, store.revoked_entries()))
+    _publish_crl(store, ca_cert, ca_key)
     print(theme.ok(f"issued {kind} {entry.common_name}"))
     print(theme.dim(f"serial {entry.serial_number}  fp {entry.fingerprint}"))
 
@@ -447,7 +447,7 @@ def _cmd_revoke(args: list[str], *, store: CertificateStore | None, theme: Theme
         raise KeyError(f"Expected issued certificate matching {args[0]!r}")
     entry = store.mark_revoked(target.serial_number)
     ca_cert, ca_key = store.read_ca()
-    store.write_crl(generate_crl(ca_cert, ca_key, store.revoked_entries()))
+    _publish_crl(store, ca_cert, ca_key)
     print(theme.warn(f"revoked {entry.common_name}"))
     print(theme.dim(f"crl updated: {store.crl_path}"))
 
@@ -462,7 +462,7 @@ def _cmd_delete(args: list[str], *, store: CertificateStore | None, theme: Theme
     # Keep crl.pem aligned with tombstones / remaining revoked serials.
     if store.has_ca():
         ca_cert, ca_key = store.read_ca()
-        store.write_crl(generate_crl(ca_cert, ca_key, store.revoked_entries()))
+        _publish_crl(store, ca_cert, ca_key)
     print(theme.ok(f"deleted {entry.common_name}"))
 
 
@@ -569,7 +569,7 @@ def _cmd_crl(args: list[str], *, store: CertificateStore | None, theme: Theme) -
     del args
     store = _require_store(store)
     ca_cert, ca_key = store.read_ca()
-    store.write_crl(generate_crl(ca_cert, ca_key, store.revoked_entries()))
+    _publish_crl(store, ca_cert, ca_key)
     print(theme.ok(f"crl regenerated: {store.crl_path}"))
 
 
@@ -886,6 +886,19 @@ def _safe_export_name(common_name: str) -> str:
     output path a single component either way.
     """
     return common_name.replace("/", "_").replace("\\", "_")
+
+
+def _publish_crl(
+    store: CertificateStore,
+    ca_cert: bytes,
+    ca_key: bytes,
+    *,
+    revoked: list[tuple[int, datetime]] | None = None,
+) -> None:
+    """Regenerate ``ca/crl.pem`` (default: the index's revoked set) with a CRL number above every earlier one."""
+    entries = store.revoked_entries() if revoked is None else revoked
+    crl = generate_crl(ca_cert, ca_key, entries, crl_number=store.next_crl_number())
+    store.write_crl(crl)
 
 
 def _write_secret_file(path: Path, data: str | bytes) -> None:

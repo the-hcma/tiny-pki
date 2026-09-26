@@ -48,7 +48,7 @@ ECDSA P-256 keys are tracked separately in
 | --- | --- | --- |
 | `BasicConstraints` | `ca=True, path_length=0` (critical) | tiny-pki never creates intermediates, so the CA can't mint subordinate CAs. |
 | Name constraints | off; `permitted_subtrees=` / `init --permit` adds critical `NameConstraints` | Limits what a stolen CA key can impersonate. tiny-pki also refuses to issue leaves outside the constraints. |
-| CRL extensions | `CRLNumber` (microseconds since the epoch) and `AuthorityKeyIdentifier` | RFC 5280 requires both. A monotonic number lets clients discard older CRLs. |
+| CRL extensions | `CRLNumber` (microseconds since the epoch; the CLI store also records the last number in `ca/crlnumber` and never goes below `last + 1`) and `AuthorityKeyIdentifier` | RFC 5280 requires both. A monotonic number lets clients discard older CRLs. |
 
 ## Secrets and bundles
 

@@ -9,6 +9,7 @@ $TINY_PKI_STORE/
     ca.crt        # CA certificate
     ca.key        # CA private key (mode 0600, unencrypted PEM)
     crl.pem       # current CRL (rewritten on revoke / delete / crl)
+    crlnumber     # last published CRL number (keeps it monotonic across clock steps)
     index.json    # source of truth for issued certificates
   clients/{cn}-{serial}.{crt,key}
   servers/{cn}-{serial}.{crt,key}
@@ -24,6 +25,9 @@ or `ca/ca.crt` as another user keeps working. If a new store
 must be readable by such a user (nginx workers do not need it; the master reads
 `ssl_*` files as root), grant access to those files deliberately. Leaf and bundle
 writes, and leaf reads such as `export`, refuse a symlink at any path component.
+Every write goes to a temp file in the same directory, is `fsync`ed, and is
+renamed into place, so a crash or a concurrent reader (an nginx reload) never
+sees a truncated key, CRL, or index.
 File names include the hex serial so re-issuing a CN never overwrites the old
 material.
 
