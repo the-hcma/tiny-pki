@@ -24,7 +24,10 @@ below is provisional until that report lands and is merged in; do not close
   trusted-publishing config vs. `SECURITY.md`'s claims) — done as part of
   writing `SECURITY.md`: every claim there was checked live against the repo's
   GitHub settings. It surfaced one real gap (`allowed_actions: all` rather
-  than an explicit allowlist), tracked as the-hcma/tiny-pki#83.
+  than an explicit allowlist), now **fixed**: the repo is on
+  `allowed_actions: selected` with GitHub-owned actions plus
+  `astral-sh/setup-uv` and `nick-fields/retry` allowed, tracked as
+  the-hcma/tiny-pki#83 and documented in the-hcma/tiny-pki#93.
 - **Second-vendor reviewer's findings** — none yet; this table will grow a
   `Reviewer(s)` value of "Claude + <vendor>" or a new row once that report
   exists.

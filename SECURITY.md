@@ -97,23 +97,9 @@ A fix lands as a normal Conventional-Commit `fix:` PR through the usual
 | Dependency alerts | GitHub **Dependabot security updates** enabled | alerts + auto-fix PRs |
 | Dependency updates | Dependabot ([`.github/dependabot.yml`](.github/dependabot.yml), weekly, 10-day cooldown, pip + github-actions ecosystems) + auto-merge ([`.github/workflows/dependabot-auto-merge.yml`](.github/workflows/dependabot-auto-merge.yml)) once required checks pass | opens PRs; auto-merges |
 | Vulnerability intake | **Private vulnerability reporting** enabled — [report an advisory](https://github.com/the-hcma/tiny-pki/security/advisories/new) | private channel, no public disclosure |
-| Actions supply chain | every `uses:` in every workflow is SHA-pinned with a `# vX.Y.Z` comment, and the repo has **`sha_pinning_required`** turned on (any unpinned action fails); default workflow token is **read-only** and **cannot approve pull requests**. Actions are currently allowed from **any** source (`allowed_actions: all`) rather than an explicit allowlist — see [Known gap](#known-gap-actions-allowlist) below | SHA pinning enforced repo-wide; token scope enforced by GitHub |
+| Actions supply chain | every `uses:` in every workflow is SHA-pinned with a `# vX.Y.Z` comment, and the repo has **`sha_pinning_required`** turned on (any unpinned action fails); default workflow token is **read-only** and **cannot approve pull requests**. Actions are restricted to an explicit allowlist (`allowed_actions: selected`): GitHub-owned actions (`actions/checkout`, via `github_owned_allowed`) plus `astral-sh/setup-uv@*` and `nick-fields/retry@*`; verified-creator actions are **not** implicitly allowed. A workflow change that introduces a new third-party action fails with "action not allowed" until the allowlist is updated (in the same PR or a preceding one) | allowlist and SHA pinning enforced repo-wide; token scope enforced by GitHub |
 | Branch protection | required status checks (`Python lint & format checks`, `Pytest (hermetic)`, strict/up-to-date), code-owner review required, force-pushes and branch deletion disallowed on `main` | blocks merge |
 | PyPI trusted publishing | not yet wired — tracked by [#11](https://github.com/the-hcma/tiny-pki/issues/11); when it lands, this table gets a row for the publish environment and its approval gate | n/a until #11 |
-
-### Known gap: Actions allowlist
-
-Unlike some sibling repos in this org, `the-hcma/tiny-pki`'s Actions
-permissions are set to **`allowed_actions: all`**, not a `selected`
-allowlist of trusted publishers. Because `sha_pinning_required` is enabled,
-every action actually referenced in a workflow must still be pinned to an
-exact commit SHA — a floating tag can't be substituted — but that's a
-different guarantee than restricting *which* repositories a SHA can be
-pinned from in the first place. This is a real gap relative to the
-allowlist model, not something this document is pretending is closed;
-tightening it (or documenting why `all` is an accepted tradeoff for this
-repo) is filed as a follow-up from
-[#34](https://github.com/the-hcma/tiny-pki/issues/34).
 
 ## Governance tooling
 
