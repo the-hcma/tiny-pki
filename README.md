@@ -82,7 +82,7 @@ serial = get_certificate_serial_number(client_cert)
 crl_pem = generate_crl(ca_cert, ca_key, [(serial, datetime.now(UTC))])
 
 # Password-protected bundle for phones / browsers.
-p12 = generate_pkcs12(client_cert, client_key, ca_cert, "alice", b"change-me")
+p12 = generate_pkcs12(client_cert, client_key, ca_cert, "alice", b"change-me-to-a-long-random-password")
 
 print(get_certificate_fingerprint(client_cert))
 ```

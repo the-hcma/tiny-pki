@@ -97,7 +97,7 @@ that window. Pass the **full** revoked set every time; the CRL is not incrementa
 | --- | --- |
 | `generate_pkcs12(cert_pem, key_pem, ca_cert_pem, friendly_name, password, *, legacy=False)` | PKCS#12 `bytes` (cert + key + CA chain) |
 
-- `password` is `bytes` of at least `MIN_PKCS12_PASSWORD_LENGTH` (8).
+- `password` is `bytes` of at least `MIN_PKCS12_PASSWORD_LENGTH` (16).
 - By default the bundle uses AES-256-CBC with PBKDF2-HMAC-SHA256 and an
   HMAC-SHA256 MAC (`cryptography`'s best available encryption).
 - `legacy=True` (CLI `export p12 --legacy`) switches to 3DES with a SHA-1 MAC,
@@ -159,7 +159,7 @@ Expiry and validity checks for alerting (`tiny_pki.check`, re-exported from `tin
 | `MAX_CLIENT_VALIDITY_DAYS` | `825` |
 | `MAX_LEAF_WARNING_DAYS` | `30` |
 | `MAX_SERVER_VALIDITY_DAYS` | `200` |
-| `MIN_PKCS12_PASSWORD_LENGTH` | `8` |
+| `MIN_PKCS12_PASSWORD_LENGTH` | `16` |
 | `VALIDITY_PRESETS` | `[(90, "90 days"), …, (825, "825 days")]` for UI pickers; clamp with `max_leaf_validity_days(ca_cert_pem)` |
 
 ## Errors and warnings
