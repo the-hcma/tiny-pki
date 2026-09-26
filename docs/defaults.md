@@ -55,6 +55,6 @@ ECDSA P-256 keys are tracked separately in
 | Setting | Default | Override | Rationale |
 | --- | --- | --- | --- |
 | PKCS#12 encryption | AES-256-CBC, PBKDF2-HMAC-SHA256, HMAC-SHA256 MAC | `legacy=True` / `export p12 --legacy` (3DES, SHA-1 MAC) | Modern, widely supported format. Legacy mode is only for older Android or Apple keychains. |
-| PKCS#12 password | at least 8 bytes (`MIN_PKCS12_PASSWORD_LENGTH`) | none | The bundle can be attacked offline. The CLI never takes it as an argument (visible in history and `ps`). It prompts twice, or reads `--password-file` and then offers to delete the file. |
+| PKCS#12 password | at least 16 bytes (`MIN_PKCS12_PASSWORD_LENGTH`) | none | The bundle can be attacked offline. The CLI never takes it as an argument (visible in history and `ps`). It prompts twice, or reads `--password-file` and then offers to delete the file. |
 | Fernet secret | at least 32 characters (`tiny_pki.secrets.MIN_SECRET_LENGTH`) | none | The key is HKDF-SHA256 of the secret with the `DEFAULT_INFO` label (`info=None` reads legacy `sha256(secret)` tokens), with no stretching, so the secret must already be high-entropy (Django's `SECRET_KEY` is 50). Decryption accepts shorter secrets so you can rotate off them. |
 | On-disk keys (CLI store) | mode `0600` from creation | none | No window where the file is world-readable. |

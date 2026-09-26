@@ -49,7 +49,7 @@ def test_init_create_show_revoke_delete_export(
 ) -> None:
     store = tmp_path / "ca"
     password_file = tmp_path / "p12-password"
-    password_file.write_text("secret-pw\n")
+    password_file.write_text("secret-bundle-password\n")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     out, err = _run(store, "init", "--cn", "Test CA", "--key-size", "2048", capsys=capsys)
     assert_that(err, equal_to(""))

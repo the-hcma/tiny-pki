@@ -54,7 +54,7 @@ def test_readme_quick_start_issues_ca_leaves_crl_and_bundle() -> None:
     sans = server_cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
     assert_that(sans.get_values_for_type(x509.DNSName), equal_to(["api.home"]))
 
-    key, cert, _ = pkcs12.load_key_and_certificates(namespace["p12"], b"change-me")
+    key, cert, _ = pkcs12.load_key_and_certificates(namespace["p12"], b"change-me-to-a-long-random-password")
     assert_that(key, not_none())
     assert_that(cert, not_none())
 

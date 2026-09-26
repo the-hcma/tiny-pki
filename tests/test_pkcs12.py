@@ -50,7 +50,7 @@ def test_cli_password_file(tmp_path: Path, capsys: CaptureFixture[str], monkeypa
 
     monkeypatch.setattr(builtins, "input", _answer)
     removed_file = tmp_path / "removed-pw"
-    removed_file.write_text("file-password\n")
+    removed_file.write_text("file-bundle-password\n")
     legacy_out = tmp_path / "legacy.p12"
     _cli(store, "export", "p12", "--legacy", "alice", "--password-file", str(removed_file), "--out", str(legacy_out))
     captured = capsys.readouterr()
@@ -58,11 +58,11 @@ def test_cli_password_file(tmp_path: Path, capsys: CaptureFixture[str], monkeypa
     assert_that(captured.out, contains_string(f"removed {removed_file}"))
     assert_that(removed_file.exists(), is_(False))
     assert_that(legacy_out.read_bytes(), _contains_bytes(_OID_PBE_SHA1_3DES))
-    key, _, _ = pkcs12.load_key_and_certificates(legacy_out.read_bytes(), b"file-password")
+    key, _, _ = pkcs12.load_key_and_certificates(legacy_out.read_bytes(), b"file-bundle-password")
     assert_that(key, is_(not_none()))
 
     kept_file = tmp_path / "kept-pw"
-    kept_file.write_text("file-password")
+    kept_file.write_text("file-bundle-password")
     modern_out = tmp_path / "modern.p12"
     _cli(store, "export", "p12", "alice", "--password-file", str(kept_file), "--out", str(modern_out))
     assert_that(capsys.readouterr().err, contains_string(f"left {kept_file} in place"))
@@ -149,7 +149,7 @@ def test_cli_prompt_requires_matching_repeat(
     tmp_path: Path, capsys: CaptureFixture[str], monkeypatch: MonkeyPatch
 ) -> None:
     store = _cli_store(tmp_path, capsys)
-    typed = iter(["prompt-password", "prompt-password", "prompt-password", "typo-password"])
+    typed = iter(["prompt-bundle-password", "prompt-bundle-password", "prompt-bundle-password", "typo-bundle-password"])
 
     def _type(_prompt: str = "") -> str:
         return next(typed)
@@ -157,7 +157,7 @@ def test_cli_prompt_requires_matching_repeat(
     monkeypatch.setattr(getpass, "getpass", _type)
     good_out = tmp_path / "good.p12"
     _cli(store, "export", "p12", "alice", "--out", str(good_out))
-    key, _, _ = pkcs12.load_key_and_certificates(good_out.read_bytes(), b"prompt-password")
+    key, _, _ = pkcs12.load_key_and_certificates(good_out.read_bytes(), b"prompt-bundle-password")
     assert_that(key, is_(not_none()))
     with pytest_raises(SystemExit):
         _cli(store, "export", "p12", "alice", "--out", str(tmp_path / "typo.p12"))
@@ -165,18 +165,18 @@ def test_cli_prompt_requires_matching_repeat(
 
 
 def test_default_bundle_uses_pbes2() -> None:
-    p12 = generate_pkcs12(_LEAF[0], _LEAF[1], _CA[0], "carol", b"modern-pw")
+    p12 = generate_pkcs12(_LEAF[0], _LEAF[1], _CA[0], "carol", b"modern-bundle-password")
     assert_that(p12, _contains_bytes(_OID_PBES2))
     assert_that(p12, is_not(_contains_bytes(_OID_PBE_SHA1_3DES)))
     assert_that(p12, is_not(_contains_bytes(_OID_SHA1)))
 
 
 def test_legacy_bundle_uses_3des_and_round_trips() -> None:
-    p12 = generate_pkcs12(_LEAF[0], _LEAF[1], _CA[0], "carol", b"legacy-pw", legacy=True)
+    p12 = generate_pkcs12(_LEAF[0], _LEAF[1], _CA[0], "carol", b"legacy-bundle-password", legacy=True)
     assert_that(p12, _contains_bytes(_OID_PBE_SHA1_3DES))
     assert_that(p12, _contains_bytes(_OID_SHA1))
     assert_that(p12, is_not(_contains_bytes(_OID_PBES2)))
-    key, cert, extra = pkcs12.load_key_and_certificates(p12, b"legacy-pw")
+    key, cert, extra = pkcs12.load_key_and_certificates(p12, b"legacy-bundle-password")
     assert_that(key, is_(not_none()))
     assert_that(cert, is_(not_none()))
     assert_that(len(extra), equal_to(1))

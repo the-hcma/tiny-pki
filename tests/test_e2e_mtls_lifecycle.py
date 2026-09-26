@@ -633,7 +633,7 @@ def test_pkcs12_roundtrip_handshakes(tmp_path: Path) -> None:
     password, then handshake with CRL checking enabled.
     """
     material = _issue_library_pair()
-    password = b"change-me-e2e"
+    password = b"change-me-e2e-bundle-password"
     p12_bytes = generate_pkcs12(
         material.client_cert,
         material.client_key,
