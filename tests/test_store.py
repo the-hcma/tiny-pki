@@ -19,6 +19,7 @@ from tiny_pki import (
     get_certificate_fingerprint,
     get_certificate_serial_number,
 )
+from tiny_pki import store as store_module
 from tiny_pki.store import CertificateStore, IssuedCertificate, require_store_path
 
 
@@ -358,6 +359,27 @@ def test_migrate_rejects_path_traversal(tmp_path: Path) -> None:
     assert_that((root / "ca.crt").is_file(), is_(True))
 
 
+def test_migrate_rejects_symlinked_ca_dir_with_no_index(tmp_path: Path) -> None:
+    """No index.json anywhere skips the (now-protected) index migration branch
+
+    entirely, leaving the flat-CA-material move as the only guard against a
+    symlinked ``ca/`` — it must reject the same way, not follow the link.
+    """
+    root = tmp_path / "legacy"
+    root.mkdir()
+    ca_cert, ca_key = generate_ca_certificate(key_size=2048)
+    (root / "ca.crt").write_bytes(ca_cert)
+    (root / "ca.key").write_bytes(ca_key)
+    outside = tmp_path / "outside-ca-dir"
+    outside.mkdir()
+    (root / "ca").symlink_to(outside)
+    store = CertificateStore(root)
+    assert_that(calling(store.has_ca).with_args(), raises(ValueError, "symlink"))
+    assert_that(list(outside.iterdir()), has_length(0))
+    assert_that((root / "ca.crt").is_file(), is_(True))
+    assert_that((root / "ca.key").is_file(), is_(True))
+
+
 def test_write_ca_refuses_overwrite_without_force(tmp_path: Path) -> None:
     store = CertificateStore(tmp_path / "ca")
     ca_cert, ca_key = generate_ca_certificate(key_size=2048)
@@ -394,6 +416,24 @@ def test_write_ca_rejects_symlinked_ca_cert(tmp_path: Path) -> None:
     assert_that(outside.read_bytes(), equal_to(b"sentinel"))
 
 
+def test_write_ca_rejects_symlinked_ca_key_with_in_root_target(tmp_path: Path) -> None:
+    """A symlink whose *target* stays inside the store root must still be rejected.
+
+    ``_path_under_root`` alone would accept this (the resolved path lands
+    under root), and ``_open_new_file`` would never see the original
+    symlink either (it opens the already-resolved path) — only checking
+    the unresolved path up front catches it.
+    """
+    store = CertificateStore(tmp_path / "ca")
+    store.ca_dir.mkdir(parents=True)
+    evil = store.ca_dir / "evil"
+    evil.write_bytes(b"attacker-owned")
+    store.ca_key_path.symlink_to(evil)
+    ca_cert, ca_key = generate_ca_certificate(key_size=2048)
+    assert_that(calling(store.write_ca).with_args(ca_cert, ca_key), raises(ValueError, "symlink"))
+    assert_that(evil.read_bytes(), equal_to(b"attacker-owned"))
+
+
 def test_write_crl_rejects_symlinked_crl_path(tmp_path: Path) -> None:
     store = CertificateStore(tmp_path / "ca")
     ca_cert, ca_key = generate_ca_certificate(key_size=2048)
@@ -404,6 +444,37 @@ def test_write_crl_rejects_symlinked_crl_path(tmp_path: Path) -> None:
     crl_pem = generate_crl(ca_cert, ca_key, [])
     assert_that(calling(store.write_crl).with_args(crl_pem), raises(ValueError, "symlink"))
     assert_that(outside.read_bytes(), equal_to(b"sentinel"))
+
+
+def test_write_ca_rejects_symlinked_ca_directory(tmp_path: Path) -> None:
+    """A symlink at ca/ itself (not just at ca.key) must not redirect writes."""
+    store = CertificateStore(tmp_path / "ca")
+    store.root.mkdir(parents=True)
+    outside = tmp_path / "outside-ca-dir"
+    outside.mkdir()
+    (store.root / "ca").symlink_to(outside)
+    ca_cert, ca_key = generate_ca_certificate(key_size=2048)
+    assert_that(calling(store.write_ca).with_args(ca_cert, ca_key), raises(ValueError, "symlink"))
+    assert_that(list(outside.iterdir()), has_length(0))
+
+
+def test_write_ca_rejects_symlinked_ca_directory_with_in_root_target(tmp_path: Path) -> None:
+    """A ca/ symlink whose target is itself still inside the store root must be rejected too.
+
+    ``_path_under_root`` alone would accept this (the resolved path lands
+    under root, just via a different subtree), so the parent-component
+    check has to happen against the *unresolved* path, not the resolved
+    one.
+    """
+    store = CertificateStore(tmp_path / "ca")
+    store.root.mkdir(parents=True)
+    evil = store.root / "evil"
+    evil.mkdir()
+    (evil / "ca.key").write_bytes(b"attacker-owned")
+    (store.root / "ca").symlink_to(evil)
+    ca_cert, ca_key = generate_ca_certificate(key_size=2048)
+    assert_that(calling(store.write_ca).with_args(ca_cert, ca_key), raises(ValueError, "symlink"))
+    assert_that((evil / "ca.key").read_bytes(), equal_to(b"attacker-owned"))
 
 
 def test_add_certificate_rejects_symlinked_index_tmp(tmp_path: Path) -> None:
@@ -428,6 +499,23 @@ def test_add_certificate_rejects_symlinked_index_tmp(tmp_path: Path) -> None:
     )
     assert_that(outside.read_bytes(), equal_to(b"sentinel"))
     assert_that(store.index_path.is_symlink(), is_(False))
+
+
+def test_open_new_file_rejects_symlink_directly(tmp_path: Path) -> None:
+    """Every ``_path_under_root``-backed call site passes an already-resolved
+    path, so nothing else in the suite reaches ``_open_new_file``'s own
+    ``is_symlink()``/``O_NOFOLLOW`` guard. Exercise it directly so that
+    backstop can't be deleted without a test failing.
+    """
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"sentinel")
+    link = tmp_path / "link"
+    link.symlink_to(outside)
+    assert_that(
+        calling(store_module._write_plain).with_args(link, b"x"),  # pyright: ignore[reportPrivateUsage]
+        raises(ValueError, "symlink"),
+    )
+    assert_that(outside.read_bytes(), equal_to(b"sentinel"))
 
 
 def test_crl_roundtrip(tmp_path: Path) -> None:
