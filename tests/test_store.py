@@ -618,7 +618,8 @@ def test_delete_force_active(tmp_path: Path) -> None:
     assert_that(store.get_certificate("dave"), is_(none()))
     assert_that(cert_file.exists(), is_(False))
     assert_that(key_file.exists(), is_(False))
-    assert_that(store.revoked_entries(), has_length(0))
+    assert_that(deleted.revoked_at, is_(not_none()))
+    assert_that([serial for serial, _ in store.revoked_entries()], equal_to([get_certificate_serial_number(cert_pem)]))
 
 
 def test_index_path_traversal_rejected(tmp_path: Path) -> None:

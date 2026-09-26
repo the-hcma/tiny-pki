@@ -448,7 +448,7 @@ def _cmd_revoke(args: list[str], *, store: CertificateStore | None, theme: Theme
     target = store.get_certificate(args[0])
     if target is None:
         raise KeyError(f"Expected issued certificate matching {args[0]!r}")
-    entry = store.mark_revoked(target.serial_number)
+    entry = store.mark_revoked(args[0])
     ca_cert, ca_key = store.read_ca()
     _publish_crl(store, ca_cert, ca_key)
     print(theme.warn(f"revoked {entry.common_name}"))
@@ -461,12 +461,16 @@ def _cmd_delete(args: list[str], *, store: CertificateStore | None, theme: Theme
     if not opts["positional"]:
         raise ValueError("Expected delete <identity|serial> [--force]")
     force = "--force" in args or "force" in opts["flags"]
+    before = store.get_certificate(opts["positional"][0])
     entry = store.delete_certificate(opts["positional"][0], force=force)
     # Keep crl.pem aligned with tombstones / remaining revoked serials.
     if store.has_ca():
         ca_cert, ca_key = store.read_ca()
         _publish_crl(store, ca_cert, ca_key)
-    print(theme.ok(f"deleted {entry.common_name}"))
+    if before is not None and before.revoked_at is None:
+        print(theme.ok(f"revoked and deleted {entry.common_name} (serial {entry.serial_number})"))
+    else:
+        print(theme.ok(f"deleted {entry.common_name}"))
 
 
 def _cmd_export(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:

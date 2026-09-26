@@ -174,11 +174,11 @@ class CertificateStore:
         return entry
 
     def delete_certificate(self, identity: str, *, force: bool = False) -> IssuedCertificate:
-        """Remove cert/key files from disk.
+        """Remove cert/key files from disk, keeping a revoked tombstone in the index.
 
-        Active (non-revoked) certificates require ``force=True`` and are removed
-        from the index entirely. Revoked certificates become tombstones (serial
-        retained for CRL generation; paths cleared).
+        Active (non-revoked) certificates require ``force=True``, which revokes
+        them now before deleting. The tombstone keeps the serial so the next CRL
+        still lists it; callers must regenerate the CRL afterwards.
 
         The index is rewritten before unlinking files so a mid-delete failure
         cannot leave the index pointing at missing paths.
@@ -187,44 +187,31 @@ class CertificateStore:
         if entry is None:
             raise KeyError(f"Expected issued certificate matching {identity!r}")
         if entry.revoked_at is None and not force:
-            raise ValueError(f"Certificate {entry.common_name!r} is still active; revoke first or pass force=True")
-
-        cert_rel = entry.cert_path
-        key_rel = entry.key_path
-
-        if entry.revoked_at is not None:
-            tombstone = IssuedCertificate(
-                common_name=entry.common_name,
-                kind=entry.kind,
-                serial_number=entry.serial_number,
-                cert_path="",
-                key_path="",
-                not_valid_after=entry.not_valid_after,
-                fingerprint=entry.fingerprint,
-                revoked_at=entry.revoked_at,
+            raise ValueError(
+                f"Certificate {entry.common_name!r} is still active; revoke it first, "
+                "or pass force=True (CLI: --force) to revoke and delete it in one step"
             )
-            remaining = [
-                tombstone if (e.common_name == entry.common_name and e.serial_number == entry.serial_number) else e
-                for e in self._read_index()
-            ]
-            self._write_index(remaining)
-            if cert_rel:
-                (self.root / cert_rel).unlink(missing_ok=True)
-            if key_rel:
-                (self.root / key_rel).unlink(missing_ok=True)
-            return tombstone
 
+        tombstone = IssuedCertificate(
+            common_name=entry.common_name,
+            kind=entry.kind,
+            serial_number=entry.serial_number,
+            cert_path="",
+            key_path="",
+            not_valid_after=entry.not_valid_after,
+            fingerprint=entry.fingerprint,
+            revoked_at=entry.revoked_at or datetime.now(UTC).isoformat(),
+        )
         remaining = [
-            e
+            tombstone if (e.common_name == entry.common_name and e.serial_number == entry.serial_number) else e
             for e in self._read_index()
-            if not (e.common_name == entry.common_name and e.serial_number == entry.serial_number)
         ]
         self._write_index(remaining)
-        if cert_rel:
-            (self.root / cert_rel).unlink(missing_ok=True)
-        if key_rel:
-            (self.root / key_rel).unlink(missing_ok=True)
-        return entry
+        if entry.cert_path:
+            (self.root / entry.cert_path).unlink(missing_ok=True)
+        if entry.key_path:
+            (self.root / entry.key_path).unlink(missing_ok=True)
+        return tombstone
 
     def ensure_layout(self) -> None:
         """Create the store directory tree (does not write a CA).
@@ -246,24 +233,32 @@ class CertificateStore:
     def get_certificate(self, identity: str) -> IssuedCertificate | None:
         """Lookup by common name or hex serial (case-insensitive; ``0x`` optional).
 
-        When several entries match a common name, a live (non-revoked) entry wins
-        so re-issue after revoke keeps resolving the current certificate.
+        A needle that is one certificate's serial (with or without ``0x``) and a
+        different certificate's common name is refused as ambiguous, so a CN
+        crafted to look like a serial cannot redirect the lookup. When several
+        entries match a common name, a live (non-revoked) entry wins so re-issue
+        after revoke keeps resolving the current certificate.
         """
         needle = identity.strip()
         if not needle:
             return None
-        candidates: list[IssuedCertificate] = []
+        wanted_serial = needle.lower().removeprefix("0x")
+        by_serial: list[IssuedCertificate] = []
+        by_name: list[IssuedCertificate] = []
         for entry in self._read_index():
             if not entry.cert_path:
                 continue
-            serial = entry.serial_number.lower()
-            needle_l = needle.lower()
-            if (
-                entry.common_name.casefold() == needle.casefold()
-                or serial == needle_l
-                or serial == needle_l.removeprefix("0x")
-            ):
-                candidates.append(entry)
+            if entry.serial_number.lower() == wanted_serial:
+                by_serial.append(entry)
+            elif entry.common_name.casefold() == needle.casefold():
+                by_name.append(entry)
+        if by_serial and by_name:
+            raise ValueError(
+                f"Expected {needle!r} to identify one certificate, but it is the serial of "
+                f"{by_serial[0].common_name!r} and the common name of the certificate with serial "
+                f"{by_name[0].serial_number}; use {by_serial[0].common_name!r} or 0x{by_name[0].serial_number}"
+            )
+        candidates = by_serial or by_name
         if not candidates:
             return None
         for entry in candidates:
