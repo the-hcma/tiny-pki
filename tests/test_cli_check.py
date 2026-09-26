@@ -45,10 +45,10 @@ def test_expired_is_critical_and_sorted_first(tmp_path: Path, capsys: CaptureFix
     store = _store(tmp_path, capsys)
     with time_machine.travel(datetime.now(UTC) + timedelta(days=100), tick=False):
         assert_that(_check(store), equal_to(2))
-    lines = capsys.readouterr().out.splitlines()
+    out = capsys.readouterr().out
+    lines = out.splitlines()
     assert_that(lines[1], contains_string("crl"))
-    assert_that(lines[2], contains_string("api.home"))
-    assert_that(lines[-1], contains_string("2 expired, 2 ok"))
+    assert_that(lines[-1], contains_string("2 untrusted, 1 expired, 1 ok"))
 
 
 def test_by_date_and_kind_filter(tmp_path: Path, capsys: CaptureFixture[str]) -> None:

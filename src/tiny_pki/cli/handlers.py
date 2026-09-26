@@ -11,6 +11,7 @@ import sys
 import warnings
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import TypedDict
@@ -435,7 +436,9 @@ def _cmd_inspect(args: list[str], *, store: CertificateStore | None, theme: Them
     if entry is None:
         raise KeyError(f"Expected PEM path or store identity, got {target!r}")
     ca_cert, crl = _store_trust_anchors(store, theme)
-    _print_cert_summary(store.read_certificate_pem(entry), theme, ca_cert_pem=ca_cert, crl_pem=crl)
+    _print_cert_summary(
+        store.read_certificate_pem(entry), theme, ca_cert_pem=ca_cert, crl_pem=crl, index_revoked_at=entry.revoked_at
+    )
 
 
 def _cmd_revoke(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
@@ -574,9 +577,16 @@ def _cmd_crl(args: list[str], *, store: CertificateStore | None, theme: Theme) -
 
 
 def _print_cert_summary(
-    cert_pem: bytes, theme: Theme, *, ca_cert_pem: bytes | None = None, crl_pem: bytes | None = None
+    cert_pem: bytes,
+    theme: Theme,
+    *,
+    ca_cert_pem: bytes | None = None,
+    crl_pem: bytes | None = None,
+    index_revoked_at: str | None = None,
 ) -> None:
     result = check_certificate(cert_pem, ca_cert_pem=ca_cert_pem, crl_pem=crl_pem)
+    if index_revoked_at is not None and result.status is not Status.REVOKED:
+        result = _escalate(result, Status.REVOKED, f"revoked in index.json on {index_revoked_at}")
     expiry = get_certificate_expiry(cert_pem)
     status = _styled_status(result, theme)
     print(f"subject   {get_certificate_subject(cert_pem)}")
@@ -651,20 +661,44 @@ def _check_store(
     rows: list[tuple[str, CertificateStatus]] = []
     if "ca" in kinds:
         rows.append(("ca", check_certificate(ca_cert, within=within, by=by, ca_cert_pem=ca_cert)))
+    index_revoked = {int(e.serial_number, 16) for e in store.list_certificates(status="revoked")}
     trusted_crl: bytes | None = None
-    if crl_pem is not None:
+    if crl_pem is None:
+        if index_revoked:
+            raise FileNotFoundError(
+                f"Expected a CRL at {store.crl_path} listing {len(index_revoked)} serial(s) revoked in index.json"
+            )
+    else:
         crl_result = check_crl(crl_pem, within=within, by=by, ca_cert_pem=ca_cert)
         if crl_result.status is not Status.UNTRUSTED:
             trusted_crl = crl_pem
-        if "crl" in kinds:
+            listed = {r.serial_number for r in x509.load_pem_x509_crl(crl_pem)}
+            missing = sorted(index_revoked - listed)
+            if missing:
+                shown = ", ".join(format(s, "x") for s in missing[:5]) + (" ..." if len(missing) > 5 else "")
+                crl_result = _escalate(
+                    crl_result,
+                    Status.UNTRUSTED,
+                    f"missing {len(missing)} serial(s) revoked in index.json ({shown}); republish with `crl`",
+                )
+        # An incomplete CRL is reported even when --kind leaves out "crl", like a missing one.
+        if "crl" in kinds or crl_result.status is Status.UNTRUSTED:
             rows.append(("crl", crl_result))
     for entry in store.list_certificates(status="all" if include_revoked else "active"):
         if entry.kind not in kinds:
             continue
         cert_pem = store.read_certificate_pem(entry)
         result = check_certificate(cert_pem, within=within, by=by, ca_cert_pem=ca_cert, crl_pem=trusted_crl)
+        if entry.revoked_at is not None and result.status is not Status.REVOKED:
+            result = _escalate(result, Status.REVOKED, f"revoked in index.json on {entry.revoked_at}")
         rows.append((entry.common_name, result))
     return rows
+
+
+def _escalate(result: CertificateStatus, status: Status, reason: str) -> CertificateStatus:
+    """Add ``reason`` to ``result``, raising its status to ``status`` if that is worse."""
+    worst = max(result.status, status, key=lambda s: s.severity)
+    return replace(result, status=worst, reasons=(*result.reasons, reason))
 
 
 def _check_summary(rows: list[tuple[str, CertificateStatus]], *, within: timedelta | None, by: datetime | None) -> str:

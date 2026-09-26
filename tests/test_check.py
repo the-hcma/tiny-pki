@@ -158,6 +158,8 @@ def test_crl_without_next_update_or_crl_number(monkeypatch: pytest.MonkeyPatch) 
     assert_that(result.not_after, is_(none()))
     assert_that(result.days_remaining, is_(none()))
     assert_that(result.reasons, equal_to(("no nextUpdate",)))
+    leaf = check_certificate(_CLIENT[0], now=now + timedelta(days=60), ca_cert_pem=_CA[0], crl_pem=bare)
+    assert_that(leaf.status, equal_to(Status.OK))
 
 
 def test_cli_inspect_tolerates_missing_ca_key_and_foreign_crl(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
