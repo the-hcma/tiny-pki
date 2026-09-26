@@ -9,7 +9,7 @@ symlink at any path component, and index paths must point at a leaf file under
 Layout (one CA per store root)::
 
     $STORE/
-      ca/ca.crt  ca/ca.key  ca/crl.pem  ca/index.json
+      ca/ca.crt  ca/ca.key  ca/crl.pem  ca/crlnumber  ca/index.json
       clients/{cn}-{serial}.{crt,key}
       servers/{cn}-{serial}.{crt,key}
       bundles/{cn}-{serial}.p12
@@ -26,9 +26,13 @@ import shutil
 import stat
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
+
+from cryptography import x509
+
+from tiny_pki._fsutil import write_file_atomic
 
 CertKind = Literal["client", "server"]
 CertStatus = Literal["active", "all", "revoked"]
@@ -404,8 +408,41 @@ class CertificateStore:
         _write_secret(self._validated_write_path("ca/ca.key"), key_pem)
 
     def write_crl(self, crl_pem: bytes) -> None:
+        """Publish ``crl_pem`` as ``ca/crl.pem`` and record its CRL number.
+
+        The number is recorded first, so a crash between the two writes can only
+        make the next number larger, never reuse one.
+        """
         self.ensure_layout()
+        number = _crl_number(crl_pem)
+        if number is not None and number > self._recorded_crl_number():
+            _write_plain(self._validated_write_path("ca/crlnumber"), f"{number}\n".encode())
         _write_plain(self._validated_write_path("ca/crl.pem"), crl_pem)
+
+    def next_crl_number(self, *, now: datetime | None = None) -> int:
+        """Return a CRL number above every one this store has published.
+
+        Uses microseconds since the epoch while the clock moves forward (the
+        library default) and ``last + 1`` when it does not, so a backward clock
+        step cannot publish a lower number.
+        """
+        current = self.read_crl()
+        on_disk = _crl_number(current) if current is not None else None
+        last = max(self._recorded_crl_number(), on_disk or 0)
+        clock = ((now or datetime.now(UTC)) - _EPOCH) // timedelta(microseconds=1)
+        number = max(clock, last + 1)
+        if number > _MAX_CRL_NUMBER:
+            raise ValueError(f"Expected a CRL number below 2**159 in {self.ca_dir}, but {last} was already published")
+        return number
+
+    def _recorded_crl_number(self) -> int:
+        path = self._validated_write_path("ca/crlnumber")
+        if not path.is_file():
+            return 0
+        text = path.read_text(encoding="utf-8").strip()
+        if not text.isdigit():
+            raise ValueError(f"Expected a decimal CRL number in {path}")
+        return int(text)
 
     def _is_legacy_layout(self) -> bool:
         """True when any flat-root CA material or ``certs/`` index paths remain."""
@@ -562,14 +599,10 @@ class CertificateStore:
     def _write_index(self, entries: list[IssuedCertificate]) -> None:
         self.ca_dir.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
         payload = [asdict(e) for e in entries]
-        # _validated_write_path rejects a symlink at index.json.tmp itself
-        # (wherever it points) and, via _path_under_root, one at ca/ that
-        # would resolve outside the store root. index_path itself doesn't
-        # need this: replace() below is a rename(2), which swaps the
-        # destination directory entry rather than following a symlink there.
-        tmp = self._validated_write_path("ca/index.json.tmp")
-        _write_secret(tmp, (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"))
-        tmp.replace(self.index_path)
+        _write_secret(
+            self._validated_write_path("ca/index.json"),
+            (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+        )
 
 
 def require_store_path(path: Path | str | None) -> Path:
@@ -623,6 +656,17 @@ def _index_references_certs_paths(index_path: Path) -> bool:
 
 
 _DIR_MODE = 0o700
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+# RFC 5280 §5.2.3: conforming CRL numbers fit in 20 octets.
+_MAX_CRL_NUMBER = 2**159 - 1
+
+
+def _crl_number(crl_pem: bytes) -> int | None:
+    try:
+        crl = x509.load_pem_x509_crl(crl_pem)
+        return crl.extensions.get_extension_for_class(x509.CRLNumber).value.crl_number
+    except (ValueError, x509.ExtensionNotFound):
+        return None
 
 
 def _drop_world_write(directory: Path) -> None:
@@ -648,48 +692,15 @@ def _safe_filename(common_name: str) -> str:
     return cleaned
 
 
-# write_ca/write_crl/_write_index/_migrate_legacy_layout resolve their target
-# through _validated_write_path before calling this, which rejects a symlink
-# at the target itself (wherever it points) and, via _path_under_root, one at
-# a parent component like "ca/" that would resolve outside the store root.
-# This is the last-component backstop for the TOCTOU gap that check-then-open
-# leaves open: a symlink planted at the same path between that check and this
-# open() call. O_NOFOLLOW makes the open() itself fail (ELOOP) rather than
-# write through such a link. Missing on Windows; there is no equivalent flag,
-# so that race is not closed there.
-_O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
-
-
-def _open_new_file(path: Path, *, mode: int) -> int:
-    """Open ``path`` for a fresh write, refusing to follow a symlink already there."""
-    if path.is_symlink():
-        raise ValueError(f"Expected {path} to not already exist as a symlink")
-    return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _O_NOFOLLOW, mode)
-
-
-def _write_all(fd: int, data: bytes, *, path: Path) -> None:
-    view = memoryview(data)
-    while view:
-        written = os.write(fd, view)
-        if written <= 0:
-            raise OSError(f"Expected progress writing {path}, got {written} bytes")
-        view = view[written:]
-
-
+# Callers resolve the target through _validated_write_path first, which rejects
+# a symlink at any component. write_file_atomic then refuses a symlink at the
+# final path and publishes via rename(2), which replaces a link planted in the
+# meantime instead of writing through it; readers never see a truncated file.
 def _write_plain(path: Path, data: bytes) -> None:
-    """Write non-secret bytes (cert/CRL/index), refusing to follow a pre-planted symlink at ``path``."""
-    fd = _open_new_file(path, mode=0o644)
-    try:
-        _write_all(fd, data, path=path)
-    finally:
-        os.close(fd)
+    """Atomically write non-secret bytes (cert/CRL) with mode 0644."""
+    write_file_atomic(path, data, mode=0o644)
 
 
 def _write_secret(path: Path, data: bytes) -> None:
-    """Write secret bytes with mode 0600 from creation (no world-readable window)."""
-    fd = _open_new_file(path, mode=0o600)
-    try:
-        _write_all(fd, data, path=path)
-    finally:
-        os.close(fd)
-    os.chmod(path, 0o600)
+    """Atomically write secret bytes (keys/bundles/index) with mode 0600."""
+    write_file_atomic(path, data, mode=0o600)

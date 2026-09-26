@@ -477,13 +477,15 @@ def test_write_ca_rejects_symlinked_ca_directory_with_in_root_target(tmp_path: P
     assert_that((evil / "ca.key").read_bytes(), equal_to(b"attacker-owned"))
 
 
-def test_add_certificate_rejects_symlinked_index_tmp(tmp_path: Path) -> None:
+def test_add_certificate_rejects_symlinked_index(tmp_path: Path) -> None:
     store = CertificateStore(tmp_path / "ca")
     ca_cert, ca_key = generate_ca_certificate(key_size=2048)
     store.write_ca(ca_cert, ca_key)
     outside = tmp_path / "outside-index.json"
-    outside.write_bytes(b"sentinel")
-    store.index_path.with_suffix(".json.tmp").symlink_to(outside)
+    outside.write_bytes(store.index_path.read_bytes())
+    store.index_path.unlink()
+    store.index_path.symlink_to(outside)
+    sentinel = outside.read_bytes()
     client_cert, client_key = generate_client_certificate(ca_cert, ca_key, "alice", key_size=2048)
     assert_that(
         calling(store.add_certificate).with_args(
@@ -497,15 +499,14 @@ def test_add_certificate_rejects_symlinked_index_tmp(tmp_path: Path) -> None:
         ),
         raises(ValueError, "symlink"),
     )
-    assert_that(outside.read_bytes(), equal_to(b"sentinel"))
-    assert_that(store.index_path.is_symlink(), is_(False))
+    assert_that(outside.read_bytes(), equal_to(sentinel))
 
 
-def test_open_new_file_rejects_symlink_directly(tmp_path: Path) -> None:
+def test_write_plain_rejects_symlink_directly(tmp_path: Path) -> None:
     """Every ``_path_under_root``-backed call site passes an already-resolved
-    path, so nothing else in the suite reaches ``_open_new_file``'s own
-    ``is_symlink()``/``O_NOFOLLOW`` guard. Exercise it directly so that
-    backstop can't be deleted without a test failing.
+    path, so nothing else in the suite reaches ``write_file_atomic``'s own
+    ``is_symlink()`` guard. Exercise it directly so that backstop can't be
+    deleted without a test failing.
     """
     outside = tmp_path / "outside.txt"
     outside.write_bytes(b"sentinel")
