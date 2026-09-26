@@ -29,6 +29,7 @@ from tiny_pki.constants import (
     DEFAULT_SERVER_VALIDITY_DAYS,
     MAX_CLIENT_VALIDITY_DAYS,
     MAX_SERVER_VALIDITY_DAYS,
+    MAX_VALIDITY_DAYS,
 )
 from tiny_pki.errors import TinyPkiError, TinyPkiWarning
 from tiny_pki.names import (
@@ -555,8 +556,8 @@ def _require_key_size(key_size: int) -> None:
 
 
 def _require_validity_days(validity_days: int) -> None:
-    if validity_days <= 0:
-        raise TinyPkiError(f"Expected validity_days > 0, got {validity_days}")
+    if not 0 < validity_days <= MAX_VALIDITY_DAYS:
+        raise TinyPkiError(f"Expected validity_days between 1 and {MAX_VALIDITY_DAYS}, got {validity_days}")
 
 
 def _validity_window(validity_days: int) -> tuple[datetime, datetime]:

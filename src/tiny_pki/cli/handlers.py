@@ -27,6 +27,7 @@ from tiny_pki import (
     DEFAULT_LEAF_KEY_SIZE,
     DEFAULT_ORGANIZATION_NAME,
     DEFAULT_SERVER_VALIDITY_DAYS,
+    MAX_VALIDITY_DAYS,
     TinyPkiWarning,
     generate_ca_certificate,
     generate_client_certificate,
@@ -809,8 +810,8 @@ def _parse_within(raw: str) -> timedelta:
         days = int(raw)
     except ValueError as exc:
         raise ValueError(f"Expected --within as a whole number of days, got {raw!r}") from exc
-    if days < 0:
-        raise ValueError(f"Expected --within of zero or more days, got {days}")
+    if days < 0 or days > MAX_VALIDITY_DAYS:
+        raise ValueError(f"Expected --within between 0 and {MAX_VALIDITY_DAYS} days, got {days}")
     return timedelta(days=days)
 
 
@@ -870,8 +871,8 @@ def _parse_days(raw: str, *, default: int) -> int:
         days = int(text)
     except ValueError as exc:
         raise ValueError(f"Expected a positive integer for --days, got {raw!r}") from exc
-    if days < 1 or days > 36500:
-        raise ValueError(f"Expected --days between 1 and 36500, got {days}")
+    if days < 1 or days > MAX_VALIDITY_DAYS:
+        raise ValueError(f"Expected --days between 1 and {MAX_VALIDITY_DAYS}, got {days}")
     return days
 
 

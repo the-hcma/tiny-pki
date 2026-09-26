@@ -9,7 +9,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from tiny_pki._rsa import load_rsa_private_key
-from tiny_pki.constants import CLOCK_SKEW_BACKDATE
+from tiny_pki.constants import CLOCK_SKEW_BACKDATE, MAX_VALIDITY_DAYS
 from tiny_pki.errors import TinyPkiError
 
 
@@ -40,11 +40,11 @@ def generate_crl(
         CRL in PEM format.
 
     Raises:
-        TinyPkiError: If ``validity_days`` is not positive or ``crl_number`` is
+        TinyPkiError: If ``validity_days`` is outside 1..``MAX_VALIDITY_DAYS`` or ``crl_number`` is
             negative or longer than 20 octets.
     """
-    if validity_days <= 0:
-        raise TinyPkiError(f"Expected validity_days > 0, got {validity_days}")
+    if not 0 < validity_days <= MAX_VALIDITY_DAYS:
+        raise TinyPkiError(f"Expected validity_days between 1 and {MAX_VALIDITY_DAYS}, got {validity_days}")
 
     now = datetime.now(UTC)
     number = crl_number if crl_number is not None else (now - _EPOCH) // timedelta(microseconds=1)
