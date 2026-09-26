@@ -189,8 +189,10 @@ tiny-pki deliberately does **not**:
 
 - Persist anything for library callers — store PEMs in your DB / files.
 - Encrypt keys at rest on its own — the optional `tiny_pki.secrets` Fernet
-  helpers take the secret you pass (e.g. Django `SECRET_KEY`); wiring and
-  rotation are yours.
+  helpers take the secret you pass (e.g. Django `SECRET_KEY`) and derive a
+  domain-separated key from it with HKDF; wiring and rotation are yours (see
+  [`docs/security.md`](docs/security.md) — a dedicated secret is still safer
+  than a shared one).
 - Reload nginx, Mosquitto, or any TLS server after a new CRL.
 - Schedule CRL renewal — run `tiny-pki crl` (or call `generate_crl`) on a timer.
 - Decide who gets a certificate — authn/authz for issuance is the app's job.
