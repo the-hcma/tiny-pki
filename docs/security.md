@@ -15,6 +15,17 @@ like a root password:
   store directories — keep it that way in consumer repos too).
 - Rotating the Fernet secret: `reencrypt_private_key(token, old, new)` for every
   stored key, then switch the secret. Losing the secret means losing the keys.
+- Reusing an app-wide secret: the Fernet key is derived with HKDF and a fixed
+  `tiny-pki:fernet-key:v1` label, so it is independent of the session, CSRF,
+  or other keys your framework derives from the same `SECRET_KEY`. That
+  separation does **not** help if the secret itself leaks: the label is
+  public, and anyone with the secret can derive the key and decrypt every
+  stored private key. A dedicated random secret limits the blast radius of an
+  unrelated leak; a shared one does not.
+- Tokens written before HKDF used a plain `sha256(secret)` key. Move each one
+  with `reencrypt_private_key(token, secret, secret, old_info=None)` (or pass
+  a new secret to rotate at the same time); the default `decrypt_private_key`
+  rejects them with `InvalidToken`.
 
 ## Limit what the CA can vouch for
 

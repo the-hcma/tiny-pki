@@ -8,10 +8,13 @@ import base64
 import hashlib
 
 from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives.hashes import SHA256
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from hamcrest import assert_that, calling, equal_to, is_not, raises
 
 from tiny_pki import TinyPkiError, generate_ca_certificate
 from tiny_pki.secrets import (
+    DEFAULT_INFO,
     MIN_SECRET_LENGTH,
     decrypt_private_key,
     derive_fernet_key,
@@ -30,6 +33,54 @@ def test_derive_fernet_key_is_deterministic_and_fernet_valid() -> None:
     assert_that(key, equal_to(derive_fernet_key(_SECRET)))
     token = Fernet(key).encrypt(b"probe")
     assert_that(Fernet(key).decrypt(token), equal_to(b"probe"))
+
+
+def test_derive_fernet_key_is_hkdf_with_default_info() -> None:
+    expected = HKDF(algorithm=SHA256(), length=32, salt=None, info=DEFAULT_INFO).derive(_SECRET.encode())
+    assert_that(derive_fernet_key(_SECRET), equal_to(base64.urlsafe_b64encode(expected)))
+    assert_that(derive_fernet_key(_SECRET), is_not(equal_to(_legacy_key(_SECRET))))
+
+
+def test_derive_fernet_key_is_domain_separated_by_info() -> None:
+    assert_that(
+        derive_fernet_key(_SECRET, info=b"other-purpose"),
+        is_not(equal_to(derive_fernet_key(_SECRET))),
+    )
+
+
+def test_derive_fernet_key_legacy_mode_is_plain_sha256() -> None:
+    assert_that(derive_fernet_key(_SECRET, info=None), equal_to(_legacy_key(_SECRET)))
+
+
+def test_empty_info_rejected() -> None:
+    assert_that(
+        calling(derive_fernet_key).with_args(_SECRET, info=b""),
+        raises(TinyPkiError, "non-empty info label"),
+    )
+
+
+def test_default_decrypt_rejects_a_legacy_token() -> None:
+    _, key_pem = generate_ca_certificate(key_size=2048)
+    legacy_token = Fernet(_legacy_key(_SECRET)).encrypt(key_pem)
+    assert_that(calling(decrypt_private_key).with_args(legacy_token, _SECRET), raises(InvalidToken))
+    assert_that(decrypt_private_key(legacy_token, _SECRET, info=None), equal_to(key_pem))
+
+
+def test_reencrypt_migrates_legacy_token_to_hkdf_in_place() -> None:
+    _, key_pem = generate_ca_certificate(key_size=2048)
+    legacy_token = encrypt_private_key(key_pem, _SECRET, info=None)
+    migrated = reencrypt_private_key(legacy_token, _SECRET, _SECRET, old_info=None)
+    assert_that(decrypt_private_key(migrated, _SECRET), equal_to(key_pem))
+    assert_that(calling(decrypt_private_key).with_args(migrated, _SECRET, info=None), raises(InvalidToken))
+
+
+def test_reencrypt_moves_token_between_custom_labels() -> None:
+    _, key_pem = generate_ca_certificate(key_size=2048)
+    token = encrypt_private_key(key_pem, _SECRET, info=b"purpose-a")
+    migrated = reencrypt_private_key(token, _SECRET, _SECRET, old_info=b"purpose-a", new_info=b"purpose-b")
+    assert_that(decrypt_private_key(migrated, _SECRET, info=b"purpose-b"), equal_to(key_pem))
+    for wrong_info in (b"purpose-a", DEFAULT_INFO):
+        assert_that(calling(decrypt_private_key).with_args(migrated, _SECRET, info=wrong_info), raises(InvalidToken))
 
 
 def test_derive_fernet_key_uses_verbatim_secret() -> None:
@@ -62,7 +113,7 @@ def test_encrypt_decrypt_roundtrip() -> None:
 def test_reencrypt_rotates_off_a_short_secret() -> None:
     _, key_pem = generate_ca_certificate(key_size=2048)
     legacy_token = Fernet(_legacy_key("short")).encrypt(key_pem)
-    rotated = reencrypt_private_key(legacy_token, "short", _NEW)
+    rotated = reencrypt_private_key(legacy_token, "short", _NEW, old_info=None)
     assert_that(decrypt_private_key(rotated, _NEW), equal_to(key_pem))
     assert_that(
         calling(reencrypt_private_key).with_args(rotated, _NEW, "short"),
