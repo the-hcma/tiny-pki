@@ -30,7 +30,7 @@ from tiny_pki.cli.main import main
 from tiny_pki.store import CertificateStore
 
 _CONSTRAINED = generate_ca_certificate(
-    "Home CA", key_size=2048, permitted_subtrees=[".Home", "192.168.0.0/16", "10.0.0.7"]
+    "Home CA", key_size=2048, permitted_subtrees=["Home", "192.168.0.0/16", "10.0.0.7"]
 )
 
 
@@ -69,6 +69,7 @@ def test_ca_name_constraints_extension() -> None:
         ("*.home", "without wildcards"),
         ("192.168.1.10/24", "without host bits"),
         ("https://home", "not a URL"),
+        (".home", "without a leading dot"),
     ],
 )
 def test_ca_rejects_invalid_permitted_subtree(entry: str, message: str) -> None:
@@ -248,6 +249,12 @@ def _cli(store: Path, *words: str) -> None:
 
 def _external_ca_with_dns_constraint(root: str) -> tuple[bytes, bytes]:
     """A CA built outside tiny-pki, keeping the constraint's leading dot verbatim."""
+    return _external_ca([x509.DNSName(root)], None)
+
+
+def _external_ca(
+    permitted: list[x509.GeneralName] | None, excluded: list[x509.GeneralName] | None
+) -> tuple[bytes, bytes]:
     _, key_pem = _CONSTRAINED
     key = load_rsa_private_key(key_pem)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "External CA")])
@@ -261,9 +268,36 @@ def _external_ca_with_dns_constraint(root: str) -> tuple[bytes, bytes]:
         .not_valid_before(now - timedelta(days=1))
         .not_valid_after(now + timedelta(days=3650))
         .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
-        .add_extension(
-            x509.NameConstraints(permitted_subtrees=[x509.DNSName(root)], excluded_subtrees=None), critical=True
-        )
+        .add_extension(x509.NameConstraints(permitted_subtrees=permitted, excluded_subtrees=excluded), critical=True)
         .sign(key, hashes.SHA256())
     )
     return cert.public_bytes(serialization.Encoding.PEM), key_pem
+
+
+def _ip(text: str) -> x509.IPAddress:
+    return x509.IPAddress(ipaddress.ip_network(text))
+
+
+def test_excluded_ipv4_also_excludes_its_mapped_ipv6_form() -> None:
+    ca = _external_ca([_ip("0.0.0.0/0"), _ip("::/0")], [_ip("10.0.0.0/8")])
+    for san in ("10.1.2.3", "::ffff:10.1.2.3"):
+        assert_that(
+            calling(generate_server_certificate).with_args(*ca, "host", [san], key_size=2048),
+            raises(TinyPkiError, "excluded networks"),
+        )
+    generate_server_certificate(*ca, "host", ["::ffff:192.168.1.1"], key_size=2048)
+
+
+def test_mapped_ipv6_constraint_applies_to_plain_ipv4() -> None:
+    ca = _external_ca([_ip("0.0.0.0/0"), _ip("::/0")], [_ip("::ffff:10.0.0.0/104")])
+    assert_that(
+        calling(generate_server_certificate).with_args(*ca, "host", ["10.1.2.3"], key_size=2048),
+        raises(TinyPkiError, "excluded networks"),
+    )
+
+
+def test_permitted_ipv4_does_not_admit_its_mapped_ipv6_form() -> None:
+    assert_that(
+        calling(generate_server_certificate).with_args(*_IP_ONLY, "router", ["::ffff:192.168.1.10"], key_size=2048),
+        raises(TinyPkiError, "permitted networks"),
+    )

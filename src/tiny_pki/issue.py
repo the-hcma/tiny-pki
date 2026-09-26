@@ -341,8 +341,29 @@ _CN_DNS_ID = re.compile(r"^[a-z0-9_.-]+$")
 def _address_in(
     address: ipaddress.IPv4Address | ipaddress.IPv6Address,
     network: ipaddress.IPv4Network | ipaddress.IPv6Network,
+    *,
+    unmap: bool = False,
 ) -> bool:
-    return address.version == network.version and int(address) & int(network.netmask) == int(network.network_address)
+    """Membership test; ``unmap`` also treats IPv4-mapped IPv6 (``::ffff:a.b.c.d``) as the IPv4 address.
+
+    OpenSSL compares constraints within one address family, so permitted checks
+    stay literal (a mapped form is not admitted by an IPv4 subtree), while
+    excluded checks unmap because clients that normalize addresses would treat
+    ``::ffff:10.1.2.3`` as the excluded ``10.1.2.3``.
+    """
+    addresses = [address]
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = [network]
+    if unmap:
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+            addresses.append(address.ipv4_mapped)
+        mapped_base = network.network_address.ipv4_mapped if isinstance(network, ipaddress.IPv6Network) else None
+        if mapped_base is not None and network.prefixlen >= 96:
+            networks.append(ipaddress.IPv4Network((mapped_base, network.prefixlen - 96)))
+    return any(
+        a.version == n.version and int(a) & int(n.netmask) == int(n.network_address)
+        for a in addresses
+        for n in networks
+    )
 
 
 def _cn_dns_id(common_name: str) -> str | None:
@@ -444,7 +465,7 @@ def _enforce_name_constraints(ca_cert: x509.Certificate, *, common_name: str, sa
             raise TinyPkiError(
                 f"Expected IP address within the CA's permitted networks {permitted_text}, got {address}"
             )
-        if any(_address_in(address, network) for network in excluded_networks):
+        if any(_address_in(address, network, unmap=True) for network in excluded_networks):
             excluded_text = [str(n) for n in excluded_networks]
             raise TinyPkiError(f"Expected IP address outside the CA's excluded networks {excluded_text}, got {address}")
 
@@ -520,7 +541,12 @@ def _permitted_subtree(entry: str) -> x509.GeneralName:
             ) from exc
     if "*" in text:
         raise TinyPkiError(f"Expected a DNS suffix without wildcards (e.g. home), got {entry!r}")
-    return x509.DNSName(normalize_dns_name(text.lstrip(".")))
+    if text.startswith("."):
+        raise TinyPkiError(
+            f"Expected a DNS suffix without a leading dot, got {entry!r}: {text.lstrip('.')!r} already covers "
+            "every name under it (and the name itself); subdomain-only constraints are not supported"
+        )
+    return x509.DNSName(normalize_dns_name(text))
 
 
 def _require_key_size(key_size: int) -> None:

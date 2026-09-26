@@ -39,7 +39,11 @@ Name Constraints (`permitted_subtrees`, CLI `init --permit`):
 
 - Entries are DNS suffixes (`"home"` permits `home` and every name under it) or
   IP networks (`"192.168.0.0/16"`; a bare IP is a single host). Wildcards, URLs,
-  and networks with host bits set are rejected.
+  networks with host bits set, and a leading dot (OpenSSL's "subdomains only"
+  syntax, which tiny-pki does not support) are rejected.
+- An excluded IPv4 network also excludes the IPv4-mapped IPv6 form
+  (`::ffff:10.1.2.3`). A permitted IPv4 network does not admit the mapped form,
+  since relying parties compare within one address family.
 - Leaf issuance refuses SANs outside the constraints, so you get an error at
   issue time rather than a failed handshake later. When the leaf has no DNS SAN,
   a dotted CN made of letters, digits, `-`, `_` and `.` (IP literals included) is
