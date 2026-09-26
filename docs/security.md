@@ -34,9 +34,14 @@ Two defaults narrow that:
 
 - The CA carries `path_length=0`, so it can't mint subordinate CAs.
 - Pass `permitted_subtrees` (CLI: `init --permit home --permit 192.168.0.0/16`)
-  to add critical Name Constraints. A stolen CA key then can't impersonate
-  public sites to devices that trust it. Constraints are fixed when the CA is
+  to add critical Name Constraints. Constraints are fixed when the CA is
   created; changing them means a new CA.
+- Relying parties only enforce the name types you list. With `--permit home`
+  alone, a stolen CA key can still sign an IP-address certificate that devices
+  accept; with only an IP range, it can sign `google.com`. tiny-pki refuses to
+  issue such certificates itself, but an attacker holding the key is not using
+  tiny-pki, so constrain **both** DNS and IP if you want a stolen key to be
+  unable to impersonate public sites.
 
 ## Leaf keys and bundles
 

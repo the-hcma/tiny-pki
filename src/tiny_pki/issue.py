@@ -234,14 +234,19 @@ def generate_server_certificate(
     _require_validity_days(validity_days)
     sans = normalize_san_entries(san_entries)
     pending_warnings: list[str] = []
+    ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
     cn_san = common_name_as_san(common_name)
     if include_common_name_in_sans and cn_san is not None and cn_san not in sans:
-        sans.append(cn_san)
-        pending_warnings.append(
-            f"Added common_name {common_name!r} to the SANs as {cn_san!r} (TLS clients ignore the CN)"
-        )
+        if _name_type_unconstrained(ca_cert, cn_san):
+            pending_warnings.append(
+                f"Did not add common_name {common_name!r} to the SANs: the CA has no permitted subtree for it"
+            )
+        else:
+            sans.append(cn_san)
+            pending_warnings.append(
+                f"Added common_name {common_name!r} to the SANs as {cn_san!r} (TLS clients ignore the CN)"
+            )
 
-    ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
     ca_key = load_rsa_private_key(ca_key_pem)
     org = _leaf_organization(ca_cert, organization_name)
     _enforce_name_constraints(ca_cert, common_name=common_name, sans=sans)
@@ -369,6 +374,27 @@ def _emit_warnings(messages: list[str]) -> None:
         warnings.warn(message, TinyPkiWarning, stacklevel=3)
 
 
+def _is_ip_literal(text: str) -> bool:
+    try:
+        ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _name_type_unconstrained(ca_cert: x509.Certificate, san: str) -> bool:
+    """True when the CA has permitted subtrees but none of ``san``'s type (DNS or IP)."""
+    try:
+        permitted = ca_cert.extensions.get_extension_for_class(x509.NameConstraints).value.permitted_subtrees
+    except x509.ExtensionNotFound:
+        return False
+    if not permitted:
+        return False
+    if _is_ip_literal(san):
+        return not any(isinstance(g, x509.IPAddress) for g in permitted)
+    return not any(isinstance(g, x509.DNSName) for g in permitted)
+
+
 def _enforce_name_constraints(ca_cert: x509.Certificate, *, common_name: str, sans: list[str]) -> None:
     """Refuse leaves the CA's Name Constraints would make relying parties reject."""
     try:
@@ -391,13 +417,28 @@ def _enforce_name_constraints(ca_cert: x509.Certificate, *, common_name: str, sa
     excluded_roots = [str(g.value) for g in excluded if isinstance(g, x509.DNSName)]
     permitted_networks = [ipaddress.ip_network(g.value) for g in permitted if isinstance(g, x509.IPAddress)]
     excluded_networks = [ipaddress.ip_network(g.value) for g in excluded if isinstance(g, x509.IPAddress)]
+    # RFC 5280 leaves a name type unconstrained when no subtree of that type is
+    # listed; a device-wide private CA wants the opposite, so once any permitted
+    # subtree exists, every name type used must have one.
+    strict = bool(permitted)
     for name in dns_names:
         host = name.removeprefix("*.")
+        # An IP-literal CN (checked as DNS by OpenSSL) is not a hostname identity.
+        if strict and not permitted_roots and not _is_ip_literal(host):
+            raise TinyPkiError(
+                f"Expected no DNS names from a CA without a permitted DNS subtree, got {name!r}"
+                " (recreate the CA with a DNS --permit, or use an IP SAN and a CN without dots)"
+            )
         if permitted_roots and not any(_dns_within(host, root) for root in permitted_roots):
             raise TinyPkiError(f"Expected DNS name within the CA's permitted names {permitted_roots}, got {name!r}")
         if any(_dns_within(host, root) for root in excluded_roots):
             raise TinyPkiError(f"Expected DNS name outside the CA's excluded names {excluded_roots}, got {name!r}")
     for address in addresses:
+        if strict and not permitted_networks:
+            raise TinyPkiError(
+                f"Expected no IP addresses from a CA without a permitted IP subtree, got {address}"
+                " (recreate the CA with an IP --permit)"
+            )
         if permitted_networks and not any(_address_in(address, network) for network in permitted_networks):
             permitted_text = [str(n) for n in permitted_networks]
             raise TinyPkiError(

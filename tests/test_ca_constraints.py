@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import ipaddress
+import warnings
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -12,12 +13,13 @@ import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.x509.oid import NameOID
-from hamcrest import assert_that, calling, contains_string, equal_to, is_, none, raises
+from hamcrest import assert_that, calling, contains_string, equal_to, has_item, is_, none, raises
 from pytest import CaptureFixture
 from pytest import raises as pytest_raises
 
 from tiny_pki import (
     TinyPkiError,
+    TinyPkiWarning,
     generate_ca_certificate,
     generate_client_certificate,
     generate_server_certificate,
@@ -146,10 +148,98 @@ def test_server_host_like_cn_checked_without_dns_san(common_name: str) -> None:
     generate_client_certificate(ca_cert, ca_key, "Alice Smith (phone)", key_size=2048)
 
 
-def test_unconstrained_name_type_is_not_checked() -> None:
-    dns_only, dns_key = generate_ca_certificate("DNS CA", key_size=2048, permitted_subtrees=["home"])
-    cert_pem, _ = generate_server_certificate(dns_only, dns_key, "api.home", ["api.home", "8.8.8.8"], key_size=2048)
-    assert_that(get_certificate_sans(cert_pem), equal_to(["api.home", "8.8.8.8"]))
+_DNS_ONLY = generate_ca_certificate("DNS CA", key_size=2048, permitted_subtrees=["home"])
+_IP_ONLY = generate_ca_certificate("IP CA", key_size=2048, permitted_subtrees=["192.168.0.0/16"])
+
+
+def test_dns_only_ca_refuses_ip_sans() -> None:
+    assert_that(
+        calling(generate_server_certificate).with_args(*_DNS_ONLY, "api.home", ["api.home", "8.8.8.8"], key_size=2048),
+        raises(TinyPkiError, "without a permitted IP subtree"),
+    )
+
+
+def test_dns_only_ca_issues_dns_sans() -> None:
+    cert_pem, _ = generate_server_certificate(*_DNS_ONLY, "api.home", ["api.home"], key_size=2048)
+    assert_that(get_certificate_sans(cert_pem), equal_to(["api.home"]))
+
+
+def test_dns_only_ca_skips_ip_literal_cn_with_warning() -> None:
+    with pytest.warns(TinyPkiWarning, match="Did not add common_name '10.0.0.9'"):
+        cert_pem, _ = generate_server_certificate(*_DNS_ONLY, "10.0.0.9", ["api.home"], key_size=2048)
+    assert_that(get_certificate_sans(cert_pem), equal_to(["api.home"]))
+
+
+def test_ip_only_ca_refuses_dns_sans() -> None:
+    assert_that(
+        calling(generate_server_certificate).with_args(
+            *_IP_ONLY, "router", ["google.com", "192.168.1.10"], key_size=2048
+        ),
+        raises(TinyPkiError, "without a permitted DNS subtree"),
+    )
+
+
+def test_ip_only_ca_refuses_dotted_cn_without_dns_san() -> None:
+    assert_that(
+        calling(generate_server_certificate).with_args(*_IP_ONLY, "google.com", ["192.168.1.10"], key_size=2048),
+        raises(TinyPkiError, "without a permitted DNS subtree"),
+    )
+    assert_that(
+        calling(generate_client_certificate).with_args(*_IP_ONLY, "alice.example.com", key_size=2048),
+        raises(TinyPkiError, "without a permitted DNS subtree"),
+    )
+
+
+def test_ip_only_ca_issues_ip_sans_and_plain_client_cns() -> None:
+    cert_pem, _ = generate_server_certificate(*_IP_ONLY, "router", ["192.168.1.10"], key_size=2048)
+    assert_that(get_certificate_sans(cert_pem), equal_to(["192.168.1.10"]))
+    generate_client_certificate(*_IP_ONLY, "alice", key_size=2048)
+
+
+def test_ip_only_ca_issues_ip_literal_cn() -> None:
+    cert_pem, _ = generate_server_certificate(*_IP_ONLY, "192.168.1.10", ["192.168.1.10"], key_size=2048)
+    assert_that(get_certificate_sans(cert_pem), equal_to(["192.168.1.10"]))
+    generate_client_certificate(*_IP_ONLY, "192.168.1.11", key_size=2048)
+
+
+def test_dns_only_ca_does_not_add_ip_literal_cn_as_san() -> None:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        cert_pem, _ = generate_server_certificate(*_DNS_ONLY, "192.168.1.10", ["api.home"], key_size=2048)
+    assert_that(get_certificate_sans(cert_pem), equal_to(["api.home"]))
+    messages = [str(w.message) for w in caught if issubclass(w.category, TinyPkiWarning)]
+    assert_that(messages, has_item(contains_string("Did not add common_name")))
+
+
+def test_cli_ip_only_ca_refuses_public_hostname(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    store = tmp_path / "store"
+    _cli(store, "init", "--cn", "IP CA", "--key-size", "2048", "--permit", "192.168.0.0/16")
+    capsys.readouterr()
+    with pytest_raises(SystemExit):
+        _cli(store, "create", "server", "google.com", "--san", "192.168.1.10", "--key-size", "2048", "--yes")
+    assert_that(capsys.readouterr().err, contains_string("without a permitted DNS subtree"))
+    assert_that(CertificateStore(store).list_certificates(), equal_to([]))
+
+
+def test_cli_ip_only_ca_issues_host_cn_with_ip_san(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    store = tmp_path / "store"
+    _cli(store, "init", "--cn", "IP CA", "--key-size", "2048", "--permit", "192.168.0.0/16")
+    _cli(store, "create", "server", "router", "--san", "192.168.1.10", "--key-size", "2048", "--yes")
+    assert_that(capsys.readouterr().err, contains_string("Did not add common_name 'router'"))
+    entry = CertificateStore(store).get_certificate("router")
+    assert entry is not None
+    cert_pem = CertificateStore(store).read_certificate_pem(entry)
+    assert_that(get_certificate_sans(cert_pem), equal_to(["192.168.1.10"]))
+
+
+def test_cli_ip_only_ca_needs_an_ip_san_for_a_host_cn(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    store = tmp_path / "store"
+    _cli(store, "init", "--cn", "IP CA", "--key-size", "2048", "--permit", "192.168.0.0/16")
+    capsys.readouterr()
+    with pytest_raises(SystemExit):
+        _cli(store, "create", "server", "router", "--key-size", "2048", "--yes")
+    assert_that(capsys.readouterr().err, contains_string("without a permitted DNS subtree"))
+    assert_that(CertificateStore(store).list_certificates(), equal_to([]))
 
 
 def _cli(store: Path, *words: str) -> None:

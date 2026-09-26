@@ -44,8 +44,13 @@ Name Constraints (`permitted_subtrees`, CLI `init --permit`):
   issue time rather than a failed handshake later. When the leaf has no DNS SAN,
   a dotted CN made of letters, digits, `-`, `_` and `.` (IP literals included) is
   checked against the DNS constraints too, as OpenSSL does.
-- RFC 5280 only constrains the name types you list: a DNS-only constraint
-  leaves IP SANs unrestricted, so add your LAN ranges too.
+- RFC 5280 only constrains the name types you list: to a relying party, a
+  DNS-only constraint leaves IP SANs unrestricted and an IP-only constraint
+  leaves DNS names unrestricted. tiny-pki is stricter at issue time: once a CA
+  has permitted subtrees, it refuses a DNS SAN (or a dotted, non-IP CN with no
+  DNS SAN) unless a DNS subtree is permitted, and an IP SAN unless an IP subtree is
+  permitted. A server CN of an unlisted type is not auto-added to the SANs
+  (a `TinyPkiWarning` says so). List every name type your devices use.
 
 Name rules (`tiny_pki.names`):
 
