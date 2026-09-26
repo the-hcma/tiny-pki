@@ -5,12 +5,14 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import time_machine
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
-from hamcrest import assert_that, contains_string, equal_to, has_length, is_not
+from hamcrest import assert_that, contains_string, equal_to, has_item, has_length, is_not
 from pytest import CaptureFixture
 
 from tiny_pki import (
@@ -113,7 +115,7 @@ def test_no_store_needed_for_file_targets(
     [
         ("none", ("missing.pem",), "Expected a file or directory to check"),
         ("cert", ("server.pem", "--include-revoked"), "--include-revoked applies to the store only"),
-        ("cert", ("--ca", "server.pem"), "--ca / --password-file apply to file targets"),
+        ("cert", ("--ca", "server.pem"), "--ca / --crl / --password-file apply to file targets"),
         ("cert", ("server.pem", "--ca", "junk.cer"), "Expected a PEM CA certificate for --ca"),
         ("cert", ("junk.cer",), "Expected a PEM or DER certificate or CRL"),
         ("cert", ("server.pem", "--ca", "server.pem"), "Expected a CA certificate (BasicConstraints ca=True) for --ca"),
@@ -148,6 +150,78 @@ _FOREIGN_CERT, _ = generate_client_certificate(_FOREIGN_CA_CERT, _FOREIGN_CA_KEY
 _FOREIGN_CRL = generate_crl(_FOREIGN_CA_CERT, _FOREIGN_CA_KEY, [])
 _P12 = generate_pkcs12(_CLIENT_CERT, _CLIENT_KEY, _CA_CERT, "alice", _BUNDLE_PASSWORD.encode())
 _SERVER_CERT, _SERVER_KEY = generate_server_certificate(_CA_CERT, _CA_KEY, "api.home", ["api.home"], key_size=2048)
+
+
+def test_crl_flag_reports_revoked_file_certificate(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    cert = tmp_path / "server.pem"
+    cert.write_bytes(_SERVER_CERT)
+    serial = x509.load_pem_x509_certificate(_SERVER_CERT).serial_number
+    crl = tmp_path / "crl.der"
+    revoked = generate_crl(_CA_CERT, _CA_KEY, [(serial, datetime.now(UTC))])
+    crl.write_bytes(x509.load_pem_x509_crl(revoked).public_bytes(serialization.Encoding.DER))
+    assert_that(_check(cert, "--ca", _write(tmp_path, "ca.crt", _CA_CERT)), equal_to(0))
+    capsys.readouterr()
+    assert_that(_check(cert, "--ca", tmp_path / "ca.crt", "--crl", crl, "--json"), equal_to(2))
+    result = json.loads(capsys.readouterr().out)["results"][0]
+    assert_that(result["status"], equal_to("revoked"))
+
+
+def test_crl_flag_applies_to_directory_targets(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    certs = tmp_path / "certs"
+    certs.mkdir()
+    _write(certs, "server.pem", _SERVER_CERT)
+    serial = x509.load_pem_x509_certificate(_SERVER_CERT).serial_number
+    crl = _write(tmp_path, "crl.pem", generate_crl(_CA_CERT, _CA_KEY, [(serial, datetime.now(UTC))]))
+    ca = _write(tmp_path, "ca.crt", _CA_CERT)
+    capsys.readouterr()
+    assert_that(_check(certs, "--ca", ca, "--crl", crl, "--json"), equal_to(2))
+    results = json.loads(capsys.readouterr().out)["results"]
+    assert_that([r["status"] for r in results], equal_to(["revoked"]))
+
+
+def test_crl_flag_with_expired_crl_is_critical(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
+    cert = _write(tmp_path, "server.pem", _SERVER_CERT)
+    crl = _write(tmp_path, "crl.pem", generate_crl(_CA_CERT, _CA_KEY, [], validity_days=1))
+    ca = _write(tmp_path, "ca.crt", _CA_CERT)
+    with time_machine.travel(datetime.now(UTC) + timedelta(days=2), tick=False):
+        assert_that(_check(cert, "--ca", ca, "--crl", crl, "--json"), equal_to(2))
+    result = json.loads(capsys.readouterr().out)["results"][0]
+    assert_that(result["reasons"], has_item(contains_string("revocation status unknown")))
+
+
+@pytest.mark.parametrize(
+    ("with_ca", "crl_from_other_ca", "message"),
+    [(False, False, "Expected --ca with --crl"), (True, True, "signed by the --ca")],
+)
+def test_crl_flag_requires_matching_ca(
+    tmp_path: Path, capsys: CaptureFixture[str], with_ca: bool, crl_from_other_ca: bool, message: str
+) -> None:
+    cert = _write(tmp_path, "server.pem", _SERVER_CERT)
+    other_cert, other_key = generate_ca_certificate("Other CA", key_size=2048)
+    crl_pem = generate_crl(other_cert, other_key, []) if crl_from_other_ca else _CRL
+    crl = _write(tmp_path, "crl.pem", crl_pem)
+    ca_args = ["--ca", _write(tmp_path, "ca.crt", _CA_CERT)] if with_ca else []
+    capsys.readouterr()
+    assert_that(_check(cert, *ca_args, "--crl", crl), equal_to(3))
+    assert_that(capsys.readouterr().err, contains_string(message))
+
+
+@pytest.mark.parametrize(("contents", "found"), [(_SERVER_CERT, 0), (_CRL + _CRL, 2)])
+def test_crl_flag_requires_exactly_one_crl(
+    tmp_path: Path, capsys: CaptureFixture[str], contents: bytes, found: int
+) -> None:
+    cert = _write(tmp_path, "server.pem", _SERVER_CERT)
+    crl = _write(tmp_path, "crl.pem", contents)
+    ca = _write(tmp_path, "ca.crt", _CA_CERT)
+    capsys.readouterr()
+    assert_that(_check(cert, "--ca", ca, "--crl", crl), equal_to(3))
+    assert_that(capsys.readouterr().err, contains_string(f"Expected exactly one CRL in {crl} for --crl, found {found}"))
+
+
+def _write(directory: Path, name: str, data: bytes) -> Path:
+    path = directory / name
+    path.write_bytes(data)
+    return path
 
 
 def _check(*words: str | Path) -> int:

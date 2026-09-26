@@ -31,6 +31,17 @@ def test_readme_links_consumer_issues() -> None:
     assert_that(text, contains_string("https://github.com/the-hcma/home-warden/issues/49"))
 
 
+def test_readme_cryptography_floor_matches_pyproject() -> None:
+    pyproject = (_README.parent / "pyproject.toml").read_text(encoding="utf-8")
+    floor = re.search(r'"cryptography>=([0-9.]+)"', pyproject)
+    assert floor is not None
+    assert_that(_README.read_text(encoding="utf-8"), contains_string(f"{floor.group(1)} or newer"))
+
+
+def test_readme_library_ca_is_name_constrained() -> None:
+    assert_that(_README.read_text(encoding="utf-8"), contains_string("permitted_subtrees=["))
+
+
 def test_readme_python_blocks_execute() -> None:
     blocks = _python_blocks()
     assert_that(blocks, has_length(greater_than_or_equal_to(1)))
