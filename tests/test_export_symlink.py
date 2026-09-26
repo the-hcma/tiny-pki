@@ -112,3 +112,11 @@ def test_write_file_atomic_replaces_link_planted_after_the_check(tmp_path: Path,
     assert_that(link.is_symlink(), equal_to(False))
     assert_that(link.read_bytes(), equal_to(b"key material"))
     assert_that(stat.S_IMODE(link.stat().st_mode), equal_to(0o600))
+
+
+def test_write_file_atomic_sets_mode_without_fchmod(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.delattr("tiny_pki._fsutil.os.fchmod")
+    target = tmp_path / "secret.pem"
+    write_file_atomic(target, b"data", mode=0o640)
+    assert_that(stat.S_IMODE(target.stat().st_mode), equal_to(0o640))
+    assert_that(target.read_bytes(), equal_to(b"data"))

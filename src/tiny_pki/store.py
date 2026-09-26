@@ -1,7 +1,10 @@
 """Filesystem store for CLI-managed certificate authorities.
 
 Writes require an explicit store directory (``--store`` / ``TINY_PKI_STORE``).
-Private key files are created with mode ``0o600``.
+Private keys, bundles, and ``index.json`` are written with mode ``0o600``;
+directories the store creates are ``0o700``. Leaf and bundle writes refuse a
+symlink at any path component, and index paths must point at a leaf file under
+``clients/`` or ``servers/``.
 
 Layout (one CA per store root)::
 
@@ -20,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -115,10 +119,8 @@ class CertificateStore:
         safe = _safe_filename(common_name)
         cert_rel = f"{leaf_dir}/{safe}-{serial_hex}.crt"
         key_rel = f"{leaf_dir}/{safe}-{serial_hex}.key"
-        cert_path = self._path_under_root(cert_rel)
-        key_path = self._path_under_root(key_rel)
-        cert_path.write_bytes(cert_pem)
-        _write_secret(key_path, key_pem)
+        _write_plain(self._validated_write_path(cert_rel), cert_pem)
+        _write_secret(self._validated_write_path(key_rel), key_pem)
 
         entry = IssuedCertificate(
             common_name=common_name,
@@ -226,13 +228,12 @@ class CertificateStore:
         Migrates a legacy flat layout (``ca.crt`` / ``certs/`` at the root) when
         present.
         """
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.root.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
         if self._is_legacy_layout():
             self._migrate_legacy_layout()
-        self.ca_dir.mkdir(exist_ok=True)
-        self.clients_dir.mkdir(exist_ok=True)
-        self.servers_dir.mkdir(exist_ok=True)
-        self.bundles_dir.mkdir(exist_ok=True)
+        self._make_subdirs()
+        for directory in (self.root, self.ca_dir, self.clients_dir, self.servers_dir, self.bundles_dir):
+            _drop_world_write(directory)
         if not self.index_path.exists():
             if self.ca_cert_path.is_file() and self.ca_key_path.is_file():
                 raise FileNotFoundError(f"Expected index.json under {self.ca_dir} (CA present but index missing)")
@@ -346,7 +347,7 @@ class CertificateStore:
     def read_certificate_pem(self, entry: IssuedCertificate) -> bytes:
         if not entry.cert_path:
             raise FileNotFoundError(f"Expected on-disk certificate for {entry.common_name!r}")
-        return self._path_under_root(entry.cert_path).read_bytes()
+        return self._validated_write_path(entry.cert_path).read_bytes()
 
     def read_crl(self) -> bytes | None:
         self._maybe_migrate_legacy_layout()
@@ -357,7 +358,7 @@ class CertificateStore:
     def read_key_pem(self, entry: IssuedCertificate) -> bytes:
         if not entry.key_path:
             raise FileNotFoundError(f"Expected on-disk key for {entry.common_name!r}")
-        return self._path_under_root(entry.key_path).read_bytes()
+        return self._validated_write_path(entry.key_path).read_bytes()
 
     def revoked_entries(self) -> list[tuple[int, datetime]]:
         """Return ``(serial_int, revoked_at)`` for CRL generation (includes tombstones)."""
@@ -386,7 +387,7 @@ class CertificateStore:
         if not serial or any(ch not in "0123456789abcdefABCDEF" for ch in serial):
             raise ValueError(f"Expected hex serial_number, got {serial!r}")
         rel = f"bundles/{_safe_filename(common_name)}-{serial.lower()}.p12"
-        path = self._path_under_root(rel)
+        path = self._validated_write_path(rel)
         _write_secret(path, p12_bytes)
         return path
 
@@ -433,10 +434,7 @@ class CertificateStore:
         CA PEMs last so a mid-migration failure still leaves ``_is_legacy_layout``
         true and a later open can finish the job.
         """
-        self.ca_dir.mkdir(exist_ok=True)
-        self.clients_dir.mkdir(exist_ok=True)
-        self.servers_dir.mkdir(exist_ok=True)
-        self.bundles_dir.mkdir(exist_ok=True)
+        self._make_subdirs()
 
         root_index = self.root / "index.json"
         index_source = self.index_path if self.index_path.is_file() else root_index
@@ -460,12 +458,12 @@ class CertificateStore:
                     new_key = f"{leaf_dir}/{Path(key_rel).name}" if key_rel else ""
                     if old_cert.is_file():
                         dest_cert = self._path_under_root(new_cert)
-                        dest_cert.parent.mkdir(parents=True, exist_ok=True)
+                        dest_cert.parent.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
                         if not dest_cert.exists():
                             shutil.move(str(old_cert), str(dest_cert))
                     if old_key is not None and old_key.is_file() and new_key:
                         dest_key = self._path_under_root(new_key)
-                        dest_key.parent.mkdir(parents=True, exist_ok=True)
+                        dest_key.parent.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
                         if not dest_key.exists():
                             shutil.move(str(old_key), str(dest_key))
                     entry = IssuedCertificate(
@@ -478,10 +476,7 @@ class CertificateStore:
                         fingerprint=entry.fingerprint,
                         revoked_at=entry.revoked_at,
                     )
-                elif cert_rel:
-                    self._path_under_root(cert_rel)
-                    if key_rel:
-                        self._path_under_root(key_rel)
+                self._check_index_paths(entry)
                 migrated.append(entry)
             self._write_index(migrated)
             if root_index.is_file() and root_index.resolve() != self.index_path.resolve():
@@ -510,7 +505,10 @@ class CertificateStore:
         return resolved
 
     def _validated_write_path(self, relative: str) -> Path:
-        """Resolve ``relative`` under the store root for a fresh write, refusing a symlink anywhere in it.
+        """Resolve ``relative`` under the store root, refusing a symlink anywhere in it.
+
+        Used for every write and for leaf reads, so an in-store symlink can
+        neither redirect a write onto ``ca/ca.key`` nor make ``export`` read it.
 
         ``_path_under_root`` alone only rejects a symlink whose *target*
         escapes the store root — a symlink at any component of ``relative``
@@ -542,14 +540,27 @@ class CertificateStore:
             raise ValueError(f"Expected index.json to be a list, got {type(raw).__name__}")
         entries = [_entry_from_dict(item) for item in cast(list[Any], raw)]
         for entry in entries:
-            if entry.cert_path:
-                self._path_under_root(entry.cert_path)
-            if entry.key_path:
-                self._path_under_root(entry.key_path)
+            self._check_index_paths(entry)
         return entries
 
+    def _check_index_paths(self, entry: IssuedCertificate) -> None:
+        """Reject index paths that could point a leaf read or delete at CA material."""
+        for rel, suffix in ((entry.cert_path, ".crt"), (entry.key_path, ".key")):
+            if not rel:
+                continue
+            self._path_under_root(rel)
+            parts = Path(rel).parts
+            if len(parts) != 2 or parts[0] not in ("clients", "servers") or not parts[1].endswith(suffix):
+                raise ValueError(f"Expected index path clients/<file>{suffix} or servers/<file>{suffix}, got {rel!r}")
+            if parts[1] == "ca.key":
+                raise ValueError(f"Expected index path to not name the CA key, got {rel!r}")
+
+    def _make_subdirs(self) -> None:
+        for directory in (self.ca_dir, self.clients_dir, self.servers_dir, self.bundles_dir):
+            directory.mkdir(mode=_DIR_MODE, exist_ok=True)
+
     def _write_index(self, entries: list[IssuedCertificate]) -> None:
-        self.ca_dir.mkdir(parents=True, exist_ok=True)
+        self.ca_dir.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
         payload = [asdict(e) for e in entries]
         # _validated_write_path rejects a symlink at index.json.tmp itself
         # (wherever it points) and, via _path_under_root, one at ca/ that
@@ -557,7 +568,7 @@ class CertificateStore:
         # need this: replace() below is a rename(2), which swaps the
         # destination directory entry rather than following a symlink there.
         tmp = self._validated_write_path("ca/index.json.tmp")
-        _write_plain(tmp, (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+        _write_secret(tmp, (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"))
         tmp.replace(self.index_path)
 
 
@@ -609,6 +620,25 @@ def _index_references_certs_paths(index_path: Path) -> bool:
         if cert_path.startswith("certs/") or key_path.startswith("certs/"):
             return True
     return False
+
+
+_DIR_MODE = 0o700
+
+
+def _drop_world_write(directory: Path) -> None:
+    """Strip other-write from a store directory we own.
+
+    Group write is left alone (a deliberately shared store), as is read access
+    (TLS servers reading ``ca/crl.pem``); directories owned by someone else are
+    skipped because only the owner can chmod them, and a symlink is never
+    followed so a planted link cannot redirect the chmod onto its target.
+    """
+    info = directory.lstat()
+    if stat.S_ISLNK(info.st_mode):
+        return
+    getuid = getattr(os, "getuid", None)
+    if info.st_mode & 0o002 and getuid is not None and info.st_uid == getuid():
+        directory.chmod(stat.S_IMODE(info.st_mode) & ~0o002)
 
 
 def _safe_filename(common_name: str) -> str:

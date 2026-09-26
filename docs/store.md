@@ -15,7 +15,15 @@ $TINY_PKI_STORE/
   bundles/{cn}-{serial}.p12
 ```
 
-Private keys and PKCS#12 bundles are created with mode `0600` from the first byte.
+Private keys, PKCS#12 bundles, and `index.json` are created with mode `0600`
+from the first byte. Directories the store creates are `0700`, whatever the
+umask. Existing store directories you own lose their world-write bit when the
+store is opened. Group write is kept, since a group-shared store is a deliberate
+choice, and read access is left alone, so a TLS server that reads `ca/crl.pem`
+or `ca/ca.crt` as another user keeps working. If a new store
+must be readable by such a user (nginx workers do not need it; the master reads
+`ssl_*` files as root), grant access to those files deliberately. Leaf and bundle
+writes, and leaf reads such as `export`, refuse a symlink at any path component.
 File names include the hex serial so re-issuing a CN never overwrites the old
 material.
 
@@ -28,7 +36,7 @@ A JSON list; each entry:
 | `common_name` | CN of the leaf |
 | `kind` | `"client"` or `"server"` |
 | `serial_number` | lower-case hex |
-| `cert_path`, `key_path` | paths **relative to the store root**; empty for tombstones |
+| `cert_path`, `key_path` | `clients/<file>` or `servers/<file>` (`.crt` / `.key`), relative to the store root; empty for tombstones. Anything else is refused on read |
 | `not_valid_after` | ISO-8601 UTC |
 | `fingerprint` | SHA-256, colon-separated hex |
 | `revoked_at` | ISO-8601 UTC, or `null` while active |

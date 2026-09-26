@@ -24,7 +24,11 @@ def write_file_atomic(path: Path, data: bytes, *, mode: int) -> None:
     tmp = Path(tmp_name)
     try:
         try:
-            os.fchmod(fd, mode)
+            fchmod = getattr(os, "fchmod", None)
+            if fchmod is not None:
+                fchmod(fd, mode)
+            else:
+                tmp.chmod(mode)
             view = memoryview(data)
             while view:
                 written = os.write(fd, view)
