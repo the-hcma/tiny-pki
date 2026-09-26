@@ -23,13 +23,13 @@ ECDSA P-256 keys are tracked separately in
 
 | Setting | Default | Cap | Override | Rationale |
 | --- | --- | --- | --- | --- |
-| CA validity | 3650 days (`DEFAULT_CA_VALIDITY_DAYS`) | none | `validity_days=` / `--days` | Re-installing a root on every device is expensive, so a private root lasts about ten years. Leaves may not outlive it. |
-| Server validity | 90 days (`DEFAULT_SERVER_VALIDITY_DAYS`) | 200 days (`MAX_SERVER_VALIDITY_DAYS`) | `allow_long_validity=True` / `--allow-long-validity` | Let's Encrypt issues 90-day certificates. CA/B Forum SC-081 caps public TLS at 200 days from 2026-03-15, falling to 100 (2027) and 47 (2029). |
-| Client validity | 397 days (`DEFAULT_CLIENT_VALIDITY_DAYS`) | 825 days (`MAX_CLIENT_VALIDITY_DAYS`) | `allow_long_validity=True` / `--allow-long-validity` | Client certificates are re-provisioned by hand on phones, so they get about a year (the pre-SC-081 public limit). The cap matches Apple's limit. |
+| CA validity | 3650 days (`DEFAULT_CA_VALIDITY_DAYS`) | 36500 days (`MAX_VALIDITY_DAYS`) | `validity_days=` / `--days` | Re-installing a root on every device is expensive, so a private root lasts about ten years. Leaves may not outlive it. |
+| Server validity | 90 days (`DEFAULT_SERVER_VALIDITY_DAYS`) | 200 days (`MAX_SERVER_VALIDITY_DAYS`); 36500 even with the override | `allow_long_validity=True` / `--allow-long-validity` | Let's Encrypt issues 90-day certificates. CA/B Forum SC-081 caps public TLS at 200 days from 2026-03-15, falling to 100 (2027) and 47 (2029). |
+| Client validity | 397 days (`DEFAULT_CLIENT_VALIDITY_DAYS`) | 825 days (`MAX_CLIENT_VALIDITY_DAYS`); 36500 even with the override | `allow_long_validity=True` / `--allow-long-validity` | Client certificates are re-provisioned by hand on phones, so they get about a year (the pre-SC-081 public limit). The cap matches Apple's limit. |
 | Apple warning | above 825 days (`APPLE_MAX_SERVER_VALIDITY_DAYS`) | n/a | n/a | iOS and macOS reject TLS server certificates valid for more than 825 days, even from private CAs. tiny-pki emits `TinyPkiWarning` when a bypass goes past it. |
 | Leaf outliving CA | rejected | n/a | none | A leaf that expires after its CA fails validation for its last stretch. `ValueError` says which `validity_days` still fits, or tells you to renew the CA. |
 | Clock-skew backdate | 5 minutes (`CLOCK_SKEW_BACKDATE`) | n/a | none | `notBefore` and a CRL's `lastUpdate` are backdated so devices with slightly slow clocks accept fresh artifacts. The whole window shifts, so the encoded lifetime still equals `validity_days`. |
-| CRL `nextUpdate` | 30 days | none | `validity_days=` on `generate_crl` | Relying parties reject an expired CRL, so republish well within the window. |
+| CRL `nextUpdate` | 30 days | 36500 days (`MAX_VALIDITY_DAYS`) | `validity_days=` on `generate_crl` | Relying parties reject an expired CRL, so republish well within the window. |
 | Expiry warning window | one third of the lifetime | 30 days for leaves (`MAX_LEAF_WARNING_DAYS`), 180 days for the CA (`MAX_CA_WARNING_DAYS`), uncapped for CRLs | `within=` / `by=` on `check_certificate` and `check_crl` | Let's Encrypt renews at a third of the lifetime remaining. The CA gets a longer runway because replacing it means re-installing the root on every device. |
 
 ## Names

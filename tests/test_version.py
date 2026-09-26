@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from hamcrest import assert_that, contains_string, equal_to, is_, is_not, matches_regexp
 from pytest import CaptureFixture, MonkeyPatch
 
@@ -83,3 +84,17 @@ def test_cli_version_flag(capsys: CaptureFixture[str], monkeypatch: MonkeyPatch)
     assert_that(out, contains_string("(aabbccddeeff)"))
     assert_that(out.startswith("tiny-pki "), is_(True))
     version_module.get_build_info.cache_clear()
+
+
+@pytest.mark.parametrize("value", ["abc\nEVIL", "\x1b[31mred", "not-a-sha", "abc123", "g" * 12, "a" * 41])
+def test_git_commit_rejects_non_hex_override(tmp_path: Path, value: str) -> None:
+    assert_that(git_commit(environ={"TINY_PKI_GIT_SHA": value}, repository=tmp_path), equal_to("unknown"))
+
+
+def test_git_commit_rejects_non_hex_embedded(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(version_module._build_metadata, "EMBEDDED_COMMIT", "abc\nEVIL", raising=False)
+    assert_that(git_commit(environ={}, repository=tmp_path), equal_to("unknown"))
+
+
+def test_git_commit_accepts_short_uppercase_hex(tmp_path: Path) -> None:
+    assert_that(git_commit(environ={"TINY_PKI_GIT_SHA": "ABCDEF1"}, repository=tmp_path), equal_to("abcdef1"))

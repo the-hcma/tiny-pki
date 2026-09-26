@@ -10,6 +10,7 @@ Never raises.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import tomllib
 from collections.abc import Mapping
@@ -18,6 +19,8 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from tiny_pki import _build_metadata
+
+_COMMIT_ID = re.compile(r"[0-9a-fA-F]{7,40}")
 
 PACKAGE_NAME = "tiny-pki"
 
@@ -70,7 +73,7 @@ def git_commit(
         )
     except (OSError, subprocess.SubprocessError):
         return "unknown"
-    return result.stdout.strip() or "unknown"
+    return _normalize_commit(result.stdout)
 
 
 def package_version(*, pyproject_path: Path | None = None) -> str:
@@ -86,12 +89,11 @@ def package_version(*, pyproject_path: Path | None = None) -> str:
 
 
 def _normalize_commit(token: str) -> str:
+    """Return the first 12 characters of a hex commit id, or ``unknown`` for anything else."""
     stripped = token.strip()
-    if not stripped:
+    if not _COMMIT_ID.fullmatch(stripped):
         return "unknown"
-    if len(stripped) > 12:
-        return stripped[:12]
-    return stripped
+    return stripped[:12].lower()
 
 
 def _pyproject_version(path: Path) -> str:

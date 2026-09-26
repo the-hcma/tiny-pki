@@ -18,7 +18,7 @@ The library needs only `cryptography` (`pip install tiny-pki`); none of the modu
 | `max_leaf_validity_days(ca_cert_pem, *, kind="server", allow_long_validity=False)` | `int` — the largest `validity_days` issuing a `kind` leaf under this CA accepts right now (CA `notAfter` with the `CLOCK_SKEW_BACKDATE` backdate, and the per-kind cap unless `allow_long_validity`); `0` once the CA cannot sign any leaf. Use it to clamp or grey out `VALIDITY_PRESETS` in UIs |
 
 `organization_name=None` on leaves inherits the CA's `O`. `key_size` must be one of
-`ALLOWED_KEY_SIZES` (`2048`, `3072`, `4096`); `validity_days` must be positive.
+`ALLOWED_KEY_SIZES` (`2048`, `3072`, `4096`); `validity_days` must be between 1 and `MAX_VALIDITY_DAYS` (36500).
 
 Every default and its rationale is listed in [`defaults.md`](defaults.md).
 
@@ -168,6 +168,7 @@ Expiry and validity checks for alerting (`tiny_pki.check`, re-exported from `tin
 | `MAX_CLIENT_VALIDITY_DAYS` | `825` |
 | `MAX_LEAF_WARNING_DAYS` | `30` |
 | `MAX_SERVER_VALIDITY_DAYS` | `200` |
+| `MAX_VALIDITY_DAYS` | `36500`: hard ceiling for any `validity_days` (CA, leaf, CRL), even with `allow_long_validity` |
 | `MIN_PKCS12_PASSWORD_LENGTH` | `16` |
 | `VALIDITY_PRESETS` | `[(90, "90 days"), …, (825, "825 days")]` for UI pickers; clamp with `max_leaf_validity_days(ca_cert_pem)` |
 
