@@ -52,6 +52,10 @@ the file afterwards, or delete it yourself once the device has the bundle.
 Reserve `--legacy` (3DES/SHA-1) for devices that can't import the default
 AES-256 bundle.
 
+`export pem` and `export p12 --out` write with mode `0600` through a temp file
+and an atomic rename, and refuse a destination that is already a symlink, so a
+link planted in the export directory cannot redirect the private key elsewhere.
+
 ## Revocation only works if the CRL is fresh
 
 - Every revoke must be followed by publishing the new CRL **and** reloading the

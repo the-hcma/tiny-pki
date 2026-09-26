@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import getpass
 import json
-import os
 import sys
 import warnings
 from collections import Counter
@@ -40,6 +39,7 @@ from tiny_pki import (
     get_certificate_serial_number,
     get_certificate_subject,
 )
+from tiny_pki._fsutil import write_file_atomic
 from tiny_pki.check import CertificateStatus, Status, check_certificate, check_crl, worst_status
 from tiny_pki.cli.theme import Theme
 from tiny_pki.names import common_name_as_san, normalize_san_entries
@@ -889,16 +889,6 @@ def _safe_export_name(common_name: str) -> str:
 
 
 def _write_secret_file(path: Path, data: str | bytes) -> None:
-    """Write bytes/text with mode 0600 from creation (no world-readable window)."""
+    """Write an export with mode 0600, refusing to write through a symlink at ``path``."""
     payload = data.encode() if isinstance(data, str) else data
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        view = memoryview(payload)
-        while view:
-            written = os.write(fd, view)
-            if written <= 0:
-                raise OSError(f"Expected progress writing {path}, got {written} bytes")
-            view = view[written:]
-    finally:
-        os.close(fd)
-    os.chmod(path, 0o600)
+    write_file_atomic(path, payload, mode=0o600)
