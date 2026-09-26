@@ -40,14 +40,14 @@ ECDSA P-256 keys are tracked separately in
 | DNS SANs | lowercased, trailing dot stripped, IDNs converted to punycode, LDH labels, wildcard only as the whole leftmost label with at least two labels after it | RFC 1035/5890/6125 and the Baseline Requirements. Matching is done on the A-label form. |
 | IP SANs | canonicalized; scope IDs and CIDR ranges rejected | An IP SAN names exactly one address. |
 | URL SANs | rejected | A pasted `https://…` never matches a hostname. |
-| CN as SAN | a host-like CN missing from the SANs is added, with a warning (the CLI asks first, or add `--yes` / `--no-cn-san`) | Browsers ignore the CN (RFC 6125); forgetting to repeat it in the SANs is the most common private-CA mistake. |
+| CN as SAN | a host-like CN missing from the SANs is added, with a warning (the CLI asks first, or add `--yes` / `--no-cn-san`); on a name-constrained CA with no subtree for the CN's type it is left out, with a warning, when that is safe: a single-label CN such as `router` on an IP-only CA, or an IP CN on a DNS-only CA. A dotted DNS CN such as `google.com` on an IP-only CA is refused instead, because OpenSSL checks it against the DNS constraints | Browsers ignore the CN (RFC 6125); forgetting to repeat it in the SANs is the most common private-CA mistake. |
 
 ## CA constraints and CRLs
 
 | Setting | Default | Rationale |
 | --- | --- | --- |
 | `BasicConstraints` | `ca=True, path_length=0` (critical) | tiny-pki never creates intermediates, so the CA can't mint subordinate CAs. |
-| Name constraints | off; `permitted_subtrees=` / `init --permit` adds critical `NameConstraints` | Limits what a stolen CA key can impersonate. tiny-pki also refuses to issue leaves outside the constraints. |
+| Name constraints | off; `permitted_subtrees=` / `init --permit` adds critical `NameConstraints` | Limits what a stolen CA key can impersonate, but only for the name types you list: constrain both DNS and IP (see [security.md](./security.md)). tiny-pki also refuses to issue leaves outside the constraints. |
 | CRL extensions | `CRLNumber` (microseconds since the epoch; the CLI store also records the last number in `ca/crlnumber` and never goes below `last + 1`) and `AuthorityKeyIdentifier` | RFC 5280 requires both. A monotonic number lets clients discard older CRLs. |
 
 ## Secrets and bundles
