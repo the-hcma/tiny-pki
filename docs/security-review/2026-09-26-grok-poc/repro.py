@@ -119,15 +119,19 @@ def main_repro() -> None:
 
     # --- leading-dot permit rewritten to include apex ---
     section("leading-dot permit includes apex")
-    dot_ca, dot_key = generate_ca_certificate("Dot CA", key_size=2048, permitted_subtrees=[".example.com"])
-    dot_obj = x509.load_pem_x509_certificate(dot_ca)
-    permitted = list(dot_obj.extensions.get_extension_for_class(x509.NameConstraints).value.permitted_subtrees or [])
-    print(f"stored permitted {permitted}")
     try:
-        generate_server_certificate(dot_ca, dot_key, "example.com", ["example.com"], key_size=2048)
-        print("apex example.com ISSUED")
+        dot_ca, dot_key = generate_ca_certificate("Dot CA", key_size=2048, permitted_subtrees=[".example.com"])
     except Exception as exc:  # noqa: BLE001
-        print(f"apex rejected: {exc}")
+        print(f"leading-dot permit rejected: {exc}")
+    else:
+        dot_obj = x509.load_pem_x509_certificate(dot_ca)
+        dot_constraints = dot_obj.extensions.get_extension_for_class(x509.NameConstraints).value
+        print(f"stored permitted {list(dot_constraints.permitted_subtrees or [])}")
+        try:
+            generate_server_certificate(dot_ca, dot_key, "example.com", ["example.com"], key_size=2048)
+            print("apex example.com ISSUED")
+        except Exception as exc:  # noqa: BLE001
+            print(f"apex rejected: {exc}")
 
     # --- IP-only constraint still allows a public DNS SAN (noninteractive CN add) ---
     section("IP-only CA issues public DNS name")
@@ -392,7 +396,7 @@ def main_repro() -> None:
     out = root / "exported.pem"
     proc = run_cli(tstore, "export", "pem", "alice", "--out", str(out))
     print(f"export rc={proc.returncode} {proc.stderr}")
-    body = out.read_text(errors="replace")
+    body = out.read_text(errors="replace") if out.exists() else ""
     ca_key_text = tst.ca_key_path.read_text()
     print(f"export contains CA private key={ca_key_text in body}")
 
