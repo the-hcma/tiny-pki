@@ -4,7 +4,7 @@
 
 ## What gets checked
 
-- `tiny-pki --store DIR check` checks the store's CA certificate, its CRL, and every active leaf. Add `--include-revoked` to list revoked leaves too (they report `revoked`). Leaves are checked against the store's CA and CRL. A CRL that is not signed by the store's CA is reported as `untrusted` and is not used for revocation.
+- `tiny-pki --store DIR check` checks the store's CA certificate, its CRL, and every active leaf. Add `--include-revoked` to list revoked leaves too (they report `revoked`). Leaves are checked against the store's CA and CRL. A CRL that is not signed by the store's CA is reported as `untrusted` and is not used for revocation. `index.json` is authoritative for revocation: a leaf revoked there reports `revoked` even if the CRL omits it, a CRL missing any serial revoked in the index (for example an older CRL restored from backup) reports `untrusted` (shown even when `--kind` leaves out `crl`), and a missing CRL while the index has revocations is an error (exit 3). Once the CRL passes its `nextUpdate`, leaves checked against it report `untrusted` with "revocation status unknown", because an old CRL can predate a revocation; a leaf revoked in the index still carries its "revoked in index.json" reason.
 - `tiny-pki check PATH...` checks files instead, and needs no store:
   - PEM or DER certificates, and every certificate in a chain file;
   - CRLs (PEM or DER), whose freshness is their `nextUpdate`;

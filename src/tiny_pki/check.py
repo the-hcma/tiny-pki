@@ -82,8 +82,10 @@ def check_certificate(
             the result ``UNTRUSTED``, and a CA that expires first shortens the
             effective validity.
         crl_pem: A CRL from the same CA; a listed serial makes the result
-            ``REVOKED``. Requires ``ca_cert_pem`` so the CRL's signature can be
-            verified.
+            ``REVOKED``. A CRL past its ``nextUpdate`` makes the result
+            ``UNTRUSTED`` (revocation status unknown), since an old CRL may
+            predate a revocation. Requires ``ca_cert_pem`` so the CRL's
+            signature can be verified.
 
     Raises:
         TinyPkiError: On naive datetimes, a negative ``within``, a ``ca_cert_pem``
@@ -114,6 +116,11 @@ def check_certificate(
             revoked = crl.get_revoked_certificate_by_serial_number(cert.serial_number)
             if revoked is not None:
                 reasons.append((Status.REVOKED, f"revoked on {revoked.revocation_date_utc.isoformat()}"))
+            next_update = crl.next_update_utc
+            if next_update is not None and now >= next_update:
+                reasons.append(
+                    (Status.UNTRUSTED, f"CRL expired on {next_update.isoformat()}; revocation status unknown")
+                )
 
     cutoff = _cutoff(now, within=within, by=by, default=window)
     reasons.extend(_time_reasons(now, not_before, not_after, cutoff))
