@@ -91,7 +91,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          version: latest
+          version: "0.12.19" # bump deliberately; see SECURITY.md
 
       - name: Python lint & format checks
         run: bash .github/ci/python-static
@@ -109,7 +109,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          version: latest
+          version: "0.12.19" # bump deliberately; see SECURITY.md
 
       - name: Pytest (hermetic)
         run: bash .github/ci/pytest-hermetic
@@ -127,7 +127,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          version: latest
+          version: "0.12.19" # bump deliberately; see SECURITY.md
 
       - name: Packaging
         run: bash .github/ci/packaging
@@ -145,7 +145,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
-          version: latest
+          version: "0.12.19" # bump deliberately; see SECURITY.md
 
       - name: Pytest (cryptography minimum)
         run: bash .github/ci/pytest-cryptography-minimum
