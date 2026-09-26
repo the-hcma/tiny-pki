@@ -50,8 +50,13 @@ Lifecycle:
 - **create** — appends an entry. Re-issuing a live CN auto-revokes the previous
   serial (it stays in the CRL).
 - **revoke** — sets `revoked_at` and regenerates `ca/crl.pem`.
-- **delete** — only after revoke (or with `--force`). A revoked entry becomes a
-  *tombstone*: files removed, paths cleared, serial kept so the CRL still lists it.
+- **delete** — only after revoke, or with `--force`, which revokes an active
+  certificate first. The entry becomes a *tombstone*: files removed, paths
+  cleared, serial kept so the CRL still lists it.
+
+Commands that take an identity accept a common name or a hex serial (`0x`
+optional). A value that is one certificate's serial and another certificate's
+common name is refused as ambiguous; the error names an unambiguous alternative.
 
 Paths in the index are validated to stay under the store root; a tampered index
 that points elsewhere is rejected.
