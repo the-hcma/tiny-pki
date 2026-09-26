@@ -7,7 +7,7 @@
 
 Small **private CA** toolkit for Python: issue CA / server / client certificates,
 generate CRLs, export PKCS#12 bundles, and inspect PEMs. Built on
-[`cryptography`](https://cryptography.io/) 43.0.1 or newer; CI runs the suite against both
+[`cryptography`](https://cryptography.io/) 50.0.1 or newer; CI runs the suite against both
 that minimum (on Python 3.12) and the latest release.
 
 Two layers, pick one:
@@ -70,7 +70,9 @@ from tiny_pki import (
 )
 
 # Keys default to RSA 3072 (leaves) / 4096 (CA); 2048 keeps this example fast.
-ca_cert, ca_key = generate_ca_certificate("Home CA", key_size=2048)
+# Without permitted_subtrees the CA can sign any name, including public sites;
+# constrain every name type (DNS and IP) your devices use.
+ca_cert, ca_key = generate_ca_certificate("Home CA", key_size=2048, permitted_subtrees=["home", "192.168.0.0/16"])
 
 client_cert, client_key = generate_client_certificate(ca_cert, ca_key, "alice", key_size=2048)
 server_cert, server_key = generate_server_certificate(

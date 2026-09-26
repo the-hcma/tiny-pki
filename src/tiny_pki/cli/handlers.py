@@ -153,7 +153,7 @@ def _cmd_check(args: list[str], *, store: CertificateStore | None, theme: Theme)
     expiring, 2 something expired / not yet valid / revoked / untrusted.
     """
     opts = _parse_flags(
-        args, allowed={"by", "ca", "include-revoked", "json", "kind", "password-file", "quiet", "within"}
+        args, allowed={"by", "ca", "crl", "include-revoked", "json", "kind", "password-file", "quiet", "within"}
     )
     flags = opts["flags"]
     within = _parse_within(flags["within"]) if "within" in flags else None
@@ -167,20 +167,22 @@ def _cmd_check(args: list[str], *, store: CertificateStore | None, theme: Theme)
         if "include-revoked" in flags:
             raise ValueError("--include-revoked applies to the store only, not to file targets")
         ca_cert_pem = _read_ca_file(Path(flags["ca"])) if "ca" in flags else None
+        crl_pem = _read_crl_file(Path(flags["crl"]), ca_cert_pem) if "crl" in flags else None
         password = _read_password_file(Path(flags["password-file"])) if "password-file" in flags else None
         rows = _check_targets(
             [Path(target) for target in opts["positional"]],
             within=within,
             by=by,
             ca_cert_pem=ca_cert_pem,
+            crl_pem=crl_pem,
             password=password,
             theme=theme,
         )
         if "kind" in opts["multi"]:
             rows = [row for row in rows if row[1].kind in kinds]
     else:
-        if {"ca", "password-file"} & flags.keys():
-            raise ValueError("--ca / --password-file apply to file targets; the store uses its own CA")
+        if {"ca", "crl", "password-file"} & flags.keys():
+            raise ValueError("--ca / --crl / --password-file apply to file targets; the store uses its own CA and CRL")
         store = _require_store(store)
         rows = _check_store(store, within=within, by=by, kinds=kinds, include_revoked="include-revoked" in flags)
     rows.sort(key=lambda row: (row[1].not_after is None, row[1].not_after or datetime.max.replace(tzinfo=UTC)))
@@ -558,6 +560,18 @@ def _read_ca_file(path: Path) -> bytes:
     return data
 
 
+def _read_crl_file(path: Path, ca_cert_pem: bytes | None) -> bytes:
+    """Load ``--crl`` (PEM or DER) and require it to be signed by ``--ca``."""
+    if ca_cert_pem is None:
+        raise ValueError("Expected --ca with --crl so the CRL signature can be verified")
+    _, crls = _pem_or_der_artifacts(path.read_bytes(), path)
+    if len(crls) != 1:
+        raise ValueError(f"Expected exactly one CRL in {path} for --crl, found {len(crls)}")
+    if check_crl(crls[0], ca_cert_pem=ca_cert_pem).status is Status.UNTRUSTED:
+        raise ValueError(f"Expected a --crl signed by the --ca certificate, got {path}")
+    return crls[0]
+
+
 def _read_password_file(path: Path) -> str:
     """Read the first line of ``path`` (trailing newline dropped) as the bundle password."""
     try:
@@ -612,6 +626,7 @@ def _check_file(
     within: timedelta | None,
     by: datetime | None,
     ca_cert_pem: bytes | None,
+    crl_pem: bytes | None,
     password: str | None,
 ) -> list[tuple[str, CertificateStatus]]:
     data = path.read_bytes()
@@ -626,7 +641,7 @@ def _check_file(
     count = len(certs) + len(crls)
     for index, cert_pem in enumerate(certs, start=1):
         name = str(path) if count == 1 else f"{path} #{index}"
-        rows.append((name, check_certificate(cert_pem, within=within, by=by, ca_cert_pem=ca_cert_pem)))
+        rows.append((name, check_certificate(cert_pem, within=within, by=by, ca_cert_pem=ca_cert_pem, crl_pem=crl_pem)))
     for index, crl_pem in enumerate(crls, start=len(certs) + 1):
         name = str(path) if count == 1 else f"{path} #{index}"
         rows.append((name, check_crl(crl_pem, within=within, by=by, ca_cert_pem=ca_cert_pem)))
@@ -726,6 +741,7 @@ def _check_targets(
     within: timedelta | None,
     by: datetime | None,
     ca_cert_pem: bytes | None,
+    crl_pem: bytes | None,
     password: str | None,
     theme: Theme,
 ) -> list[tuple[str, CertificateStatus]]:
@@ -735,11 +751,17 @@ def _check_targets(
         if target.is_dir():
             for path in sorted(p for p in target.iterdir() if p.is_file() and p.suffix.lower() in _CHECK_SUFFIXES):
                 try:
-                    rows.extend(_check_file(path, within=within, by=by, ca_cert_pem=ca_cert_pem, password=password))
+                    rows.extend(
+                        _check_file(
+                            path, within=within, by=by, ca_cert_pem=ca_cert_pem, crl_pem=crl_pem, password=password
+                        )
+                    )
                 except ValueError as exc:
                     print(theme.dim(f"skipped {path}: {exc}"), file=sys.stderr)
         elif target.exists():
-            rows.extend(_check_file(target, within=within, by=by, ca_cert_pem=ca_cert_pem, password=password))
+            rows.extend(
+                _check_file(target, within=within, by=by, ca_cert_pem=ca_cert_pem, crl_pem=crl_pem, password=password)
+            )
         else:
             raise FileNotFoundError(f"Expected a file or directory to check, got {target}")
     return rows
@@ -904,7 +926,7 @@ def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
             else:
                 value = ""
                 i += 1
-            if not value and name in {"by", "ca", "kind", "out", "password-file", "permit", "san", "within"}:
+            if not value and name in {"by", "ca", "crl", "kind", "out", "password-file", "permit", "san", "within"}:
                 raise ValueError(f"Expected a non-empty value for --{name}")
             if name in {"kind", "permit", "san"}:
                 multi.setdefault(name, []).append(value)
