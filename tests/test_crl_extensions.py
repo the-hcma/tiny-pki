@@ -14,14 +14,14 @@ from cryptography.x509.oid import NameOID
 from hamcrest import assert_that, calling, equal_to, greater_than, is_, raises
 
 from tiny_pki import TinyPkiError, generate_ca_certificate, generate_crl
-from tiny_pki._rsa import load_rsa_private_key
+from tiny_pki._keys import load_private_key
 
 _CA = generate_ca_certificate("CRL Ext CA", key_size=2048)
 
 
 def test_crl_aki_from_public_key_without_ski() -> None:
     _, ca_key = _CA
-    key = load_rsa_private_key(ca_key)
+    key = load_private_key(ca_key)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "No SKI CA")])
     now = datetime.now(UTC)
     cert = (

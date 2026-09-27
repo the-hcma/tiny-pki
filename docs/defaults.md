@@ -9,15 +9,14 @@ from `tiny_pki` unless noted.
 
 | Setting | Default | Override | Rationale |
 | --- | --- | --- | --- |
+| Key type | RSA (`DEFAULT_KEY_TYPE`) | `key_type="ec-p256"` / `--key-type ec-p256` | RSA fails safe on devices with weak random number generators; an ECDSA signature made with a repeated or predictable nonce leaks the key. P-256 keys are smaller and much faster to generate; choose them when every client is modern (see [security.md](./security.md#key-types-sizes-and-validity)). |
 | CA key size | 4096-bit RSA (`DEFAULT_CA_KEY_SIZE`) | `key_size=` / `--key-size` | The CA outlives its leaves by years. NIST SP 800-57 accepts 2048-bit RSA only through 2030, so the long-lived key gets the most headroom. |
 | Leaf key size | 3072-bit RSA (`DEFAULT_LEAF_KEY_SIZE`) | `key_size=` / `--key-size` | About 128-bit security (NIST SP 800-57), acceptable past 2030, and still fast on phones. |
 | Allowed key sizes | 2048, 3072, 4096 (`ALLOWED_KEY_SIZES`) | none | Smaller keys are broken or deprecated; larger ones cost a lot and add little. 2048 remains for constrained or legacy clients. |
+| ECDSA curve | NIST P-256 only (`KEY_TYPES`) | none | About 128-bit security, supported by nginx, Mosquitto, Android and iOS. P-384 adds cost without a matching benefit here; Ed25519 has poor client-certificate support on phones. |
 | Public exponent | 65537 | none | The only value interoperable stacks expect (RFC 8017, NIST SP 800-56B). |
-| Signature hash | SHA-256 (certificates and CRLs) | none | CA/B Forum Baseline Requirements minimum; universally supported. |
+| Signature hash | SHA-256 (certificates and CRLs; RSA PKCS#1 v1.5 or ECDSA) | none | CA/B Forum Baseline Requirements minimum; universally supported. |
 | Serial numbers | 159 random bits (`x509.random_serial_number()`) | none | Baseline Requirements require at least 64 bits of CSPRNG output; unpredictable serials block chosen-prefix collision attacks. |
-
-ECDSA P-256 keys are tracked separately in
-[#33](https://github.com/the-hcma/tiny-pki/issues/33).
 
 ## Lifetimes
 

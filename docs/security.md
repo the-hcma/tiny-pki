@@ -79,10 +79,20 @@ link planted in the export directory cannot redirect the private key elsewhere.
 - Pass the complete revoked set to `generate_crl` each time; omitting a serial
   un-revokes it.
 
-## Key sizes and validity
+## Key types, sizes and validity
 
 The CA defaults to RSA 4096 and leaves to RSA 3072 (128-bit strength); 2048 is
-accepted but NIST only considers it acceptable through 2030. Leaves default to
+accepted but NIST only considers it acceptable through 2030.
+
+`key_type="ec-p256"` / `--key-type ec-p256` issues ECDSA P-256 keys instead. They are
+as strong as RSA 3072 in practice, much faster to generate, and make smaller
+certificates and handshakes. The trade-off is how each fails: every ECDSA signature
+needs a fresh secret nonce, and a device whose random number generator repeats or
+leaks it gives away its private key. OpenSSL derives the nonce from the key as well
+as randomness, so the CA host is safe; the risk is old or embedded clients, whose
+keys sign every TLS handshake. Keep those clients on RSA (key types can be mixed
+under one CA). Neither key type survives a large quantum computer; NIST's draft transition
+plan (IR 8547) disallows both after 2035. Leaves default to
 90 days (server) and 397 days (client), capped at 200 and 825 days unless you
 pass `allow_long_validity=True` / `--allow-long-validity`. Keep validity as short
 as your re-issue workflow tolerates — revocation relies on the CRL being deployed,

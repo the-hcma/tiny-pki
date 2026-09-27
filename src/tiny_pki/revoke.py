@@ -6,9 +6,9 @@ from datetime import UTC, datetime, timedelta
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 
-from tiny_pki._rsa import load_rsa_private_key
+from tiny_pki._keys import load_ca_private_key
 from tiny_pki.constants import CLOCK_SKEW_BACKDATE, DEFAULT_CRL_VALIDITY_DAYS, MAX_VALIDITY_DAYS
 from tiny_pki.errors import TinyPkiError
 
@@ -52,7 +52,7 @@ def generate_crl(
         raise TinyPkiError(f"Expected crl_number between 0 and 2**{_MAX_CRL_NUMBER_BITS} - 1, got {number}")
 
     ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
-    ca_key = load_rsa_private_key(ca_key_pem)
+    ca_key = load_ca_private_key(ca_cert, ca_key_pem)
 
     builder = (
         x509.CertificateRevocationListBuilder()
@@ -78,7 +78,7 @@ _MAX_CRL_NUMBER_BITS = 159
 
 
 def _authority_key_identifier(
-    ca_cert: x509.Certificate, ca_public_key: rsa.RSAPublicKey
+    ca_cert: x509.Certificate, ca_public_key: rsa.RSAPublicKey | ec.EllipticCurvePublicKey
 ) -> x509.AuthorityKeyIdentifier:
     """Match the CA's own SubjectKeyIdentifier when present, else derive from its key."""
     try:

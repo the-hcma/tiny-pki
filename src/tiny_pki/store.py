@@ -54,9 +54,10 @@ from tiny_pki.check import CertificateStatus, Status, check_certificate, check_c
 from tiny_pki.constants import (
     DEFAULT_CLIENT_VALIDITY_DAYS,
     DEFAULT_CRL_VALIDITY_DAYS,
-    DEFAULT_LEAF_KEY_SIZE,
+    DEFAULT_KEY_TYPE,
     DEFAULT_SERVER_VALIDITY_DAYS,
     MAX_STORE_CRL_VALIDITY_DAYS,
+    KeyType,
 )
 from tiny_pki.errors import TinyPkiError
 from tiny_pki.inspect import get_certificate_expiry, get_certificate_fingerprint, get_certificate_serial_number
@@ -517,7 +518,8 @@ class CertificateStore:
         *,
         organization_name: str | None = None,
         validity_days: int = DEFAULT_CLIENT_VALIDITY_DAYS,
-        key_size: int = DEFAULT_LEAF_KEY_SIZE,
+        key_size: int | None = None,
+        key_type: KeyType = DEFAULT_KEY_TYPE,
         allow_long_validity: bool = False,
         allow_dn_special_chars: bool = False,
         keep_previous: bool = False,
@@ -536,6 +538,7 @@ class CertificateStore:
             organization_name=organization_name,
             validity_days=validity_days,
             key_size=key_size,
+            key_type=key_type,
             allow_long_validity=allow_long_validity,
             allow_dn_special_chars=allow_dn_special_chars,
         )
@@ -548,7 +551,8 @@ class CertificateStore:
         *,
         organization_name: str | None = None,
         validity_days: int = DEFAULT_SERVER_VALIDITY_DAYS,
-        key_size: int = DEFAULT_LEAF_KEY_SIZE,
+        key_size: int | None = None,
+        key_type: KeyType = DEFAULT_KEY_TYPE,
         allow_long_validity: bool = False,
         include_common_name_in_sans: bool = True,
         allow_dn_special_chars: bool = False,
@@ -567,6 +571,7 @@ class CertificateStore:
             organization_name=organization_name,
             validity_days=validity_days,
             key_size=key_size,
+            key_type=key_type,
             allow_long_validity=allow_long_validity,
             include_common_name_in_sans=include_common_name_in_sans,
             allow_dn_special_chars=allow_dn_special_chars,

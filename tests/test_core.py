@@ -46,7 +46,7 @@ from tiny_pki import (
     get_certificate_subject,
     is_certificate_self_signed,
 )
-from tiny_pki._rsa import load_rsa_private_key
+from tiny_pki._keys import load_private_key
 
 # Split so secret scanners do not treat assertion fixtures as live PEM material.
 _PEM_CERT_PREFIX = "-----BEGIN " + "CERTIFICATE-----"
@@ -264,14 +264,14 @@ class TestInspectAndCrlAndPkcs12:
 
     def test_load_rsa_private_key_rejects_encrypted_pem(self) -> None:
         _, key_pem = generate_ca_certificate(key_size=2048)
-        key = load_rsa_private_key(key_pem)
+        key = load_private_key(key_pem)
         encrypted_pem = key.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.PKCS8,
             serialization.BestAvailableEncryption(b"pw"),
         )
         assert_that(
-            calling(load_rsa_private_key).with_args(encrypted_pem),
+            calling(load_private_key).with_args(encrypted_pem),
             raises(TinyPkiError, "encrypted"),
         )
 

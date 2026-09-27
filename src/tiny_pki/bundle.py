@@ -6,7 +6,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.serialization import pkcs12
 
-from tiny_pki._rsa import load_rsa_private_key
+from tiny_pki._keys import load_private_key
 from tiny_pki.constants import MIN_PKCS12_PASSWORD_LENGTH
 from tiny_pki.errors import TinyPkiError
 
@@ -37,7 +37,7 @@ def generate_pkcs12(
         raise TinyPkiError(f"Expected a password of at least {MIN_PKCS12_PASSWORD_LENGTH} bytes, got {len(password)}")
 
     cert = x509.load_pem_x509_certificate(cert_pem)
-    key = load_rsa_private_key(key_pem)
+    key = load_private_key(key_pem)
     ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
 
     encryption: serialization.KeySerializationEncryption

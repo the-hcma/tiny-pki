@@ -16,20 +16,21 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from tiny_pki._rsa import load_rsa_private_key
+from tiny_pki._keys import PrivateKey, generate_private_key, load_ca_private_key, require_key_params
 from tiny_pki.constants import (
-    ALLOWED_KEY_SIZES,
     APPLE_MAX_SERVER_VALIDITY_DAYS,
     CLOCK_SKEW_BACKDATE,
     DEFAULT_CA_KEY_SIZE,
     DEFAULT_CA_VALIDITY_DAYS,
     DEFAULT_CLIENT_VALIDITY_DAYS,
+    DEFAULT_KEY_TYPE,
     DEFAULT_LEAF_KEY_SIZE,
     DEFAULT_ORGANIZATION_NAME,
     DEFAULT_SERVER_VALIDITY_DAYS,
     MAX_CLIENT_VALIDITY_DAYS,
     MAX_SERVER_VALIDITY_DAYS,
     MAX_VALIDITY_DAYS,
+    KeyType,
 )
 from tiny_pki.errors import TinyPkiError, TinyPkiWarning
 from tiny_pki.names import (
@@ -47,7 +48,8 @@ def generate_ca_certificate(
     *,
     organization_name: str = DEFAULT_ORGANIZATION_NAME,
     validity_days: int = DEFAULT_CA_VALIDITY_DAYS,
-    key_size: int = DEFAULT_CA_KEY_SIZE,
+    key_size: int | None = None,
+    key_type: KeyType = DEFAULT_KEY_TYPE,
     permitted_subtrees: list[str] | None = None,
 ) -> tuple[bytes, bytes]:
     """Generate a self-signed CA certificate and private key.
@@ -63,11 +65,16 @@ def generate_ca_certificate(
     with slightly slow clocks accept the certificate immediately; the encoded
     period stays exactly ``validity_days``.
 
+    ``key_type`` is ``"rsa"`` (``key_size`` bits, default ``DEFAULT_CA_KEY_SIZE``)
+    or ``"ec-p256"`` (ECDSA P-256; ``key_size`` must be omitted). The CA and its
+    leaves may use different key types.
+
     Returns:
         Tuple of ``(certificate_pem, private_key_pem)``.
 
     Raises:
-        TinyPkiError: If ``key_size`` is not in ``ALLOWED_KEY_SIZES``, a name is
+        TinyPkiError: If ``key_type`` is unknown, ``key_size`` is not in
+            ``ALLOWED_KEY_SIZES`` (or is given for ``"ec-p256"``), a name is
             empty, too long, or contains control characters, or a permitted subtree
             is invalid.
     """
@@ -75,11 +82,11 @@ def generate_ca_certificate(
     organization_name = normalize_subject_attribute(
         organization_name, "organization_name", max_length=MAX_ORGANIZATION_NAME_LENGTH
     )
-    _require_key_size(key_size)
+    rsa_key_size = require_key_params(key_type, key_size, default_size=DEFAULT_CA_KEY_SIZE)
     _require_validity_days(validity_days)
     subtrees = [_permitted_subtree(entry) for entry in permitted_subtrees or []]
 
-    key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
+    key = generate_private_key(rsa_key_size)
     subject = issuer = x509.Name(
         [
             x509.NameAttribute(NameOID.COMMON_NAME, common_name),
@@ -127,7 +134,8 @@ def generate_client_certificate(
     *,
     organization_name: str | None = None,
     validity_days: int = DEFAULT_CLIENT_VALIDITY_DAYS,
-    key_size: int = DEFAULT_LEAF_KEY_SIZE,
+    key_size: int | None = None,
+    key_type: KeyType = DEFAULT_KEY_TYPE,
     allow_long_validity: bool = False,
     allow_dn_special_chars: bool = False,
 ) -> tuple[bytes, bytes]:
@@ -141,26 +149,30 @@ def generate_client_certificate(
     When ``organization_name`` is omitted, the CA certificate's O is reused, falling
     back to ``DEFAULT_ORGANIZATION_NAME`` if the CA has no O attribute.
 
+    ``key_type`` / ``key_size`` work as for :func:`generate_ca_certificate`, with
+    ``DEFAULT_LEAF_KEY_SIZE`` as the RSA default. ECDSA leaves omit
+    ``keyEncipherment`` from Key Usage (RFC 8813), RSA leaves keep it.
+
     Raises:
-        TinyPkiError: If a name is invalid, ``validity_days`` exceeds
+        TinyPkiError: If a name or key parameter is invalid, ``validity_days`` exceeds
             ``MAX_CLIENT_VALIDITY_DAYS`` without ``allow_long_validity=True``, or the
             certificate would outlive the CA.
     """
     common_name = normalize_subject_attribute(common_name, "common_name", max_length=MAX_COMMON_NAME_LENGTH)
     if not allow_dn_special_chars:
         _require_plain_common_name(common_name)
-    _require_key_size(key_size)
+    rsa_key_size = require_key_params(key_type, key_size, default_size=DEFAULT_LEAF_KEY_SIZE)
     _require_validity_days(validity_days)
 
     ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
-    ca_key = load_rsa_private_key(ca_key_pem)
+    ca_key = load_ca_private_key(ca_cert, ca_key_pem)
     org = _leaf_organization(ca_cert, organization_name)
     _enforce_name_constraints(ca_cert, common_name=common_name, sans=[])
     pending_warnings: list[str] = []
     not_before, not_after = _leaf_validity_window(
         ca_cert, validity_days, kind="client", allow_long_validity=allow_long_validity, warn=pending_warnings
     )
-    client_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
+    client_key = generate_private_key(rsa_key_size)
 
     subject = x509.Name(
         [
@@ -180,7 +192,7 @@ def generate_client_certificate(
         .add_extension(
             x509.KeyUsage(
                 digital_signature=True,
-                key_encipherment=True,
+                key_encipherment=isinstance(client_key, rsa.RSAPrivateKey),
                 content_commitment=False,
                 data_encipherment=False,
                 key_agreement=False,
@@ -214,7 +226,8 @@ def generate_server_certificate(
     *,
     organization_name: str | None = None,
     validity_days: int = DEFAULT_SERVER_VALIDITY_DAYS,
-    key_size: int = DEFAULT_LEAF_KEY_SIZE,
+    key_size: int | None = None,
+    key_type: KeyType = DEFAULT_KEY_TYPE,
     allow_long_validity: bool = False,
     include_common_name_in_sans: bool = True,
     allow_dn_special_chars: bool = False,
@@ -227,9 +240,10 @@ def generate_server_certificate(
     ``san_entries`` it is appended (with a ``TinyPkiWarning``) unless
     ``include_common_name_in_sans=False``. RFC 4514 special characters in the CN
     are refused unless ``allow_dn_special_chars=True``, as for client certificates.
+    ``key_type`` / ``key_size`` work as for :func:`generate_client_certificate`.
 
     Raises:
-        TinyPkiError: If a name or SAN entry is invalid, ``validity_days`` exceeds
+        TinyPkiError: If a name, SAN entry, or key parameter is invalid, ``validity_days`` exceeds
             ``MAX_SERVER_VALIDITY_DAYS`` without ``allow_long_validity=True``, or the
             certificate would outlive the CA.
 
@@ -241,7 +255,7 @@ def generate_server_certificate(
     common_name = normalize_subject_attribute(common_name, "common_name", max_length=MAX_COMMON_NAME_LENGTH)
     if not allow_dn_special_chars:
         _require_plain_common_name(common_name)
-    _require_key_size(key_size)
+    rsa_key_size = require_key_params(key_type, key_size, default_size=DEFAULT_LEAF_KEY_SIZE)
     _require_validity_days(validity_days)
     sans = normalize_san_entries(san_entries)
     pending_warnings: list[str] = []
@@ -258,13 +272,13 @@ def generate_server_certificate(
                 f"Added common_name {common_name!r} to the SANs as {cn_san!r} (TLS clients ignore the CN)"
             )
 
-    ca_key = load_rsa_private_key(ca_key_pem)
+    ca_key = load_ca_private_key(ca_cert, ca_key_pem)
     org = _leaf_organization(ca_cert, organization_name)
     _enforce_name_constraints(ca_cert, common_name=common_name, sans=sans)
     not_before, not_after = _leaf_validity_window(
         ca_cert, validity_days, kind="server", allow_long_validity=allow_long_validity, warn=pending_warnings
     )
-    server_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
+    server_key = generate_private_key(rsa_key_size)
 
     subject = x509.Name(
         [
@@ -291,7 +305,7 @@ def generate_server_certificate(
         .add_extension(
             x509.KeyUsage(
                 digital_signature=True,
-                key_encipherment=True,
+                key_encipherment=isinstance(server_key, rsa.RSAPrivateKey),
                 content_commitment=False,
                 data_encipherment=False,
                 key_agreement=False,
@@ -555,7 +569,7 @@ def _leaf_validity_window(
     return not_before, not_after
 
 
-def _pem_pair(cert: x509.Certificate, key: rsa.RSAPrivateKey) -> tuple[bytes, bytes]:
+def _pem_pair(cert: x509.Certificate, key: PrivateKey) -> tuple[bytes, bytes]:
     cert_pem = cert.public_bytes(serialization.Encoding.PEM)
     key_pem = key.private_bytes(
         serialization.Encoding.PEM,
@@ -586,11 +600,6 @@ def _permitted_subtree(entry: str) -> x509.GeneralName:
             "every name under it (and the name itself); subdomain-only constraints are not supported"
         )
     return x509.DNSName(normalize_dns_name(text))
-
-
-def _require_key_size(key_size: int) -> None:
-    if key_size not in ALLOWED_KEY_SIZES:
-        raise TinyPkiError(f"Expected key_size in {ALLOWED_KEY_SIZES}, got {key_size}")
 
 
 def _require_validity_days(validity_days: int) -> None:

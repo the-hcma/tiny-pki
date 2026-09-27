@@ -25,7 +25,7 @@ from tiny_pki import (
     generate_server_certificate,
     get_certificate_sans,
 )
-from tiny_pki._rsa import load_rsa_private_key
+from tiny_pki._keys import load_private_key
 from tiny_pki.cli.main import main
 from tiny_pki.store import CertificateStore
 
@@ -269,7 +269,7 @@ def _external_ca(
     permitted: list[x509.GeneralName] | None, excluded: list[x509.GeneralName] | None
 ) -> tuple[bytes, bytes]:
     _, key_pem = _CONSTRAINED
-    key = load_rsa_private_key(key_pem)
+    key = load_private_key(key_pem)
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "External CA")])
     now = datetime.now(UTC)
     cert = (

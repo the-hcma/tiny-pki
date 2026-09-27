@@ -10,7 +10,9 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
+import pytest
 import time_machine
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
@@ -36,6 +38,7 @@ from hamcrest import (
 from pytest import CaptureFixture
 
 from tiny_pki import (
+    KeyType,
     generate_ca_certificate,
     generate_client_certificate,
     generate_crl,
@@ -48,7 +51,7 @@ from tiny_pki import (
     get_certificate_subject,
     is_certificate_self_signed,
 )
-from tiny_pki._rsa import load_rsa_private_key
+from tiny_pki._keys import load_private_key
 from tiny_pki.cli.main import main
 from tiny_pki.store import CertificateStore
 
@@ -793,7 +796,7 @@ def test_name_constrained_ca_handshakes_and_rejects_rogue_leaf(tmp_path: Path) -
 
 def _sign_rogue_server_leaf(ca_cert_pem: bytes, ca_key_pem: bytes, dns_name: str) -> tuple[bytes, bytes]:
     ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
-    ca_key = load_rsa_private_key(ca_key_pem)
+    ca_key = load_private_key(ca_key_pem)
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     now = datetime.now(UTC)
     cert = (
@@ -810,3 +813,37 @@ def _sign_rogue_server_leaf(ca_cert_pem: bytes, ca_key_pem: bytes, dns_name: str
         .sign(ca_key, hashes.SHA256())
     )
     return cert.public_bytes(Encoding.PEM), _pem_from_private_key(key)
+
+
+@pytest.mark.parametrize(
+    ("ca_type", "leaf_type"),
+    [("ec-p256", "ec-p256"), ("rsa", "ec-p256"), ("ec-p256", "rsa")],
+)
+def test_ecdsa_and_mixed_chains_handshake_and_honour_the_crl(
+    tmp_path: Path, ca_type: KeyType, leaf_type: KeyType
+) -> None:
+    """ECDSA P-256 chains, and RSA/EC mixes either way, complete mTLS and reject a revoked client."""
+    leaf_kwargs: dict[str, Any] = {"key_type": "ec-p256"} if leaf_type == "ec-p256" else {"key_size": 2048}
+    ca_kwargs: dict[str, Any] = {"key_type": "ec-p256"} if ca_type == "ec-p256" else {"key_size": 2048}
+    ca_cert, ca_key = generate_ca_certificate("Mixed CA", **ca_kwargs)
+    server_pem, server_key_pem = generate_server_certificate(
+        ca_cert, ca_key, "localhost", ["localhost", "127.0.0.1"], **leaf_kwargs
+    )
+    client_pem, client_key_pem = generate_client_certificate(ca_cert, ca_key, "alice", **leaf_kwargs)
+    server_cert, server_key = _write_pair(tmp_path, "server", server_pem, server_key_pem)
+    client_cert, client_key = _write_pair(tmp_path, "client", client_pem, client_key_pem)
+
+    def attempt(trust: Path) -> tuple[bool, list[str]]:
+        return _handshake(
+            server_ctx=_server_context(server_cert=server_cert, server_key=server_key, trust=trust, check_crl=True),
+            client_ctx=_client_context(client_cert=client_cert, client_key=client_key, trust=trust, check_crl=True),
+        )
+
+    live = _trust_bundle(tmp_path, "live.pem", ca_cert, generate_crl(ca_cert, ca_key, []))
+    ok, errors = attempt(live)
+    assert_that(ok, is_(True), f"{ca_type} CA / {leaf_type} leaves handshake failed: {errors}")
+
+    revoked_crl = generate_crl(ca_cert, ca_key, [(get_certificate_serial_number(client_pem), datetime.now(UTC))])
+    ok_revoked, revoked_errors = attempt(_trust_bundle(tmp_path, "revoked.pem", ca_cert, revoked_crl))
+    assert_that(ok_revoked, is_(False))
+    assert_that("".join(revoked_errors).lower(), contains_string("revok"))
