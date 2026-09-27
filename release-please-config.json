@@ -1,12 +1,10 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
-  "bootstrap-sha": "08378f20758b263201002ed76b97a9e99c7dcc2d",
   "include-component-in-tag": false,
   "packages": {
     ".": {
       "release-type": "python",
       "package-name": "tiny-pki",
-      "release-as": "0.1.0",
       "changelog-path": "CHANGELOG.md",
       "extra-files": [
         {
