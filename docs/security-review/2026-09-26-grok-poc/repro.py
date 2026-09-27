@@ -266,9 +266,9 @@ def main_repro() -> None:
     # expired CRL treated as authoritative for "not revoked"
     section("expired CRL still proves non-revocation")
     ca_pem, ca_key_pem = rst.read_ca()
-    from tiny_pki._rsa import load_rsa_private_key
+    from tiny_pki._keys import load_private_key
 
-    key = load_rsa_private_key(ca_key_pem)
+    key = load_private_key(ca_key_pem)
     ca_parsed = x509.load_pem_x509_certificate(ca_pem)
     now = datetime.now(UTC)
     stale = (
@@ -457,7 +457,7 @@ def main_repro() -> None:
     # IPv4-mapped vs excluded IPv4
     section("ipv4-mapped vs excluded network")
     # build external CA: permitted 0.0.0.0/0 and ::/0, excluded 10.0.0.0/8
-    from tiny_pki._rsa import load_rsa_private_key as load_key
+    from tiny_pki._keys import load_private_key as load_key
 
     base_ca, base_key = generate_ca_certificate("B", key_size=2048)
     k = load_key(base_key)

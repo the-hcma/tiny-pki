@@ -46,7 +46,7 @@ from tiny_pki import (
     get_certificate_serial_number,
     worst_status,
 )
-from tiny_pki._rsa import load_rsa_private_key
+from tiny_pki._keys import load_private_key
 from tiny_pki.cli.main import main
 
 _CA = generate_ca_certificate("Check CA", key_size=2048)
@@ -136,7 +136,7 @@ def test_cli_inspect_shows_expiring_and_expired(tmp_path: Path, capsys: CaptureF
 
 
 def test_crl_without_next_update_or_crl_number(monkeypatch: pytest.MonkeyPatch) -> None:
-    key = load_rsa_private_key(_CA[1])
+    key = load_private_key(_CA[1])
     now = datetime.now(UTC)
     bare = (
         x509.CertificateRevocationListBuilder()
@@ -338,7 +338,7 @@ def _cli(store: Path, *words: str) -> None:
 
 
 def _custom_ca(not_before: datetime, not_after: datetime) -> tuple[bytes, bytes]:
-    key = load_rsa_private_key(_CA[1])
+    key = load_private_key(_CA[1])
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Short CA")])
     cert = (
         x509.CertificateBuilder()
@@ -367,7 +367,7 @@ def _leaf(
     common_name: str | None = "leaf.home",
 ) -> bytes:
     ca_cert = x509.load_pem_x509_certificate(ca[0])
-    ca_key = load_rsa_private_key(ca[1])
+    ca_key = load_private_key(ca[1])
     attributes = [x509.NameAttribute(NameOID.ORGANIZATION_NAME, "No CN")]
     if common_name is not None:
         attributes = [x509.NameAttribute(NameOID.COMMON_NAME, common_name)]

@@ -25,8 +25,9 @@ from tiny_pki.names import normalize_san_entries, normalize_subject_attribute
 from tiny_pki.secrets import encrypt_private_key
 
 _CA_CERT, _CA_KEY = generate_ca_certificate("Errors CA", key_size=2048)
+_OTHER_CA_KEY = generate_ca_certificate("Other Errors CA", key_type="ec-p256")[1]
 _CLIENT_CERT, _CLIENT_KEY = generate_client_certificate(_CA_CERT, _CA_KEY, "alice", key_size=2048)
-_EC_KEY = ec.generate_private_key(ec.SECP256R1()).private_bytes(
+_P384_KEY = ec.generate_private_key(ec.SECP384R1()).private_bytes(
     serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
 )
 
@@ -53,7 +54,8 @@ _EC_KEY = ec.generate_private_key(ec.SECP256R1()).private_bytes(
         pytest.param(lambda: normalize_subject_attribute("", "common_name", max_length=64), id="names-empty-cn"),
         pytest.param(lambda: encrypt_private_key(_CLIENT_KEY, "too-short"), id="secrets-weak-secret"),
         pytest.param(lambda: check_certificate(_CLIENT_CERT, now=datetime(2026, 1, 1)), id="check-naive-now"),
-        pytest.param(lambda: generate_crl(_CA_CERT, _EC_KEY, []), id="rsa-not-rsa"),
+        pytest.param(lambda: generate_crl(_CA_CERT, _P384_KEY, []), id="key-unsupported-curve"),
+        pytest.param(lambda: generate_crl(_CA_CERT, _OTHER_CA_KEY, []), id="key-not-the-cas"),
     ],
 )
 def test_rejections_raise_tiny_pki_error(call: Callable[[], object]) -> None:

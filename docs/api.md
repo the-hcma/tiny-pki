@@ -1,7 +1,7 @@
 # Library API
 
 Everything below is importable from `tiny_pki` unless noted. All certificates and
-keys are **PEM `bytes`**; private keys must be **unencrypted** RSA PEM (decrypt
+keys are **PEM `bytes`**; private keys must be **unencrypted** RSA or ECDSA P-256 PEM (decrypt
 before calling — see [`security.md`](security.md)). Invalid input raises
 `TinyPkiError` (a `ValueError`) with the expected and actual values in the message;
 see [Errors and warnings](#errors-and-warnings).
@@ -12,13 +12,25 @@ The library needs only `cryptography` (`pip install tiny-pki`); none of the modu
 
 | Function | Returns |
 | --- | --- |
-| `generate_ca_certificate(common_name="Private CA", *, organization_name="tiny-pki", validity_days=3650, key_size=4096, permitted_subtrees=None)` | `(ca_cert_pem, ca_key_pem)` — self-signed, `BasicConstraints(ca=True, path_length=0)` (signs leaves only), `keyCertSign` + `cRLSign`; optional critical Name Constraints |
-| `generate_client_certificate(ca_cert_pem, ca_key_pem, common_name, *, organization_name=None, validity_days=397, key_size=3072, allow_long_validity=False, allow_dn_special_chars=False)` | `(cert_pem, key_pem)` — `CLIENT_AUTH` EKU; CN is the identity |
-| `generate_server_certificate(ca_cert_pem, ca_key_pem, common_name, san_entries, *, organization_name=None, validity_days=90, key_size=3072, allow_long_validity=False, include_common_name_in_sans=True, allow_dn_special_chars=False)` | `(cert_pem, key_pem)` — `SERVER_AUTH` EKU; `san_entries` are DNS names or IP literals (at least one) |
+| `generate_ca_certificate(common_name="Private CA", *, organization_name="tiny-pki", validity_days=3650, key_size=None, key_type="rsa", permitted_subtrees=None)` | `(ca_cert_pem, ca_key_pem)` — self-signed, `BasicConstraints(ca=True, path_length=0)` (signs leaves only), `keyCertSign` + `cRLSign`; optional critical Name Constraints |
+| `generate_client_certificate(ca_cert_pem, ca_key_pem, common_name, *, organization_name=None, validity_days=397, key_size=None, key_type="rsa", allow_long_validity=False, allow_dn_special_chars=False)` | `(cert_pem, key_pem)` — `CLIENT_AUTH` EKU; CN is the identity |
+| `generate_server_certificate(ca_cert_pem, ca_key_pem, common_name, san_entries, *, organization_name=None, validity_days=90, key_size=None, key_type="rsa", allow_long_validity=False, include_common_name_in_sans=True, allow_dn_special_chars=False)` | `(cert_pem, key_pem)` — `SERVER_AUTH` EKU; `san_entries` are DNS names or IP literals (at least one) |
 | `max_leaf_validity_days(ca_cert_pem, *, kind="server", allow_long_validity=False)` | `int` — the largest `validity_days` issuing a `kind` leaf under this CA accepts right now (CA `notAfter` with the `CLOCK_SKEW_BACKDATE` backdate, and the per-kind cap unless `allow_long_validity`); `0` once the CA cannot sign any leaf. Use it to clamp or grey out `VALIDITY_PRESETS` in UIs |
 
-`organization_name=None` on leaves inherits the CA's `O`. `key_size` must be one of
-`ALLOWED_KEY_SIZES` (`2048`, `3072`, `4096`); `validity_days` must be between 1 and `MAX_VALIDITY_DAYS` (36500).
+`organization_name=None` on leaves inherits the CA's `O`. `validity_days` must be between 1 and `MAX_VALIDITY_DAYS` (36500).
+
+Key types (`KEY_TYPES`):
+
+- `key_type="rsa"` (the default, `DEFAULT_KEY_TYPE`): `key_size` is one of
+  `ALLOWED_KEY_SIZES` (`2048`, `3072`, `4096`); omitted, it is
+  `DEFAULT_CA_KEY_SIZE` (4096) for the CA and `DEFAULT_LEAF_KEY_SIZE` (3072) for leaves.
+- `key_type="ec-p256"`: ECDSA on NIST P-256. Leave `key_size` out; passing one raises
+  `TinyPkiError`. ECDSA leaves carry `digitalSignature` without `keyEncipherment` in Key
+  Usage (RFC 8813); RSA leaves keep both.
+- The CA and its leaves may use different key types (an RSA CA can sign EC leaves and
+  the other way round). Certificates and CRLs are signed with SHA-256 either way.
+- Every function that takes `ca_key_pem` refuses a key that does not match `ca_cert_pem`.
+  See [security.md](security.md#key-types-sizes-and-validity) for choosing between them.
 
 Every default and its rationale is listed in [`defaults.md`](defaults.md).
 
@@ -180,9 +192,11 @@ Expiry and validity checks for alerting (`tiny_pki.check`, re-exported from `tin
 | `DEFAULT_CA_VALIDITY_DAYS` | `3650` |
 | `DEFAULT_CLIENT_VALIDITY_DAYS` | `397` |
 | `DEFAULT_CRL_VALIDITY_DAYS` | `30`: `generate_crl` default and a store's CRL lifetime until set |
+| `DEFAULT_KEY_TYPE` | `"rsa"` |
 | `DEFAULT_LEAF_KEY_SIZE` | `3072` |
 | `DEFAULT_ORGANIZATION_NAME` | `"tiny-pki"` |
 | `DEFAULT_SERVER_VALIDITY_DAYS` | `90` |
+| `KEY_TYPES` | `("rsa", "ec-p256")`; the `KeyType` literal type names the same values |
 | `MAX_CA_WARNING_DAYS` | `180` |
 | `MAX_CLIENT_VALIDITY_DAYS` | `825` |
 | `MAX_LEAF_WARNING_DAYS` | `30` |
@@ -194,7 +208,7 @@ Expiry and validity checks for alerting (`tiny_pki.check`, re-exported from `tin
 
 ## Errors and warnings
 
-`TinyPkiError` (a subclass of `ValueError`, so `except ValueError` keeps working) is raised for every input or policy rejection in `issue`, `revoke`, `bundle`, `names`, `check`, and `secrets`: a bad key size, name, or SAN, a leaf that would outlive its CA, a name-constraint violation, a short PKCS#12 password or Fernet secret, a key that is not an unencrypted RSA key, a naive datetime, and so on. Its message says what was expected and what was received and never contains key material, so it is safe to show to end users.
+`TinyPkiError` (a subclass of `ValueError`, so `except ValueError` keeps working) is raised for every input or policy rejection in `issue`, `revoke`, `bundle`, `names`, `check`, and `secrets`: a bad key size, name, or SAN, a leaf that would outlive its CA, a name-constraint violation, a short PKCS#12 password or Fernet secret, a key that is not an unencrypted RSA or P-256 key or does not match the CA certificate, a naive datetime, and so on. Its message says what was expected and what was received and never contains key material, so it is safe to show to end users.
 
 Other `ValueError`s still come from `cryptography` itself, for example PEM or DER input that cannot be parsed at all or a wrong password when loading a PKCS#12 bundle; `tiny_pki.store` also raises plain `ValueError`, `KeyError`, and `FileNotFoundError` for store operations.
 

@@ -9,6 +9,9 @@ TLS server certificates valid for more than 825 days even from private CAs.
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Literal
+
+KeyType = Literal["rsa", "ec-p256"]
 
 ALLOWED_KEY_SIZES = (2048, 3072, 4096)
 
@@ -20,9 +23,12 @@ DEFAULT_CA_KEY_SIZE = 4096
 DEFAULT_CA_VALIDITY_DAYS = 3650
 DEFAULT_CLIENT_VALIDITY_DAYS = 397
 DEFAULT_CRL_VALIDITY_DAYS = 30
+DEFAULT_KEY_TYPE: KeyType = "rsa"
 DEFAULT_LEAF_KEY_SIZE = 3072
 DEFAULT_ORGANIZATION_NAME = "tiny-pki"
 DEFAULT_SERVER_VALIDITY_DAYS = 90
+
+KEY_TYPES: tuple[KeyType, ...] = ("rsa", "ec-p256")
 
 MAX_CA_WARNING_DAYS = 180
 MAX_CLIENT_VALIDITY_DAYS = 825

@@ -21,14 +21,15 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.serialization import pkcs12
 
 from tiny_pki import (
-    DEFAULT_CA_KEY_SIZE,
     DEFAULT_CA_VALIDITY_DAYS,
     DEFAULT_CLIENT_VALIDITY_DAYS,
-    DEFAULT_LEAF_KEY_SIZE,
+    DEFAULT_KEY_TYPE,
     DEFAULT_ORGANIZATION_NAME,
     DEFAULT_SERVER_VALIDITY_DAYS,
+    KEY_TYPES,
     MAX_STORE_CRL_VALIDITY_DAYS,
     MAX_VALIDITY_DAYS,
+    KeyType,
     TinyPkiWarning,
     generate_ca_certificate,
     generate_pkcs12,
@@ -122,7 +123,7 @@ def _require_store(store: CertificateStore | None) -> CertificateStore:
 
 def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     store = _require_store(store)
-    opts = _parse_flags(args, allowed={"cn", "crl-days", "days", "key-size", "org", "permit"})
+    opts = _parse_flags(args, allowed={"cn", "crl-days", "days", "key-size", "key-type", "org", "permit"})
     if opts["positional"]:
         raise ValueError("init takes no positional arguments; use --cn / --org")
     if store.has_ca():
@@ -131,12 +132,13 @@ def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) 
     cn = opts["flags"].get("cn", "Private CA")
     org = opts["flags"].get("org", DEFAULT_ORGANIZATION_NAME)
     days = _parse_days(opts["flags"].get("days", str(DEFAULT_CA_VALIDITY_DAYS)), default=DEFAULT_CA_VALIDITY_DAYS)
-    key_size = int(opts["flags"].get("key-size", str(DEFAULT_CA_KEY_SIZE)))
+    key_type, key_size = _parse_key_options(opts["flags"])
     cert_pem, key_pem = generate_ca_certificate(
         cn,
         organization_name=org,
         validity_days=days,
         key_size=key_size,
+        key_type=key_type,
         permitted_subtrees=opts["multi"].get("permit"),
     )
     store.write_ca(cert_pem, key_pem)
@@ -218,6 +220,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
             "days",
             "keep-previous",
             "key-size",
+            "key-type",
             "no-cn-san",
             "org",
             "san",
@@ -241,7 +244,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
     store.read_ca()
     default_days = DEFAULT_CLIENT_VALIDITY_DAYS if kind == "client" else DEFAULT_SERVER_VALIDITY_DAYS
     days = _parse_days(opts["flags"].get("days", str(default_days)), default=default_days)
-    key_size = int(opts["flags"].get("key-size", str(DEFAULT_LEAF_KEY_SIZE)))
+    key_type, key_size = _parse_key_options(opts["flags"])
     org = opts["flags"].get("org")
     allow_long_validity = "allow-long-validity" in opts["flags"]
     allow_dn_special_chars = "allow-dn-special-chars" in opts["flags"]
@@ -254,6 +257,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
                 organization_name=org,
                 validity_days=days,
                 key_size=key_size,
+                key_type=key_type,
                 allow_long_validity=allow_long_validity,
                 allow_dn_special_chars=allow_dn_special_chars,
                 keep_previous="keep-previous" in opts["flags"],
@@ -266,6 +270,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
                 organization_name=org,
                 validity_days=days,
                 key_size=key_size,
+                key_type=key_type,
                 allow_long_validity=allow_long_validity,
                 include_common_name_in_sans=_confirm_cn_in_sans(name, sans, opts["flags"]),
                 allow_dn_special_chars=allow_dn_special_chars,
@@ -896,6 +901,21 @@ def _parse_crl_days(raw: str, flag: str) -> int:
     if not 1 <= days <= MAX_STORE_CRL_VALIDITY_DAYS:
         raise ValueError(f"Expected {flag} between 1 and {MAX_STORE_CRL_VALIDITY_DAYS}, got {days}")
     return days
+
+
+def _parse_key_options(flags: dict[str, str]) -> tuple[KeyType, int | None]:
+    """Parse ``--key-type`` / ``--key-size``; an omitted size means the library default."""
+    raw_type = flags.get("key-type", DEFAULT_KEY_TYPE).strip().lower()
+    if raw_type not in KEY_TYPES:
+        raise ValueError(f"Expected --key-type in {', '.join(KEY_TYPES)}, got {flags['key-type']!r}")
+    if "key-size" not in flags:
+        return raw_type, None
+    if raw_type == "ec-p256":
+        raise ValueError("Expected no --key-size with --key-type ec-p256 (P-256 has a fixed size)")
+    try:
+        return raw_type, int(flags["key-size"].strip())
+    except ValueError as exc:
+        raise ValueError(f"Expected a whole number for --key-size, got {flags['key-size']!r}") from exc
 
 
 def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
