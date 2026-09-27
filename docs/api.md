@@ -1,10 +1,6 @@
 # Library API
 
-Everything below is importable from `tiny_pki` unless noted. All certificates and
-keys are **PEM `bytes`**; private keys must be **unencrypted** RSA or ECDSA P-256 PEM (decrypt
-before calling — see [`security.md`](security.md)). Invalid input raises
-`TinyPkiError` (a `ValueError`) with the expected and actual values in the message;
-see [Errors and warnings](#errors-and-warnings).
+Everything below is importable from `tiny_pki` unless noted. All certificates and keys are **PEM `bytes`**; private keys must be **unencrypted** RSA or ECDSA P-256 PEM (decrypt before calling — see [`security.md`](security.md)). Invalid input raises `TinyPkiError` (a `ValueError`) with the expected and actual values in the message; see [Errors and warnings](#errors-and-warnings).
 
 The library needs only `cryptography` (`pip install tiny-pki`); none of the modules below import the CLI's `prompt-toolkit`, which is installed only with the `tiny-pki[cli]` extra. The command-line tool is documented in [cli.md](cli.md).
 
@@ -21,80 +17,34 @@ The library needs only `cryptography` (`pip install tiny-pki`); none of the modu
 
 Key types (`KEY_TYPES`):
 
-- `key_type="rsa"` (the default, `DEFAULT_KEY_TYPE`): `key_size` is one of
-  `ALLOWED_KEY_SIZES` (`2048`, `3072`, `4096`); omitted, it is
-  `DEFAULT_CA_KEY_SIZE` (4096) for the CA and `DEFAULT_LEAF_KEY_SIZE` (3072) for leaves.
-- `key_type="ec-p256"`: ECDSA on NIST P-256. Leave `key_size` out; passing one raises
-  `TinyPkiError`. ECDSA leaves carry `digitalSignature` without `keyEncipherment` in Key
-  Usage (RFC 8813); RSA leaves keep both.
-- The CA and its leaves may use different key types (an RSA CA can sign EC leaves and
-  the other way round). Certificates and CRLs are signed with SHA-256 either way.
-- Every function that takes `ca_key_pem` refuses a key that does not match `ca_cert_pem`.
-  See [security.md](security.md#key-types-sizes-and-validity) for choosing between them.
+- `key_type="rsa"` (the default, `DEFAULT_KEY_TYPE`): `key_size` is one of `ALLOWED_KEY_SIZES` (`2048`, `3072`, `4096`); omitted, it is `DEFAULT_CA_KEY_SIZE` (4096) for the CA and `DEFAULT_LEAF_KEY_SIZE` (3072) for leaves.
+- `key_type="ec-p256"`: ECDSA on NIST P-256. Leave `key_size` out; passing one raises `TinyPkiError`. ECDSA leaves carry `digitalSignature` without `keyEncipherment` in Key Usage (RFC 8813); RSA leaves keep both.
+- The CA and its leaves may use different key types (an RSA CA can sign EC leaves and the other way round). Certificates and CRLs are signed with SHA-256 either way.
+- Every function that takes `ca_key_pem` refuses a key that does not match `ca_cert_pem`. See [security.md](security.md#key-types-sizes-and-validity) for choosing between them.
 
 Every default and its rationale is listed in [`defaults.md`](defaults.md).
 
 Lifetime policy:
 
-- Leaves are capped at `MAX_SERVER_VALIDITY_DAYS` (200) / `MAX_CLIENT_VALIDITY_DAYS`
-  (825). Pass `allow_long_validity=True` to exceed the cap; a server certificate
-  over `APPLE_MAX_SERVER_VALIDITY_DAYS` (825) also emits a `TinyPkiWarning`
-  because Apple platforms reject it.
-- A leaf may not outlive its CA: issuance raises `TinyPkiError` naming the maximum
-  `validity_days` still possible.
-- The validity window (and a CRL's `lastUpdate`) is backdated by
-  `CLOCK_SKEW_BACKDATE` (5 minutes) so devices with slightly slow clocks accept
-  fresh certificates. The encoded period (`notAfter - notBefore`) is exactly
-  `validity_days`, so the caps and Apple's limit apply to what is actually issued.
+- Leaves are capped at `MAX_SERVER_VALIDITY_DAYS` (200) / `MAX_CLIENT_VALIDITY_DAYS` (825). Pass `allow_long_validity=True` to exceed the cap; a server certificate over `APPLE_MAX_SERVER_VALIDITY_DAYS` (825) also emits a `TinyPkiWarning` because Apple platforms reject it.
+- A leaf may not outlive its CA: issuance raises `TinyPkiError` naming the maximum `validity_days` still possible.
+- The validity window (and a CRL's `lastUpdate`) is backdated by `CLOCK_SKEW_BACKDATE` (5 minutes) so devices with slightly slow clocks accept fresh certificates. The encoded period (`notAfter - notBefore`) is exactly `validity_days`, so the caps and Apple's limit apply to what is actually issued.
 
 Name Constraints (`permitted_subtrees`, CLI `init --permit`):
 
-- Entries are DNS suffixes (`"home"` permits `home` and every name under it) or
-  IP networks (`"192.168.0.0/16"`; a bare IP is a single host). Wildcards, URLs,
-  networks with host bits set, and a leading dot (OpenSSL's "subdomains only"
-  syntax, which tiny-pki does not support) are rejected.
-- An excluded IPv4 network also excludes the IPv4-mapped IPv6 form
-  (`::ffff:10.1.2.3`). A permitted IPv4 network does not admit the mapped form,
-  since relying parties compare within one address family.
-- Leaf issuance refuses SANs outside the constraints, so you get an error at
-  issue time rather than a failed handshake later. When the leaf has no DNS SAN,
-  a dotted CN made of letters, digits, `-`, `_` and `.` (IP literals included) is
-  checked against the DNS constraints too, as OpenSSL does.
-- RFC 5280 only constrains the name types you list: to a relying party, a
-  DNS-only constraint leaves IP SANs unrestricted and an IP-only constraint
-  leaves DNS names unrestricted. tiny-pki is stricter at issue time: once a CA
-  has permitted subtrees, it refuses a DNS SAN (or a dotted, non-IP CN with no
-  DNS SAN) unless a DNS subtree is permitted, and an IP SAN unless an IP subtree is
-  permitted. A server CN of an unlisted type is not auto-added to the SANs
-  (a `TinyPkiWarning` says so). List every name type your devices use.
+- Entries are DNS suffixes (`"home"` permits `home` and every name under it) or IP networks (`"192.168.0.0/16"`; a bare IP is a single host). Wildcards, URLs, networks with host bits set, and a leading dot (OpenSSL's "subdomains only" syntax, which tiny-pki does not support) are rejected.
+- An excluded IPv4 network also excludes the IPv4-mapped IPv6 form (`::ffff:10.1.2.3`). A permitted IPv4 network does not admit the mapped form, since relying parties compare within one address family.
+- Leaf issuance refuses SANs outside the constraints, so you get an error at issue time rather than a failed handshake later. When the leaf has no DNS SAN, a dotted CN made of letters, digits, `-`, `_` and `.` (IP literals included) is checked against the DNS constraints too, as OpenSSL does.
+- RFC 5280 only constrains the name types you list: to a relying party, a DNS-only constraint leaves IP SANs unrestricted and an IP-only constraint leaves DNS names unrestricted. tiny-pki is stricter at issue time: once a CA has permitted subtrees, it refuses a DNS SAN (or a dotted, non-IP CN with no DNS SAN) unless a DNS subtree is permitted, and an IP SAN unless an IP subtree is permitted. A server CN of an unlisted type is not auto-added to the SANs (a `TinyPkiWarning` says so). List every name type your devices use.
 
 Name rules (`tiny_pki.names`):
 
-- CN and O are stripped; empty values, more than 64 characters (the X.509
-  upper bound), and control / format characters (including zero-width) are
-  rejected. Other Unicode is allowed.
-- SAN entries are normalized to what TLS clients compare: lower-case DNS names
-  without a trailing dot, IDNs as punycode A-labels, canonical IP literals, and
-  duplicates dropped. URLs, `host:port`, CIDR ranges, IPv6 zone IDs, underscores,
-  empty or over-long labels, and numeric last labels (malformed IPs) raise
-  `TinyPkiError`, as do IDN labels that IDNA2003 would silently remap (`faß` →
-  `fass`); pass their `xn--` form instead. Wildcards must be the whole leftmost label followed by at least
-  two labels (`*.lan.example`); OpenSSL won't match shorter patterns.
-- TLS clients ignore the CN, so a server CN that is itself a valid host/IP and
-  missing from `san_entries` is appended with a `TinyPkiWarning`. Pass
-  `include_common_name_in_sans=False` to opt out. The CLI asks first on a TTY;
-  `--yes` accepts and `--no-cn-san` declines; both apply to servers only, and
-  `--no-cn-san` needs `--san` (otherwise the CN is the only SAN).
-- The store matches identities case-insensitively, but certificates keep the CN
-  exactly as given (after stripping).
-- Client certificates carry no SAN: nginx (`$ssl_client_s_dn`) and Mosquitto
-  (`use_identity_as_username`) identify clients by CN.
-- Client and server CNs may not contain the RFC 4514 special characters `,` `+`
-  `=` `"` `<` `>` `;` or start with `#`. In an escaped DN string such as
-  nginx's `$ssl_client_s_dn`, the CN `bob,CN=alice` appears as
-  `O=tiny-pki,CN=bob\,CN=alice`, which ends in `,CN=alice`. Pass
-  `allow_dn_special_chars=True` (CLI: `--allow-dn-special-chars`) if a
-  deployment really needs them.
+- CN and O are stripped; empty values, more than 64 characters (the X.509 upper bound), and control / format characters (including zero-width) are rejected. Other Unicode is allowed.
+- SAN entries are normalized to what TLS clients compare: lower-case DNS names without a trailing dot, IDNs as punycode A-labels, canonical IP literals, and duplicates dropped. URLs, `host:port`, CIDR ranges, IPv6 zone IDs, underscores, empty or over-long labels, and numeric last labels (malformed IPs) raise `TinyPkiError`, as do IDN labels that IDNA2003 would silently remap (`faß` → `fass`); pass their `xn--` form instead. Wildcards must be the whole leftmost label followed by at least two labels (`*.lan.example`); OpenSSL won't match shorter patterns.
+- TLS clients ignore the CN, so a server CN that is itself a valid host/IP and missing from `san_entries` is appended with a `TinyPkiWarning`. Pass `include_common_name_in_sans=False` to opt out. The CLI asks first on a TTY; `--yes` accepts and `--no-cn-san` declines; both apply to servers only, and `--no-cn-san` needs `--san` (otherwise the CN is the only SAN).
+- The store matches identities case-insensitively, but certificates keep the CN exactly as given (after stripping).
+- Client certificates carry no SAN: nginx (`$ssl_client_s_dn`) and Mosquitto (`use_identity_as_username`) identify clients by CN.
+- Client and server CNs may not contain the RFC 4514 special characters `,` `+` `=` `"` `<` `>` `;` or start with `#`. In an escaped DN string such as nginx's `$ssl_client_s_dn`, the CN `bob,CN=alice` appears as `O=tiny-pki,CN=bob\,CN=alice`, which ends in `,CN=alice`. Pass `allow_dn_special_chars=True` (CLI: `--allow-dn-special-chars`) if a deployment really needs them.
 - Match an nginx CN allowlist against the whole DN string, not a suffix:
 
   ```nginx
@@ -105,8 +55,7 @@ Name rules (`tiny_pki.names`):
   }
   ```
 
-  A regex such as `~,CN=alice$` also matches `CN=bob\,CN=alice` if a CA ever
-  issued one with the opt-out.
+  A regex such as `~,CN=alice$` also matches `CN=bob\,CN=alice` if a CA ever issued one with the opt-out.
 
 | Function (`tiny_pki.names`) | Returns |
 | --- | --- |
@@ -121,14 +70,9 @@ Name rules (`tiny_pki.names`):
 | --- | --- |
 | `generate_crl(ca_cert_pem, ca_key_pem, revoked_entries, *, validity_days=30, crl_number=None)` | CRL PEM signed by the CA, with `CRLNumber` and `AuthorityKeyIdentifier` (RFC 5280) |
 
-`crl_number` defaults to microseconds since the epoch, which only increases if
-the signing host's clock never goes backwards. Pass a persisted counter if you
-can't guarantee that.
+`crl_number` defaults to microseconds since the epoch, which only increases if the signing host's clock never goes backwards. Pass a persisted counter if you can't guarantee that.
 
-`revoked_entries` is a `list[tuple[int, datetime]]` of `(serial_number,
-revoked_at)`. The CRL's `nextUpdate` is `validity_days` from now — relying parties
-(nginx, OpenSSL) reject an expired CRL, so regenerate on a schedule shorter than
-that window. Pass the **full** revoked set every time; the CRL is not incremental.
+`revoked_entries` is a `list[tuple[int, datetime]]` of `(serial_number, revoked_at)`. The CRL's `nextUpdate` is `validity_days` from now — relying parties (nginx, OpenSSL) reject an expired CRL, so regenerate on a schedule shorter than that window. Pass the **full** revoked set every time; the CRL is not incremental.
 
 ## Bundle
 
@@ -137,16 +81,9 @@ that window. Pass the **full** revoked set every time; the CRL is not incrementa
 | `generate_pkcs12(cert_pem, key_pem, ca_cert_pem, friendly_name, password, *, legacy=False)` | PKCS#12 `bytes` (cert + key + CA chain) |
 
 - `password` is `bytes` of at least `MIN_PKCS12_PASSWORD_LENGTH` (16).
-- By default the bundle uses AES-256-CBC with PBKDF2-HMAC-SHA256 and an
-  HMAC-SHA256 MAC (`cryptography`'s best available encryption).
-- `legacy=True` (CLI `export p12 --legacy`) switches to 3DES with a SHA-1 MAC,
-  for older Android or Apple keychains that can't import the modern format. Use
-  it only when a device needs it.
-- The CLI never takes the password as an argument, because arguments end up in
-  shell/REPL history and process listings. It prompts twice (the entries must match)
-  or reads the first line of `--password-file PATH`. After exporting from a file, it
-  warns that the file holds the password in plaintext and, on a terminal, offers to
-  delete it. Otherwise it leaves the file in place and says so.
+- By default the bundle uses AES-256-CBC with PBKDF2-HMAC-SHA256 and an HMAC-SHA256 MAC (`cryptography`'s best available encryption).
+- `legacy=True` (CLI `export p12 --legacy`) switches to 3DES with a SHA-1 MAC, for older Android or Apple keychains that can't import the modern format. Use it only when a device needs it.
+- The CLI never takes the password as an argument, because arguments end up in shell/REPL history and process listings. It prompts twice (the entries must match) or reads the first line of `--password-file PATH`. After exporting from a file, it warns that the file holds the password in plaintext and, on a terminal, offers to delete it. Otherwise it leaves the file in place and says so.
 
 ## Inspect
 
@@ -229,33 +166,12 @@ from tiny_pki.secrets import decrypt_private_key, encrypt_private_key, reencrypt
 | `reencrypt_private_key(encrypted_data, old_secret, new_secret, *, old_info=DEFAULT_INFO, new_info=DEFAULT_INFO)` | new token — use when rotating the secret or migrating off the legacy derivation |
 | `derive_fernet_key(secret, *, info=DEFAULT_INFO)` | the Fernet key (`urlsafe_b64(HKDF-SHA256(secret, salt=None, info=info))`) |
 
-The Fernet key is derived with HKDF-SHA256 (RFC 5869) using the fixed label
-`DEFAULT_INFO` (`b"tiny-pki:fernet-key:v1"`). The label gives domain
-separation: the derived key is independent of anything else your app derives
-from the same secret, so passing an app-wide secret such as Django's
-`SECRET_KEY` does not reuse a key another component also computes. Pass a
-different non-empty `info` to derive further independent keys from one secret.
-It does **not** protect against the secret itself leaking — the label is
-public, so anyone holding the secret can derive the key.
+The Fernet key is derived with HKDF-SHA256 (RFC 5869) using the fixed label `DEFAULT_INFO` (`b"tiny-pki:fernet-key:v1"`). The label gives domain separation: the derived key is independent of anything else your app derives from the same secret, so passing an app-wide secret such as Django's `SECRET_KEY` does not reuse a key another component also computes. Pass a different non-empty `info` to derive further independent keys from one secret. It does **not** protect against the secret itself leaking — the label is public, so anyone holding the secret can derive the key.
 
-`info=None` selects the legacy derivation used before HKDF
-(`urlsafe_b64(sha256(secret))`). Use it only to read old tokens, typically via
-`reencrypt_private_key(token, secret, secret, old_info=None)`; an empty `info`
-raises `TinyPkiError`.
+`info=None` selects the legacy derivation used before HKDF (`urlsafe_b64(sha256(secret))`). Use it only to read old tokens, typically via `reencrypt_private_key(token, secret, secret, old_info=None)`; an empty `info` raises `TinyPkiError`.
 
-HKDF does no stretching, so the secret must already be high-entropy — e.g.
-Django's `SECRET_KEY`, not a human password.
-`encrypt_private_key` and `derive_fernet_key` raise `TinyPkiError` for secrets
-shorter than `MIN_SECRET_LENGTH` (32 characters). The length check is a floor,
-not a strength test: 32 random characters are fine, 32 repeated letters are not.
-`decrypt_private_key` accepts any non-empty secret, so
-`reencrypt_private_key(token, old_weak, new_strong)` can move keys stored under
-an older, shorter secret.
+HKDF does no stretching, so the secret must already be high-entropy — e.g. Django's `SECRET_KEY`, not a human password. `encrypt_private_key` and `derive_fernet_key` raise `TinyPkiError` for secrets shorter than `MIN_SECRET_LENGTH` (32 characters). The length check is a floor, not a strength test: 32 random characters are fine, 32 repeated letters are not. `decrypt_private_key` accepts any non-empty secret, so `reencrypt_private_key(token, old_weak, new_strong)` can move keys stored under an older, shorter secret.
 
 ## Optional: `tiny_pki.store`
 
-`CertificateStore(root)` is the filesystem store the CLI uses. Its
-`issue_client` / `issue_server` / `revoke` / `delete` / `publish_crl` methods and
-`check_store(store, ...)` do what the matching CLI verbs do and keep `crl.pem`
-in step with `index.json`. Library callers that keep certificates in their own
-database don't need it; it is documented in [`store.md`](store.md#using-the-store-from-python).
+`CertificateStore(root)` is the filesystem store the CLI uses. Its `issue_client` / `issue_server` / `revoke` / `delete` / `publish_crl` methods and `check_store(store, ...)` do what the matching CLI verbs do and keep `crl.pem` in step with `index.json`. Library callers that keep certificates in their own database don't need it; it is documented in [`store.md`](store.md#using-the-store-from-python).

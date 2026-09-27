@@ -1,32 +1,20 @@
 # Security policy
 
-tiny-pki mints private CA, server, and client certificates and CRLs used for
-mTLS. A CA minted by this library gets installed device-wide on relying
-parties (phones, browsers, TLS servers); a bug here is a trust-anchor
-compromise for every consumer, not just this repo. Before 0.1.0 was published,
-two independent reviews covered the whole repository
-([#34](https://github.com/the-hcma/tiny-pki/issues/34)); their reports and the
-triage are in [`docs/security-review/`](docs/security-review/).
+tiny-pki mints private CA, server, and client certificates and CRLs used for mTLS. A CA minted by this library gets installed device-wide on relying parties (phones, browsers, TLS servers); a bug here is a trust-anchor compromise for every consumer, not just this repo. Before 0.1.0 was published, two independent reviews covered the whole repository ([#34](https://github.com/the-hcma/tiny-pki/issues/34)); their reports and the triage are in [`docs/security-review/`](docs/security-review/).
 
 ## Reporting a vulnerability
 
 Report privately, not in a public issue or PR:
 
-- **GitHub private vulnerability reporting** — <https://github.com/the-hcma/tiny-pki/security/advisories/new>
-  (Security tab → Report a vulnerability). Already enabled on this repo.
+- **GitHub private vulnerability reporting** — <https://github.com/the-hcma/tiny-pki/security/advisories/new> (Security tab → Report a vulnerability). Already enabled on this repo.
 
-Include the output of `tiny-pki --version`, the platform, and the smallest
-reproduction you have (a code snippet or CLI transcript, never a real CA key
-or PKCS#12 password). You will get an acknowledgement within **3 business
-days**.
+Include the output of `tiny-pki --version`, the platform, and the smallest reproduction you have (a code snippet or CLI transcript, never a real CA key or PKCS#12 password). You will get an acknowledgement within **3 business days**.
 
-Please do not open a normal issue, post a PR, or disclose publicly until a fix
-is released or **90 days** have passed, whichever comes first.
+Please do not open a normal issue, post a PR, or disclose publicly until a fix is released or **90 days** have passed, whichever comes first.
 
 ## Supported versions
 
-tiny-pki ships from `main` only. Fixes go into the next release; there are no
-back-port branches.
+tiny-pki ships from `main` only. Fixes go into the next release; there are no back-port branches.
 
 | Version | Supported |
 |---------|-----------|
@@ -41,44 +29,20 @@ back-port branches.
 | High | Path traversal / arbitrary file write or read via the store or CLI, secret leaked to logs/history/argv, a validation bypass that produces a certificate a relying party would trust when it shouldn't | 5 business days | 30 days |
 | Medium / Low | Everything else that's a real security weakness but needs a specific precondition (e.g. local write access to the store directory) to matter | 10 business days | next routine release |
 
-A fix lands as a normal Conventional-Commit `fix:` PR through the usual
-[`gh stack`](.agents/rules/stacking-tool.md) flow and
-[agent review loop](.agents/rules/pr-ship-and-review.md).
+A fix lands as a normal Conventional-Commit `fix:` PR through the usual [`gh stack`](.agents/rules/stacking-tool.md) flow and [agent review loop](.agents/rules/pr-ship-and-review.md).
 
 ## What is in scope
 
-- The library (`tiny_pki.*` under `src/tiny_pki/`): certificate/CRL issuance,
-  name/SAN validation, the optional `tiny_pki.secrets` Fernet helpers, and
-  PKCS#12 bundling.
+- The library (`tiny_pki.*` under `src/tiny_pki/`): certificate/CRL issuance, name/SAN validation, the optional `tiny_pki.secrets` Fernet helpers, and PKCS#12 bundling.
 - The CLI (`tiny_pki.cli.*`, the `tiny-pki` console script and REPL).
-- The filesystem store (`tiny_pki.store`) — layout, `index.json` handling,
-  legacy-layout migration, file permissions.
-- The build and release process: `.github/workflows/*`, `.github/ci/*`, the
-  build hook (`hatch_build.py`, `scripts/embed_build_metadata`), and PyPI
-  publishing through Release Please and trusted publishing
-  ([`RELEASING.md`](RELEASING.md)).
+- The filesystem store (`tiny_pki.store`) — layout, `index.json` handling, legacy-layout migration, file permissions.
+- The build and release process: `.github/workflows/*`, `.github/ci/*`, the build hook (`hatch_build.py`, `scripts/embed_build_metadata`), and PyPI publishing through Release Please and trusted publishing ([`RELEASING.md`](RELEASING.md)).
 
 ## What is out of scope
 
-- **Consumer applications** built on tiny-pki (e.g.
-  [my-tracks](https://github.com/the-hcma/my-tracks),
-  [home-warden](https://github.com/the-hcma/home-warden)): how they store
-  keys in a database, wire nginx/Mosquitto, manage a Django `SECRET_KEY`, or
-  authenticate/authorize who gets a certificate. See the README's
-  ["What stays in your app"](README.md#what-stays-in-your-app) section for the
-  exact boundary.
-- **Host compromise** of a machine that already holds `ca.key` (or a CLI
-  store directory in general) — tiny-pki protects the key at rest with file
-  permissions ([`docs/security.md`](docs/security.md)), not against a fully
-  compromised host or a malicious co-tenant with local shell access to the
-  store's filesystem before it's created (see the CA-key/CRL/index symlink
-  finding in
-  [`docs/security-review/2026-09-25-claude-review.md`](docs/security-review/2026-09-25-claude-review.md)
-  for the one case that *is* in scope: symlink-following on writes, tracked
-  as a fix, not accepted as out of scope).
-- tiny-pki does not authenticate who asks for a certificate, rate-limit
-  issuance, or audit-log operations — see
-  [`docs/security.md`](docs/security.md#out-of-scope).
+- **Consumer applications** built on tiny-pki (e.g. [my-tracks](https://github.com/the-hcma/my-tracks), [home-warden](https://github.com/the-hcma/home-warden)): how they store keys in a database, wire nginx/Mosquitto, manage a Django `SECRET_KEY`, or authenticate/authorize who gets a certificate. See the README's ["What stays in your app"](README.md#what-stays-in-your-app) section for the exact boundary.
+- **Host compromise** of a machine that already holds `ca.key` (or a CLI store directory in general) — tiny-pki protects the key at rest with file permissions ([`docs/security.md`](docs/security.md)), not against a fully compromised host or a malicious co-tenant with local shell access to the store's filesystem before it's created (see the CA-key/CRL/index symlink finding in [`docs/security-review/2026-09-25-claude-review.md`](docs/security-review/2026-09-25-claude-review.md) for the one case that *is* in scope: symlink-following on writes, tracked as a fix, not accepted as out of scope).
+- tiny-pki does not authenticate who asks for a certificate, rate-limit issuance, or audit-log operations — see [`docs/security.md`](docs/security.md#out-of-scope).
 
 ## Controls in place
 
@@ -101,9 +65,7 @@ A fix lands as a normal Conventional-Commit `fix:` PR through the usual
 
 ## Governance tooling
 
-Compliance and workflow tooling is **not vendored into this repo** — it comes
-from [`the-hcma/repository-helpers`](https://github.com/the-hcma/repository-helpers)
-and is re-synced per `AGENTS.md`:
+Compliance and workflow tooling is **not vendored into this repo** — it comes from [`the-hcma/repository-helpers`](https://github.com/the-hcma/repository-helpers) and is re-synced per `AGENTS.md`:
 
 | Tool | Purpose |
 |------|---------|
@@ -116,9 +78,4 @@ See [`AGENTS.md`](AGENTS.md) for the full toolchain and review model.
 
 ## Reconciling with `docs/security.md`
 
-[`docs/security.md`](docs/security.md) is the *operational* guidance (what to
-do with a CA key, how to size validity, how to handle PKCS#12 passwords). This
-file is the *process* policy (how to report a vulnerability, what's in scope,
-what CI enforces). Where they overlap — e.g. "the CA private key is the whole
-trust boundary" — they should say the same thing; if you find a
-contradiction, that's itself worth a private report or an issue.
+[`docs/security.md`](docs/security.md) is the *operational* guidance (what to do with a CA key, how to size validity, how to handle PKCS#12 passwords). This file is the *process* policy (how to report a vulnerability, what's in scope, what CI enforces). Where they overlap — e.g. "the CA private key is the whole trust boundary" — they should say the same thing; if you find a contradiction, that's itself worth a private report or an issue.

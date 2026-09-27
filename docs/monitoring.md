@@ -144,9 +144,7 @@ Check the certificates nginx serves, against the CA that issued them and its CRL
 tiny-pki check /etc/nginx/certs --ca /srv/pki/public/ca.crt --crl /srv/pki/public/crl.pem --within 14
 ```
 
-Expiry and revocation are separate questions: drop `--crl` and the same command
-still exits 0 for a revoked certificate. Check the CRL nginx loads (`ssl_crl`)
-too, so an expired CRL is caught before nginx starts rejecting every client:
+Expiry and revocation are separate questions: drop `--crl` and the same command still exits 0 for a revoked certificate. Check the CRL nginx loads (`ssl_crl`) too, so an expired CRL is caught before nginx starts rejecting every client:
 
 ```bash
 tiny-pki check /srv/pki/public/crl.pem --ca /srv/pki/public/ca.crt

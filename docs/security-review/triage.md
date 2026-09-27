@@ -4,23 +4,12 @@ Merges findings across reviewers into one disposition table, per issue #34.
 
 **Status: both reviewers in.** Two independent reports exist:
 
-- [`2026-09-25-claude-review.md`](./2026-09-25-claude-review.md) — Claude
-  Sonnet 5 via Claude Code, commit `b3bbf01` (rows 1–6).
-- [`2026-09-26-grok-review.md`](./2026-09-26-grok-review.md) — Grok 4.7 via a
-  Cursor agent subagent, commit `074cfa0` (rows 7–23), with its reproduction
-  script in [`2026-09-26-grok-poc/repro.py`](./2026-09-26-grok-poc/repro.py)
-  (`uv run python docs/security-review/2026-09-26-grok-poc/repro.py` from the
-  repo root; writes only under the system temp dir).
+- [`2026-09-25-claude-review.md`](./2026-09-25-claude-review.md) — Claude Sonnet 5 via Claude Code, commit `b3bbf01` (rows 1–6).
+- [`2026-09-26-grok-review.md`](./2026-09-26-grok-review.md) — Grok 4.7 via a Cursor agent subagent, commit `074cfa0` (rows 7–23), with its reproduction script in [`2026-09-26-grok-poc/repro.py`](./2026-09-26-grok-poc/repro.py) (`uv run python docs/security-review/2026-09-26-grok-poc/repro.py` from the repo root; writes only under the system temp dir).
 
-The second review ran on a later commit, after rows 1–6 were fixed, so it did
-not re-report them. To keep it independent it ran against a `git archive`
-snapshot with no `.git` history and no `docs/security-review/`, and was told not
-to read GitHub issues or PRs. OpenAI's GPT-5.6 was tried first and refused the
-task under its cybersecurity safety filter, so Grok (xAI) was used instead.
+The second review ran on a later commit, after rows 1–6 were fixed, so it did not re-report them. To keep it independent it ran against a `git archive` snapshot with no `.git` history and no `docs/security-review/`, and was told not to read GitHub issues or PRs. OpenAI's GPT-5.6 was tried first and refused the task under its cybersecurity safety filter, so Grok (xAI) was used instead.
 
-Severities in the table are the triage severity. Where it differs from the
-reviewer's, the disposition says why. "Verified" means the finding was
-re-reproduced during triage, independently of the reviewer's own script.
+Severities in the table are the triage severity. Where it differs from the reviewer's, the disposition says why. "Verified" means the finding was re-reproduced during triage, independently of the reviewer's own script.
 
 | # | Finding | Severity | Reviewer(s) | Disposition | Tracking |
 | --- | --- | --- | --- | --- | --- |
@@ -50,26 +39,11 @@ re-reproduced during triage, independently of the reviewer's own script.
 
 ## Not yet triaged
 
-- **Repo governance audit** (branch protection, Actions allowlist, CODEOWNERS,
-  trusted-publishing config vs. `SECURITY.md`'s claims) — done as part of
-  writing `SECURITY.md`: every claim there was checked live against the repo's
-  GitHub settings. It surfaced one real gap (`allowed_actions: all` rather
-  than an explicit allowlist), now **fixed**: the repo is on
-  `allowed_actions: selected` with GitHub-owned actions plus
-  `astral-sh/setup-uv` and `nick-fields/retry` allowed, tracked as
-  the-hcma/tiny-pki#83 and documented in the-hcma/tiny-pki#93.
-- **Second-vendor reviewer's findings** — merged above as rows 7–23. The two
-  reports did not overlap on any finding (row 12 is a new variant of row 2's
-  bug class that the #88 fix did not reach). The second report's "areas
-  reviewed with no findings" independently confirms the fixes for rows 1, 2,
-  3, 4, and 5.
+- **Repo governance audit** (branch protection, Actions allowlist, CODEOWNERS, trusted-publishing config vs. `SECURITY.md`'s claims) — done as part of writing `SECURITY.md`: every claim there was checked live against the repo's GitHub settings. It surfaced one real gap (`allowed_actions: all` rather than an explicit allowlist), now **fixed**: the repo is on `allowed_actions: selected` with GitHub-owned actions plus `astral-sh/setup-uv` and `nick-fields/retry` allowed, tracked as the-hcma/tiny-pki#83 and documented in the-hcma/tiny-pki#93.
+- **Second-vendor reviewer's findings** — merged above as rows 7–23. The two reports did not overlap on any finding (row 12 is a new variant of row 2's bug class that the #88 fix did not reach). The second report's "areas reviewed with no findings" independently confirms the fixes for rows 1, 2, 3, 4, and 5.
 
 ## Closing criteria (from issue #34)
 
-- Every Critical/High finding fixed with a test, or explicitly accepted by
-  @thehcma, before #34 closes. Rows 1 and 2 are fixed; **row 7 is open** (the-hcma/tiny-pki#96).
-- Every Medium/Low finding either fixed or filed as a tracked follow-up issue
-  — this table's "Tracking" column is the source of truth for which. Rows 3–6
-  are fixed; rows 8–22 are tracked as sub-issues of the-hcma/tiny-pki#78
-  (#97–#105).
+- Every Critical/High finding fixed with a test, or explicitly accepted by @thehcma, before #34 closes. Rows 1 and 2 are fixed; **row 7 is open** (the-hcma/tiny-pki#96).
+- Every Medium/Low finding either fixed or filed as a tracked follow-up issue — this table's "Tracking" column is the source of truth for which. Rows 3–6 are fixed; rows 8–22 are tracked as sub-issues of the-hcma/tiny-pki#78 (#97–#105).
 - This table reflects **both** reviewers.
