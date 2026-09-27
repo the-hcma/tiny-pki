@@ -76,7 +76,7 @@ check: 2 expiring, 1 ok; within 100 days
 | Field | Meaning |
 | --- | --- |
 | `status` (top level) | the most severe result status |
-| `name` | store identity (`ca`, `crl`, or the leaf name) or file path; chain entries are `PATH #N` |
+| `name` | store identity (`ca`, `crl`, or the leaf name) or file path; chain entries are `PATH #N`. A live leaf that a newer live certificate for the same CN replaces (`create client --keep-previous`) is `<cn> (superseded, 0x<serial>)` |
 | `kind` | `ca`, `client`, `server`, `crl`, or `unknown` |
 | `status` | `ok`, `expiring`, `not_yet_valid`, `expired`, `revoked`, or `untrusted` |
 | `subject`, `issuer` | common name, or the full RFC 4514 name when there is no CN |

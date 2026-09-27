@@ -212,7 +212,17 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
     kind = args[0]
     opts = _parse_flags(
         args[1:],
-        allowed={"allow-dn-special-chars", "allow-long-validity", "days", "key-size", "no-cn-san", "org", "san", "yes"},
+        allowed={
+            "allow-dn-special-chars",
+            "allow-long-validity",
+            "days",
+            "keep-previous",
+            "key-size",
+            "no-cn-san",
+            "org",
+            "san",
+            "yes",
+        },
     )
     positional = opts["positional"]
     if kind not in {"client", "server"}:
@@ -224,6 +234,8 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
         raise ValueError("Unexpected extra arguments")
     if kind == "client" and (opts["multi"].get("san") or {"no-cn-san", "yes"} & opts["flags"].keys()):
         raise ValueError("--san / --no-cn-san / --yes are only supported for server certificates")
+    if kind == "server" and "keep-previous" in opts["flags"]:
+        raise ValueError("--keep-previous is only supported for client certificates")
     if "no-cn-san" in opts["flags"] and not opts["multi"].get("san"):
         raise ValueError("Expected --san with --no-cn-san; without --san the CN is the only SAN")
     store.read_ca()
@@ -244,6 +256,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
                 key_size=key_size,
                 allow_long_validity=allow_long_validity,
                 allow_dn_special_chars=allow_dn_special_chars,
+                keep_previous="keep-previous" in opts["flags"],
             )
         else:
             sans = [s for s in opts["multi"].get("san", []) if s] or [name]
@@ -262,6 +275,11 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
 
     print(theme.ok(f"issued {kind} {entry.common_name}"))
     print(theme.dim(f"serial {entry.serial_number}  fp {entry.fingerprint}"))
+    if "keep-previous" in opts["flags"]:
+        for old, new in store.superseded_serials().items():
+            if new == entry.serial_number:
+                hint = f"previous serial {old} stays live; run `revoke 0x{old}` once the device has the new one"
+                print(theme.warn(hint))
 
 
 def _cmd_show(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
@@ -399,9 +417,11 @@ def _print_entry_list(
     theme: Theme,
     as_json: bool,
 ) -> None:
+    superseded = store.superseded_serials()
     if as_json:
         rows = [
             {
+                "superseded_by": superseded.get(e.serial_number) if not e.revoked_at else None,
                 "cn": e.common_name,
                 "kind": e.kind,
                 "serial": e.serial_number,
@@ -421,11 +441,13 @@ def _print_entry_list(
         print(theme.dim("(none)"))
         return
     for entry in entries:
+        newer = None if entry.revoked_at else superseded.get(entry.serial_number)
         status = "revoked" if entry.revoked_at else "active"
         color = theme.error if entry.revoked_at else theme.ok
+        note = f"  superseded by {newer}" if newer else ""
         print(
             f"{color(status)}  {entry.kind:6}  {entry.common_name}  "
-            f"serial={entry.serial_number}  expires={entry.not_valid_after}"
+            f"serial={entry.serial_number}  expires={entry.not_valid_after}{theme.warn(note) if note else ''}"
         )
 
 
@@ -449,7 +471,7 @@ def _cmd_revoke(args: list[str], *, store: CertificateStore | None, theme: Theme
     store = _require_store(store)
     opts = _parse_flags(args, allowed={"dry-run"})
     identity = _require_one_positional(opts, "revoke <identity|serial> [--dry-run]")
-    target = store.get_certificate(identity)
+    target = store.get_certificate(identity, require_unique=True)
     if target is None:
         raise KeyError(f"Expected issued certificate matching {identity!r}")
     if "dry-run" in opts["flags"]:
@@ -473,7 +495,7 @@ def _cmd_delete(args: list[str], *, store: CertificateStore | None, theme: Theme
     opts = _parse_flags(args, allowed={"dry-run", "force"})
     identity = _require_one_positional(opts, "delete <identity|serial> [--force] [--dry-run]")
     force = "force" in opts["flags"]
-    before = store.get_certificate(identity)
+    before = store.get_certificate(identity, require_unique=True)
     if "dry-run" in opts["flags"]:
         if before is None:
             raise KeyError(f"Expected issued certificate matching {identity!r}")
@@ -891,6 +913,7 @@ def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
             "allow-long-validity",
             "dry-run",
             "force",
+            "keep-previous",
             "include-revoked",
             "json",
             "legacy",

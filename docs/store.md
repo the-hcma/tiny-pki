@@ -116,7 +116,10 @@ A JSON list; each entry:
 Lifecycle:
 
 - **create** — appends an entry. Re-issuing a live CN auto-revokes the previous
-  serial (it stays in the CRL).
+  serial (it stays in the CRL). `create client <cn> --keep-previous`
+  (`issue_client(..., keep_previous=True)`) leaves the previous serial live
+  for routine rotation; `list` and `check` mark it superseded until you revoke it
+  by serial.
 - **revoke** — sets `revoked_at` and regenerates `ca/crl.pem` and `public/crl.pem`.
 - **delete** — only after revoke, or with `--force`, which revokes an active
   certificate first. The entry becomes a *tombstone*: files removed, paths
@@ -125,6 +128,9 @@ Lifecycle:
 Commands that take an identity accept a common name or a hex serial (`0x`
 optional). A value that is one certificate's serial and another certificate's
 common name is refused as ambiguous; the error names an unambiguous alternative.
+While two live certificates share a common name, the name resolves to the newest
+one (`export`, `show`, `inspect`), but `revoke` and `delete` by name are refused;
+pass `0x<serial>`.
 
 Paths in the index are validated to stay under the store root; a tampered index
 that points elsewhere is rejected.
@@ -133,7 +139,8 @@ that points elsewhere is rejected.
 
 `list clients|servers|revoked|certs --json` prints one object per entry with `cn`,
 `kind`, `serial`, `fingerprint`, `expires`, `status`, `revoked_at`, absolute
-`cert_path` / `key_path` (empty for tombstones), and `store`. `list --json`
+`cert_path` / `key_path` (empty for tombstones), `store`, and `superseded_by`
+(the newer live serial for the same CN after `--keep-previous`, else `null`). `list --json`
 prints a summary (`ca_cn`, counts, `store`); `list ca --json` prints the CA's
 `cn`, `fingerprint`, `expires`, absolute `cert_path` / `crl_path` /
 `index_path`, and `crl_days` (the stored CRL lifetime).
