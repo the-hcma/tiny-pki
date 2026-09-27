@@ -16,23 +16,36 @@ Layout (one CA per store root)::
 
 Legacy flat layouts (``ca.crt`` / ``certs/`` at the store root) are migrated
 automatically on first ``ensure_layout``.
+
+Every method that modifies the store holds an exclusive ``fcntl.flock`` on
+``ca/.lock`` (see :meth:`CertificateStore.lock`), so concurrent processes cannot
+lose an index update or publish a CRL from a stale revoked set. Reads take no lock,
+except the first read of a legacy layout, which migrates it (a write).
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import shutil
 import stat
-from collections.abc import Mapping
+import sys
+import threading
+from collections.abc import Callable, Generator, Mapping
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Concatenate, Literal, cast
 
 from cryptography import x509
 
 from tiny_pki._fsutil import write_file_atomic
+from tiny_pki.errors import TinyPkiError
+
+if sys.platform != "win32":
+    import fcntl
 
 CertKind = Literal["client", "server"]
 CertStatus = Literal["active", "all", "revoked"]
@@ -50,6 +63,17 @@ class IssuedCertificate:
     not_valid_after: str
     fingerprint: str
     revoked_at: str | None = None
+
+
+def _locked[**P, R](
+    method: Callable[Concatenate[CertificateStore, P], R],
+) -> Callable[Concatenate[CertificateStore, P], R]:
+    @functools.wraps(method)
+    def wrapper(self: CertificateStore, *args: P.args, **kwargs: P.kwargs) -> R:
+        with self.lock():
+            return method(self, *args, **kwargs)
+
+    return wrapper
 
 
 class CertificateStore:
@@ -90,9 +114,14 @@ class CertificateStore:
         return self.root / "ca" / "index.json"
 
     @property
+    def lock_path(self) -> Path:
+        return self.root / "ca" / ".lock"
+
+    @property
     def servers_dir(self) -> Path:
         return self.root / "servers"
 
+    @_locked
     def add_certificate(
         self,
         *,
@@ -173,6 +202,7 @@ class CertificateStore:
             (self.root / rel).unlink(missing_ok=True)
         return entry
 
+    @_locked
     def delete_certificate(self, identity: str, *, force: bool = False) -> IssuedCertificate:
         """Remove cert/key files from disk, keeping a revoked tombstone in the index.
 
@@ -213,6 +243,7 @@ class CertificateStore:
             (self.root / entry.key_path).unlink(missing_ok=True)
         return tombstone
 
+    @_locked
     def ensure_layout(self) -> None:
         """Create the store directory tree (does not write a CA).
 
@@ -270,6 +301,46 @@ class CertificateStore:
         self._maybe_migrate_legacy_layout()
         return self.ca_cert_path.is_file() and self.ca_key_path.is_file()
 
+    @contextmanager
+    def lock(self) -> Generator[None]:
+        """Hold the store's exclusive write lock (``flock`` on ``ca/.lock``) until the block exits.
+
+        Every method that modifies the store takes it, so hold it yourself only to
+        make a read-then-write sequence atomic, such as reading
+        :meth:`revoked_entries` and :meth:`next_crl_number` before :meth:`write_crl`.
+        Re-entrant within a thread; blocks while another process or thread holds it.
+
+        Raises:
+            TinyPkiError: ``fcntl.flock`` is unavailable (Windows); the store is
+                never modified without the lock.
+        """
+        if sys.platform == "win32":
+            raise TinyPkiError(
+                f"Expected fcntl.flock to lock the store at {self.root}; refusing to modify it without a lock"
+            )
+        depth: dict[Path, int] = _HELD_LOCKS.__dict__.setdefault("depth", {})
+        key = self.lock_path
+        if depth.get(key):
+            depth[key] += 1
+            try:
+                yield
+            finally:
+                depth[key] -= 1
+            return
+        self.root.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
+        self.ca_dir.mkdir(mode=_DIR_MODE, exist_ok=True)
+        path = self._validated_write_path("ca/.lock")
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            depth[key] = 1
+            try:
+                yield
+            finally:
+                del depth[key]
+        finally:
+            os.close(fd)
+
     def list_certificates(
         self,
         *,
@@ -299,6 +370,7 @@ class CertificateStore:
             result.append(entry)
         return result
 
+    @_locked
     def mark_revoked(self, identity: str, *, revoked_at: datetime | None = None) -> IssuedCertificate:
         """Mark an issued cert revoked in the index.
 
@@ -368,6 +440,7 @@ class CertificateStore:
             result.append((int(entry.serial_number, 16), datetime.fromisoformat(entry.revoked_at)))
         return result
 
+    @_locked
     def write_bundle(self, common_name: str, p12_bytes: bytes, *, serial_number: str | None = None) -> Path:
         """Write a PKCS#12 bundle under ``bundles/`` with mode 0600.
 
@@ -390,6 +463,7 @@ class CertificateStore:
         _write_secret(path, p12_bytes)
         return path
 
+    @_locked
     def write_ca(self, cert_pem: bytes, key_pem: bytes, *, force: bool = False) -> None:
         """Persist the CA certificate and private key (key mode 0600).
 
@@ -402,6 +476,7 @@ class CertificateStore:
         _write_plain(self._validated_write_path("ca/ca.crt"), cert_pem)
         _write_secret(self._validated_write_path("ca/ca.key"), key_pem)
 
+    @_locked
     def write_crl(self, crl_pem: bytes) -> None:
         """Publish ``crl_pem`` as ``ca/crl.pem`` and record its CRL number.
 
@@ -457,7 +532,9 @@ class CertificateStore:
 
     def _maybe_migrate_legacy_layout(self) -> None:
         if self._is_legacy_layout():
-            self._migrate_legacy_layout()
+            with self.lock():
+                if self._is_legacy_layout():
+                    self._migrate_legacy_layout()
 
     def _migrate_legacy_layout(self) -> None:
         """Move flat-root CA material and ``certs/`` leaves into the typed tree.
@@ -651,6 +728,9 @@ def _index_references_certs_paths(index_path: Path) -> bool:
 
 
 _DIR_MODE = 0o700
+# Per-thread lock depth keyed by lock path; flock is per open file, so a nested
+# lock() in the same thread must reuse the held lock instead of opening another.
+_HELD_LOCKS = threading.local()
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 # RFC 5280 §5.2.3: conforming CRL numbers fit in 20 octets.
 _MAX_CRL_NUMBER = 2**159 - 1
