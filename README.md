@@ -122,4 +122,4 @@ Contribution rules (stacked PRs, commit style, review flow) are in [AGENTS.md](h
 
 ## License
 
-MIT © 2026 Henrique Andrade ([GitHub's thehcma](https://github.com/thehcma)); see [LICENSE](https://github.com/the-hcma/tiny-pki/blob/main/LICENSE). Code extracted from my-tracks was relicensed MIT by the copyright holder for this shared package.
+MIT © 2026 Henrique Andrade ([GitHub's thehcma](https://github.com/thehcma)); see [LICENSE](https://github.com/the-hcma/tiny-pki/blob/main/LICENSE).
