@@ -17,6 +17,12 @@ Layout (one CA per store root)::
 Legacy flat layouts (``ca.crt`` / ``certs/`` at the store root) are migrated
 automatically on first ``ensure_layout``.
 
+Methods that change the index (``add_certificate``, ``mark_revoked``,
+``delete_certificate`` and the CLI-shaped ``issue_client`` / ``issue_server`` /
+``revoke`` / ``delete``) republish ``ca/crl.pem`` with the store's CA key, so the
+CRL never lags ``index.json``. :func:`check_store` is the store health check
+behind ``tiny-pki check``.
+
 Every method that modifies the store holds an exclusive ``fcntl.flock`` on
 ``ca/.lock`` (see :meth:`CertificateStore.lock`), so concurrent processes cannot
 lose an index update or publish a CRL from a stale revoked set. Reads take no lock,
@@ -34,7 +40,7 @@ import sys
 import threading
 from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Concatenate, Literal, cast
@@ -42,13 +48,20 @@ from typing import Any, Concatenate, Literal, cast
 from cryptography import x509
 
 from tiny_pki._fsutil import write_file_atomic
+from tiny_pki.check import CertificateStatus, Status, check_certificate, check_crl
+from tiny_pki.constants import DEFAULT_CLIENT_VALIDITY_DAYS, DEFAULT_LEAF_KEY_SIZE, DEFAULT_SERVER_VALIDITY_DAYS
 from tiny_pki.errors import TinyPkiError
+from tiny_pki.inspect import get_certificate_expiry, get_certificate_fingerprint, get_certificate_serial_number
+from tiny_pki.issue import generate_client_certificate, generate_server_certificate
+from tiny_pki.revoke import generate_crl
 
 if sys.platform != "win32":
     import fcntl
 
 CertKind = Literal["client", "server"]
 CertStatus = Literal["active", "all", "revoked"]
+CheckKind = Literal["ca", "client", "crl", "server"]
+CHECK_KINDS: frozenset[CheckKind] = frozenset({"ca", "client", "crl", "server"})
 
 
 @dataclass(frozen=True)
@@ -136,7 +149,8 @@ class CertificateStore:
         """Write cert/key PEMs and append an index entry.
 
         Revoked tombstones for the same common name are retained for CRL generation.
-        Re-issuing under an existing live CN auto-revokes the superseded serial.
+        Re-issuing under an existing live CN auto-revokes the superseded serial, and
+        ``ca/crl.pem`` is republished (when the store has a CA) so it lists it.
         """
         self.ensure_layout()
         if kind not in ("client", "server"):
@@ -200,6 +214,7 @@ class CertificateStore:
         self._write_index(entries)
         for rel in unlink_paths:
             (self.root / rel).unlink(missing_ok=True)
+        self._republish_crl()
         return entry
 
     @_locked
@@ -207,8 +222,8 @@ class CertificateStore:
         """Remove cert/key files from disk, keeping a revoked tombstone in the index.
 
         Active (non-revoked) certificates require ``force=True``, which revokes
-        them now before deleting. The tombstone keeps the serial so the next CRL
-        still lists it; callers must regenerate the CRL afterwards.
+        them now before deleting. The tombstone keeps the serial, and ``ca/crl.pem``
+        is republished (when the store has a CA) so it still lists it.
 
         The index is rewritten before unlinking files so a mid-delete failure
         cannot leave the index pointing at missing paths.
@@ -241,7 +256,12 @@ class CertificateStore:
             (self.root / entry.cert_path).unlink(missing_ok=True)
         if entry.key_path:
             (self.root / entry.key_path).unlink(missing_ok=True)
+        self._republish_crl()
         return tombstone
+
+    def delete(self, identity: str, *, force: bool = False) -> IssuedCertificate:
+        """Delete a certificate's files, as ``tiny-pki delete``; see :meth:`delete_certificate`."""
+        return self.delete_certificate(identity, force=force)
 
     @_locked
     def ensure_layout(self) -> None:
@@ -376,6 +396,7 @@ class CertificateStore:
 
         Idempotent: an already-revoked entry keeps its original ``revoked_at``.
         Identity resolution matches :meth:`get_certificate` (strip / ``0x`` serial).
+        ``ca/crl.pem`` is republished (when the store has a CA) so it lists the serial.
         """
         target = self.get_certificate(identity)
         if target is None:
@@ -406,7 +427,87 @@ class CertificateStore:
         if found is None:
             raise KeyError(f"Expected issued certificate matching {identity!r}")
         self._write_index(updated)
+        self._republish_crl()
         return found
+
+    @_locked
+    def publish_crl(self) -> bytes:
+        """Sign the index's revoked set with the store's CA key and publish it as ``ca/crl.pem``.
+
+        The revoked set, the CRL number and the write happen under one lock, so a
+        concurrent revoke is never dropped from the newest CRL.
+
+        Returns:
+            The published CRL in PEM format.
+        """
+        ca_cert, ca_key = self.read_ca()
+        crl = generate_crl(ca_cert, ca_key, self.revoked_entries(), crl_number=self.next_crl_number())
+        self.write_crl(crl)
+        return crl
+
+    def issue_client(
+        self,
+        common_name: str,
+        *,
+        organization_name: str | None = None,
+        validity_days: int = DEFAULT_CLIENT_VALIDITY_DAYS,
+        key_size: int = DEFAULT_LEAF_KEY_SIZE,
+        allow_long_validity: bool = False,
+        allow_dn_special_chars: bool = False,
+    ) -> IssuedCertificate:
+        """Issue and record a client certificate, as ``tiny-pki create client``.
+
+        Arguments match :func:`tiny_pki.generate_client_certificate`. A live
+        certificate with the same CN is revoked and ``ca/crl.pem`` republished.
+        """
+        ca_cert, ca_key = self.read_ca()
+        cert_pem, key_pem = generate_client_certificate(
+            ca_cert,
+            ca_key,
+            common_name,
+            organization_name=organization_name,
+            validity_days=validity_days,
+            key_size=key_size,
+            allow_long_validity=allow_long_validity,
+            allow_dn_special_chars=allow_dn_special_chars,
+        )
+        return self._record(common_name, "client", cert_pem, key_pem)
+
+    def issue_server(
+        self,
+        common_name: str,
+        san_entries: list[str],
+        *,
+        organization_name: str | None = None,
+        validity_days: int = DEFAULT_SERVER_VALIDITY_DAYS,
+        key_size: int = DEFAULT_LEAF_KEY_SIZE,
+        allow_long_validity: bool = False,
+        include_common_name_in_sans: bool = True,
+        allow_dn_special_chars: bool = False,
+    ) -> IssuedCertificate:
+        """Issue and record a server certificate, as ``tiny-pki create server``.
+
+        Arguments match :func:`tiny_pki.generate_server_certificate`. A live
+        certificate with the same CN is revoked and ``ca/crl.pem`` republished.
+        """
+        ca_cert, ca_key = self.read_ca()
+        cert_pem, key_pem = generate_server_certificate(
+            ca_cert,
+            ca_key,
+            common_name,
+            san_entries,
+            organization_name=organization_name,
+            validity_days=validity_days,
+            key_size=key_size,
+            allow_long_validity=allow_long_validity,
+            include_common_name_in_sans=include_common_name_in_sans,
+            allow_dn_special_chars=allow_dn_special_chars,
+        )
+        return self._record(common_name, "server", cert_pem, key_pem)
+
+    def revoke(self, identity: str) -> IssuedCertificate:
+        """Revoke a certificate, as ``tiny-pki revoke``; see :meth:`mark_revoked`."""
+        return self.mark_revoked(identity)
 
     def read_ca(self) -> tuple[bytes, bytes]:
         """Return ``(ca_cert_pem, ca_key_pem)``."""
@@ -504,6 +605,21 @@ class CertificateStore:
         if number > _MAX_CRL_NUMBER:
             raise ValueError(f"Expected a CRL number below 2**159 in {self.ca_dir}, but {last} was already published")
         return number
+
+    def _record(self, common_name: str, kind: CertKind, cert_pem: bytes, key_pem: bytes) -> IssuedCertificate:
+        return self.add_certificate(
+            common_name=common_name,
+            kind=kind,
+            serial_number=get_certificate_serial_number(cert_pem),
+            cert_pem=cert_pem,
+            key_pem=key_pem,
+            not_valid_after=get_certificate_expiry(cert_pem),
+            fingerprint=get_certificate_fingerprint(cert_pem),
+        )
+
+    def _republish_crl(self) -> None:
+        if self.has_ca():
+            self.publish_crl()
 
     def _recorded_crl_number(self) -> int:
         path = self._validated_write_path("ca/crlnumber")
@@ -675,6 +791,74 @@ class CertificateStore:
             self._validated_write_path("ca/index.json"),
             (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"),
         )
+
+
+def check_store(
+    store: CertificateStore,
+    *,
+    within: timedelta | None = None,
+    by: datetime | None = None,
+    kinds: set[CheckKind] | frozenset[CheckKind] = CHECK_KINDS,
+    include_revoked: bool = False,
+) -> list[tuple[str, CertificateStatus]]:
+    """Check the CA, the CRL, and every issued leaf, as ``tiny-pki check`` does for a store.
+
+    ``index.json`` is authoritative: a CRL missing a serial it records as revoked
+    is ``untrusted`` (reported even when ``kinds`` leaves out ``"crl"``), and a leaf
+    it records as revoked is ``revoked`` even if the CRL omits it. Revoked leaves
+    are listed only with ``include_revoked=True``.
+
+    Returns:
+        ``(name, status)`` rows: ``"ca"``, ``"crl"``, then each leaf by common name.
+
+    Raises:
+        FileNotFoundError: The CA certificate is missing, or the CRL is missing
+            while the index records revocations.
+    """
+    crl_pem = store.read_crl()
+    if not store.ca_cert_path.is_file():
+        raise FileNotFoundError(f"Expected a CA certificate at {store.ca_cert_path}")
+    ca_cert = store.ca_cert_path.read_bytes()
+    rows: list[tuple[str, CertificateStatus]] = []
+    if "ca" in kinds:
+        rows.append(("ca", check_certificate(ca_cert, within=within, by=by, ca_cert_pem=ca_cert)))
+    index_revoked = {int(e.serial_number, 16) for e in store.list_certificates(status="revoked")}
+    trusted_crl: bytes | None = None
+    if crl_pem is None:
+        if index_revoked:
+            raise FileNotFoundError(
+                f"Expected a CRL at {store.crl_path} listing {len(index_revoked)} serial(s) revoked in index.json"
+            )
+    else:
+        crl_result = check_crl(crl_pem, within=within, by=by, ca_cert_pem=ca_cert)
+        if crl_result.status is not Status.UNTRUSTED:
+            trusted_crl = crl_pem
+            listed = {r.serial_number for r in x509.load_pem_x509_crl(crl_pem)}
+            missing = sorted(index_revoked - listed)
+            if missing:
+                shown = ", ".join(format(s, "x") for s in missing[:5]) + (" ..." if len(missing) > 5 else "")
+                crl_result = _escalate(
+                    crl_result,
+                    Status.UNTRUSTED,
+                    f"missing {len(missing)} serial(s) revoked in index.json ({shown}); republish with `crl`",
+                )
+        if "crl" in kinds or crl_result.status is Status.UNTRUSTED:
+            rows.append(("crl", crl_result))
+    for entry in store.list_certificates(status="all" if include_revoked else "active"):
+        if entry.kind not in kinds:
+            continue
+        cert_pem = store.read_certificate_pem(entry)
+        result = check_certificate(cert_pem, within=within, by=by, ca_cert_pem=ca_cert, crl_pem=trusted_crl)
+        if entry.revoked_at is not None and result.status is not Status.REVOKED:
+            result = _escalate(result, Status.REVOKED, f"revoked in index.json on {entry.revoked_at}")
+        rows.append((entry.common_name, result))
+    return rows
+
+
+def _escalate(result: CertificateStatus, status: Status, reason: str) -> CertificateStatus:
+    """Add ``reason`` to ``result``, raising its status to ``status`` if that is worse."""
+    worst = max(result.status, status, key=lambda s: s.severity)
+    return replace(result, status=worst, reasons=(*result.reasons, reason))
 
 
 def require_store_path(path: Path | str | None) -> Path:

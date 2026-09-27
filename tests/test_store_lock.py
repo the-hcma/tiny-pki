@@ -16,7 +16,6 @@ from cryptography import x509
 from hamcrest import assert_that, calling, contains_inanyorder, equal_to, has_length, is_, raises
 
 from tiny_pki import TinyPkiError, generate_ca_certificate, generate_crl
-from tiny_pki.cli.handlers import _publish_crl  # pyright: ignore[reportPrivateUsage]
 from tiny_pki.store import CertificateStore
 
 _CA = generate_ca_certificate("Lock CA", key_size=2048)
@@ -35,7 +34,7 @@ sys.exit(0)
 def _store(tmp_path: Path) -> CertificateStore:
     store = CertificateStore(tmp_path / "store")
     store.write_ca(*_CA)
-    _publish_crl(store, *_CA)
+    store.publish_crl()
     return store
 
 
@@ -119,7 +118,7 @@ def test_publish_under_lock_never_drops_a_concurrent_revocation(tmp_path: Path) 
         timer_store = CertificateStore(store.root)
         try:
             while not stop.is_set():
-                _publish_crl(timer_store, *_CA)
+                timer_store.publish_crl()
         except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion below
             errors.append(exc)
 
@@ -128,7 +127,7 @@ def test_publish_under_lock_never_drops_a_concurrent_revocation(tmp_path: Path) 
     try:
         for name in names:
             store.mark_revoked(name)
-            _publish_crl(store, *_CA)
+            store.publish_crl()
     finally:
         stop.set()
         worker.join(30)

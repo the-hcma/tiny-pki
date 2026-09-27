@@ -117,3 +117,31 @@ for entry in store.list_certificates(kind="client", status="active"):
 
 `list_certificates(kind=None|"client"|"server", status="all"|"active"|"revoked")`
 — `"revoked"` includes tombstones; `"all"` covers entries that still have files.
+
+The store methods below mirror the CLI verbs and keep `ca/crl.pem` in step with
+`index.json`, signing with the store's CA key. None of them imports
+`tiny_pki.cli`.
+
+```python
+from tiny_pki.store import CertificateStore, check_store
+
+store = CertificateStore("/srv/pki/home-ca")
+store.issue_client("alice")                         # create client alice
+store.issue_server("api.home", ["api.home"])        # create server api.home --san api.home
+store.revoke("alice")                               # revoke alice
+store.delete("alice")                               # delete alice (force=True for a live one)
+store.publish_crl()                                 # crl
+rows = check_store(store, within=None, include_revoked=False)  # check (store)
+```
+
+| Method | CLI | Notes |
+| --- | --- | --- |
+| `issue_client(cn, ...)` / `issue_server(cn, sans, ...)` | `create` | Keyword arguments match `generate_client_certificate` / `generate_server_certificate`; `TinyPkiWarning`s propagate. A live certificate with the same CN is revoked and listed in the republished CRL. |
+| `revoke(identity)` | `revoke` | Same as `mark_revoked`. |
+| `delete(identity, force=False)` | `delete` | Same as `delete_certificate`. |
+| `publish_crl()` | `crl` | Signs the index's revoked set; returns the CRL PEM. |
+| `check_store(store, *, within, by, kinds, include_revoked)` | `check` | `(name, CertificateStatus)` rows with the same statuses and reasons as `check --json`. `index.json` is authoritative: a CRL missing a serial it records as revoked is `untrusted`. |
+
+The lower-level `add_certificate`, `mark_revoked` and `delete_certificate` also
+republish `ca/crl.pem` whenever the store has a CA, so no call sequence leaves
+the CRL behind the index.
