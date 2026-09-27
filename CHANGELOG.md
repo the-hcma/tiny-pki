@@ -2,7 +2,7 @@
 
 All notable changes to tiny-pki are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/). Until 1.0, a minor release may change the API; such changes are called out under **Changed**.
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-09-27
 
 The first release on PyPI. It supports Python 3.12 and newer, and needs `cryptography` 50.0.1 or newer; the `cli` extra adds `prompt-toolkit`.
 
