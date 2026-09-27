@@ -27,6 +27,7 @@ from tiny_pki import (
     DEFAULT_LEAF_KEY_SIZE,
     DEFAULT_ORGANIZATION_NAME,
     DEFAULT_SERVER_VALIDITY_DAYS,
+    MAX_STORE_CRL_VALIDITY_DAYS,
     MAX_VALIDITY_DAYS,
     TinyPkiWarning,
     generate_ca_certificate,
@@ -121,11 +122,12 @@ def _require_store(store: CertificateStore | None) -> CertificateStore:
 
 def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     store = _require_store(store)
-    opts = _parse_flags(args, allowed={"cn", "days", "key-size", "org", "permit"})
+    opts = _parse_flags(args, allowed={"cn", "crl-days", "days", "key-size", "org", "permit"})
     if opts["positional"]:
         raise ValueError("init takes no positional arguments; use --cn / --org")
     if store.has_ca():
         raise ValueError(f"CA already exists under {store.root}")
+    crl_days = _parse_crl_days(opts["flags"]["crl-days"], "--crl-days") if "crl-days" in opts["flags"] else None
     cn = opts["flags"].get("cn", "Private CA")
     org = opts["flags"].get("org", DEFAULT_ORGANIZATION_NAME)
     days = _parse_days(opts["flags"].get("days", str(DEFAULT_CA_VALIDITY_DAYS)), default=DEFAULT_CA_VALIDITY_DAYS)
@@ -138,7 +140,7 @@ def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) 
         permitted_subtrees=opts["multi"].get("permit"),
     )
     store.write_ca(cert_pem, key_pem)
-    store.publish_crl()
+    store.publish_crl(validity_days=crl_days)
     print(theme.ok(f"CA created: {get_certificate_subject(cert_pem)}"))
     print(theme.dim(f"fingerprint {get_certificate_fingerprint(cert_pem)}"))
 
@@ -348,6 +350,7 @@ def _list_ca(store: CertificateStore, *, theme: Theme, as_json: bool) -> None:
                     "expires": get_certificate_expiry(ca_cert).isoformat(),
                     "cert_path": str(store.ca_cert_path),
                     "crl_path": str(store.crl_path),
+                    "crl_days": store.crl_validity_days,
                     "index_path": str(store.index_path),
                 },
                 sort_keys=True,
@@ -356,7 +359,7 @@ def _list_ca(store: CertificateStore, *, theme: Theme, as_json: bool) -> None:
         return
     _print_cert_summary(ca_cert, theme)
     print(theme.dim(f"cert {store.ca_cert_path}"))
-    print(theme.dim(f"crl  {store.crl_path}"))
+    print(theme.dim(f"crl  {store.crl_path} (valid {store.crl_validity_days} days per publish)"))
     print(theme.dim(f"index {store.index_path}"))
 
 
@@ -598,12 +601,13 @@ def _read_password_file(path: Path) -> str:
 
 
 def _cmd_crl(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
-    opts = _parse_flags(args, allowed=set())
+    opts = _parse_flags(args, allowed={"days"})
     if opts["positional"]:
         raise ValueError(f"crl takes no positional arguments, got {' '.join(opts['positional'])}")
+    days = _parse_crl_days(opts["flags"]["days"], "--days") if "days" in opts["flags"] else None
     store = _require_store(store)
-    store.publish_crl()
-    print(theme.ok(f"crl regenerated: {store.crl_path}"))
+    store.publish_crl(validity_days=days)
+    print(theme.ok(f"crl regenerated: {store.crl_path} (valid {store.crl_validity_days} days)"))
 
 
 def _print_cert_summary(
@@ -859,6 +863,17 @@ def _parse_days(raw: str, *, default: int) -> int:
     return days
 
 
+def _parse_crl_days(raw: str, flag: str) -> int:
+    """Parse a CRL lifetime in days, bounded to 1..``MAX_STORE_CRL_VALIDITY_DAYS``."""
+    try:
+        days = int(raw.strip())
+    except ValueError as exc:
+        raise ValueError(f"Expected a whole number of days for {flag}, got {raw!r}") from exc
+    if not 1 <= days <= MAX_STORE_CRL_VALIDITY_DAYS:
+        raise ValueError(f"Expected {flag} between 1 and {MAX_STORE_CRL_VALIDITY_DAYS}, got {days}")
+    return days
+
+
 def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
     """Parse ``--flag value`` / ``--flag`` and collect positionals.
 
@@ -898,7 +913,18 @@ def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
             else:
                 value = ""
                 i += 1
-            if not value and name in {"by", "ca", "crl", "kind", "out", "password-file", "permit", "san", "within"}:
+            if not value and name in {
+                "by",
+                "ca",
+                "crl",
+                "crl-days",
+                "kind",
+                "out",
+                "password-file",
+                "permit",
+                "san",
+                "within",
+            }:
                 raise ValueError(f"Expected a non-empty value for --{name}")
             if name in {"kind", "permit", "san"}:
                 multi.setdefault(name, []).append(value)

@@ -10,6 +10,7 @@ $TINY_PKI_STORE/
     ca.key        # CA private key (mode 0600, unencrypted PEM)
     crl.pem       # current CRL (rewritten on revoke / delete / crl)
     crlnumber     # last published CRL number (keeps it monotonic across clock steps)
+    crldays       # CRL lifetime in days for every publish (init --crl-days / crl --days; 30 if absent)
     index.json    # source of truth for issued certificates
     .lock         # flock target that serializes writers (empty, mode 0600)
   clients/{cn}-{serial}.{crt,key}
@@ -92,8 +93,8 @@ that points elsewhere is rejected.
 `kind`, `serial`, `fingerprint`, `expires`, `status`, `revoked_at`, absolute
 `cert_path` / `key_path` (empty for tombstones), and `store`. `list --json`
 prints a summary (`ca_cn`, counts, `store`); `list ca --json` prints the CA's
-`cn`, `fingerprint`, `expires`, and absolute `cert_path` / `crl_path` /
-`index_path`.
+`cn`, `fingerprint`, `expires`, absolute `cert_path` / `crl_path` /
+`index_path`, and `crl_days` (the stored CRL lifetime).
 
 ## Legacy flat layout
 
@@ -139,7 +140,8 @@ rows = check_store(store, within=None, include_revoked=False)  # check (store)
 | `issue_client(cn, ...)` / `issue_server(cn, sans, ...)` | `create` | Keyword arguments match `generate_client_certificate` / `generate_server_certificate`; `TinyPkiWarning`s propagate. A live certificate with the same CN is revoked and listed in the republished CRL. |
 | `revoke(identity)` | `revoke` | Same as `mark_revoked`. |
 | `delete(identity, force=False)` | `delete` | Same as `delete_certificate`. |
-| `publish_crl()` | `crl` | Signs the index's revoked set; returns the CRL PEM. |
+| `publish_crl(validity_days=None)` | `crl [--days N]` | Signs the index's revoked set for the stored lifetime; returns the CRL PEM. `validity_days` also updates the stored lifetime once the CRL is written. |
+| `set_crl_validity_days(days)` / `crl_validity_days` | `init --crl-days`, `crl --days` | Set or read the CRL lifetime (1–365 days, default 30) that every publish uses. |
 | `check_store(store, *, within, by, kinds, include_revoked)` | `check` | `(name, CertificateStatus)` rows with the same statuses and reasons as `check --json`. `index.json` is authoritative: a CRL missing a serial it records as revoked is `untrusted`. |
 
 The lower-level `add_certificate`, `mark_revoked` and `delete_certificate` also
