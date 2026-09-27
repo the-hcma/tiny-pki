@@ -3,9 +3,10 @@
 tiny-pki mints private CA, server, and client certificates and CRLs used for
 mTLS. A CA minted by this library gets installed device-wide on relying
 parties (phones, browsers, TLS servers); a bug here is a trust-anchor
-compromise for every consumer, not just this repo. **0.1.0 is not published
-to PyPI until [#34](https://github.com/the-hcma/tiny-pki/issues/34) — the
-pre-release security review — closes.**
+compromise for every consumer, not just this repo. Before 0.1.0 was published,
+two independent reviews covered the whole repository
+([#34](https://github.com/the-hcma/tiny-pki/issues/34)); their reports and the
+triage are in [`docs/security-review/`](docs/security-review/).
 
 ## Reporting a vulnerability
 
@@ -32,10 +33,6 @@ back-port branches.
 | Latest PyPI release | yes |
 | Anything older | no — upgrade to the latest release |
 
-Before the first PyPI release (tracked by
-[#11](https://github.com/the-hcma/tiny-pki/issues/11)), "supported" means the
-tip of `main`.
-
 ## Response targets by severity
 
 | Severity | Meaning here | Triage | Fix released |
@@ -56,9 +53,9 @@ A fix lands as a normal Conventional-Commit `fix:` PR through the usual
 - The CLI (`tiny_pki.cli.*`, the `tiny-pki` console script and REPL).
 - The filesystem store (`tiny_pki.store`) — layout, `index.json` handling,
   legacy-layout migration, file permissions.
-- The release pipeline (`.github/workflows/*`, `.github/ci/*`, and — once
-  [#11](https://github.com/the-hcma/tiny-pki/issues/11) lands — PyPI trusted
-  publishing).
+- The build and release process: `.github/workflows/*`, `.github/ci/*`, the
+  build hook (`hatch_build.py`, `scripts/embed_build_metadata`), and the PyPI
+  uploads, which the maintainer makes from a clean, tagged `main` checkout.
 
 ## What is out of scope
 
@@ -87,7 +84,7 @@ A fix lands as a normal Conventional-Commit `fix:` PR through the usual
 | Control | Where | Gate |
 |---------|-------|------|
 | Code review | required PR review from the code owner ([`.github/CODEOWNERS`](.github/CODEOWNERS): `* @thehcma`); `required_approving_review_count` is 0 on branch protection because the code owner *is* the approver on a solo-maintained repo, matching this org's usual pattern for single-maintainer repos | required by branch protection |
-| Pre-release security review | two independent model/agent stacks review the full repo before 0.1.0 ships ([#34](https://github.com/the-hcma/tiny-pki/issues/34)); raw reports + a merged triage table live under [`docs/security-review/`](docs/security-review/) | blocks [#11](https://github.com/the-hcma/tiny-pki/issues/11) until closed |
+| Pre-release security review | two independent model/agent stacks reviewed the full repo before 0.1.0 ([#34](https://github.com/the-hcma/tiny-pki/issues/34)); raw reports + a merged triage table live under [`docs/security-review/`](docs/security-review/) | completed; every finding fixed or triaged |
 | Static analysis | `ruff` + `pyright --strict` via [`.github/ci/python-static`](.github/ci/python-static) (`[tool.ruff]` / `[tool.pyright]` in [`pyproject.toml`](pyproject.toml)) | **required check `Python lint & format checks`** |
 | Tests | `pytest` (hermetic) via [`.github/ci/pytest-hermetic`](.github/ci/pytest-hermetic), plus a separate job pinned to the oldest supported Python + oldest allowed `cryptography` ([`.github/ci/pytest-cryptography-minimum`](.github/ci/pytest-cryptography-minimum)) | **required check `Pytest (hermetic)`**; the minimum-version job runs in CI but is not (yet) a required status check |
 | Packaging smoke test | builds the wheel/sdist, checks `py.typed` ships, verifies the plain install pulls in only `cryptography` (+ its native deps) and the CLI fails with an install hint without the `[cli]` extra ([`.github/ci/packaging`](.github/ci/packaging)) | runs in CI on every PR |

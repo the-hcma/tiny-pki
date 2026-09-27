@@ -5,56 +5,53 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/the-hcma/tiny-pki/blob/main/LICENSE)
 [![CI](https://github.com/the-hcma/tiny-pki/actions/workflows/ci.yml/badge.svg)](https://github.com/the-hcma/tiny-pki/actions/workflows/ci.yml)
 
-Small **private CA** toolkit for Python: issue CA / server / client certificates,
-generate CRLs, export PKCS#12 bundles, and inspect PEMs. Built on
-[`cryptography`](https://cryptography.io/) 50.0.1 or newer; CI runs the suite against both
-that minimum (on Python 3.12) and the latest release.
+A small **private certificate authority** for mutual TLS on home and internal
+networks: issue a CA and its client and server certificates, revoke them with a
+CRL, hand them to phones as PKCS#12 bundles, and watch for expiry. Built on
+[`cryptography`](https://cryptography.io/) 50.0.1 or newer.
 
-Two layers, pick one:
+It comes in two layers; use either:
 
-- **Library** (`import tiny_pki`) — bytes in / bytes out. No filesystem, no
-  Django, no global state. Your app owns persistence.
-- **CLI** (`tiny-pki`) — a REPL / one-shot tool backed by a filesystem store,
-  for operators who want a CA on disk (e.g. nginx mTLS).
+- **Library** (`import tiny_pki`): bytes in, bytes out. No filesystem, no global
+  state, no framework. Your application stores the PEMs.
+- **CLI** (`tiny-pki`): one-shot commands and a REPL over a CA kept in a
+  directory, for operators running nginx or Mosquitto with mTLS.
 
-Intended consumers:
+What it covers:
 
-- [my-tracks](https://github.com/the-hcma/my-tracks) — MQTT TLS client certs
-  (library; [my-tracks#1345](https://github.com/the-hcma/my-tracks/issues/1345))
-- [home-warden](https://github.com/the-hcma/home-warden) — mTLS client certs +
-  nginx `ssl_crl` (CLI store; [home-warden#49](https://github.com/the-hcma/home-warden/issues/49))
+- CA, client and server certificates with RSA (the default) or ECDSA P-256 keys,
+  mixed freely under one CA.
+- Name Constraints, so a stolen CA key cannot impersonate public sites.
+- CRLs with monotonic numbers, and a key-free `public/` directory to hand to a
+  sandboxed TLS server.
+- PKCS#12 bundles for phones and browsers, with a legacy mode for old keychains.
+- `check`, an expiry and revocation monitor with Nagios-style exit codes and
+  JSON output.
+- Rotation without downtime (`create client --keep-previous`), dry runs for
+  destructive commands, and a store that is safe under concurrent writers.
+- Tab completion for bash, zsh, fish and the REPL.
+
+Consumers: [my-tracks](https://github.com/the-hcma/my-tracks) (MQTT client
+certificates, library; [my-tracks#1345](https://github.com/the-hcma/my-tracks/issues/1345))
+and [home-warden](https://github.com/the-hcma/home-warden) (nginx mTLS, CLI store;
+[home-warden#49](https://github.com/the-hcma/home-warden/issues/49)).
 
 ## Install
 
-The library depends only on `cryptography`. The `tiny-pki` command-line tool (REPL and
-one-shot commands) also needs `prompt-toolkit`, which comes with the `cli` extra:
+The library depends only on `cryptography`. The command-line tool also needs
+`prompt-toolkit`, which comes with the `cli` extra:
 
 ```bash
 uv add tiny-pki                      # library, or: pip install tiny-pki
 pipx install 'tiny-pki[cli]'         # CLI, or: uv tool install 'tiny-pki[cli]'
 ```
 
-Without the extra, `tiny-pki` exits with a message telling you to install it.
+Without the extra, `tiny-pki` exits with a message saying how to install it.
 
-Until 0.1.0 is on PyPI ([#11](https://github.com/the-hcma/tiny-pki/issues/11)),
-install from Git:
+## Quick start: library
 
-```bash
-uv add git+https://github.com/the-hcma/tiny-pki
-pipx install 'tiny-pki[cli] @ git+https://github.com/the-hcma/tiny-pki'
-```
-
-For development in this repo:
-
-```bash
-uv sync --group dev
-uv run tiny-pki --version   # tiny-pki <version> (<commit>)
-uv run tiny-pki --help
-```
-
-## Quick start (library)
-
-Issue a CA, a client cert, a server cert, and a CRL — all as PEM bytes:
+Issue a CA, a client certificate, a server certificate and a CRL, all as PEM
+bytes:
 
 ```python
 from datetime import UTC, datetime
@@ -69,160 +66,87 @@ from tiny_pki import (
     get_certificate_serial_number,
 )
 
-# Keys default to RSA 3072 (leaves) / 4096 (CA); 2048 keeps this example fast.
-# Without permitted_subtrees the CA can sign any name, including public sites;
-# constrain every name type (DNS and IP) your devices use.
-ca_cert, ca_key = generate_ca_certificate("Home CA", key_size=2048, permitted_subtrees=["home", "192.168.0.0/16"])
+# Constrain every name type (DNS and IP) your devices use; without
+# permitted_subtrees the CA can sign any name, including public sites.
+ca_cert, ca_key = generate_ca_certificate("Home CA", key_type="ec-p256", permitted_subtrees=["home", "192.168.0.0/16"])
 
-client_cert, client_key = generate_client_certificate(ca_cert, ca_key, "alice", key_size=2048)
-server_cert, server_key = generate_server_certificate(
-    ca_cert, ca_key, "api.home", ["api.home", "192.168.1.10"], key_size=2048
-)
+client_cert, client_key = generate_client_certificate(ca_cert, ca_key, "alice", key_type="ec-p256")
+server_cert, server_key = generate_server_certificate(ca_cert, ca_key, "api.home", ["api.home"])
+print(get_certificate_fingerprint(client_cert))  # SHA-256, colon-separated hex
 
-# Revoke alice: the CRL lists (serial, revoked_at) pairs, signed by the CA.
+# Revoke alice: pass every revoked (serial, revoked_at) pair each time.
 serial = get_certificate_serial_number(client_cert)
 crl_pem = generate_crl(ca_cert, ca_key, [(serial, datetime.now(UTC))])
 
-# Password-protected bundle for phones / browsers.
+# A password-protected bundle for a phone or browser.
 p12 = generate_pkcs12(client_cert, client_key, ca_cert, "alice", b"change-me-to-a-long-random-password")
-
-print(get_certificate_fingerprint(client_cert))
 ```
 
-Every function returns bytes (or plain values); writing them to disk, a
-database, or nginx is up to you. See [`docs/api.md`](docs/api.md) for the full
-API, [`docs/security.md`](docs/security.md) for CA-key handling, and
-[`docs/defaults.md`](docs/defaults.md) for every default and the reason behind it.
-To report a vulnerability, see [`SECURITY.md`](SECURITY.md).
+Storing the results, and encrypting the CA key at rest, is up to your
+application; [docs/api.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/api.md) has the full API and
+[docs/security.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/security.md) the key-handling advice.
 
-## Quick start (CLI)
+## Quick start: CLI
 
-Store path is required for write operations (`--store` or `TINY_PKI_STORE`).
-Inside this repo's dev checkout, prefix commands with `uv run`.
+The CLI keeps one CA per directory, given with `--store` or `TINY_PKI_STORE`:
 
 ```bash
-tiny-pki --store ./stores/ca init --cn "Home CA" --permit home --permit 192.168.0.0/16
-tiny-pki --store ./stores/ca create client alice --days 730
-tiny-pki --store ./stores/ca create client phone --key-type ec-p256   # ECDSA P-256 instead of RSA
-tiny-pki --store ./stores/ca create server api.home --san api.home --san 192.168.1.10
-tiny-pki --store ./stores/ca export p12 alice   # prompts for the bundle password (or --password-file PATH)
-tiny-pki --store ./stores/ca revoke alice --dry-run   # preview; writes nothing
-tiny-pki --store ./stores/ca revoke alice   # regenerates stores/ca/public/crl.pem
-tiny-pki --store ./stores/ca list clients
-tiny-pki --store ./stores/ca show certs
-tiny-pki --store ./stores/ca check --within 30   # exit 0 ok, 1 expiring, 2 expired/revoked/untrusted, 3 error
+export TINY_PKI_STORE=./stores/home-ca
+tiny-pki init --cn "Home CA" --permit home --permit 192.168.0.0/16
+tiny-pki create server api.home --san api.home --san 192.168.1.10
+tiny-pki create client alice
+tiny-pki export p12 alice           # prompts for the bundle password
+tiny-pki list clients
+tiny-pki revoke alice --dry-run     # preview; writes nothing
+tiny-pki revoke alice               # republishes public/crl.pem
+tiny-pki check                      # exit 0 ok, 1 expiring, 2 expired/revoked/untrusted, 3 error
 ```
 
-Or drop into the REPL (Vim keys by default; `edit-mode emacs` to switch):
+Run `tiny-pki` with no command for the REPL, and `help COMMAND` for any
+command's flags. Point nginx's `ssl_client_certificate` at `public/ca.crt` and
+`ssl_crl` at `public/crl.pem`, reload it after each revoke, and republish the
+CRL (`tiny-pki crl`) on a timer: it is valid for 30 days by default.
 
-```bash
-tiny-pki --store ./stores/ca
-```
+## Documentation
 
-Point nginx `ssl_client_certificate` at `stores/ca/public/ca.crt` and `ssl_crl` at
-`stores/ca/public/crl.pem` for mTLS with revocation. `public/` holds no key, so it
-is the directory to grant or bind-mount into a sandboxed TLS server (see
-[`docs/store.md`](docs/store.md#public-for-tls-servers)). The CRL is valid for 30 days:
-re-run `tiny-pki --store ./stores/ca crl` (and reload nginx) before it expires.
-`init --crl-days N` or `crl --days N` (1–365) changes the lifetime the store uses
-for every later publish.
-
-Server certificates default to 90 days and client certificates to 397 days
-(capped at 200 / 825; `--allow-long-validity` overrides). Re-issue with `create`
-before they expire — see [`docs/defaults.md`](docs/defaults.md#lifetimes) for the rationale.
-
-Rotating a client certificate before it expires: `create client alice` revokes
-the old serial immediately, which cuts the device off until the new bundle is
-installed. For routine renewal use `create client alice --keep-previous`, export
-and install the new bundle, then `revoke 0x<old-serial>` (the `create` output,
-`list clients` and `check` all show the superseded serial). Reserve the plain
-re-issue, or `revoke alice`, for a lost device or a compromised key. While two
-certificates for `alice` are live, revoke by serial (`revoke 0x<serial>`, once
-per serial); `revoke alice` is refused until only one is left.
-
-Client and server names may not contain `,` `+` `=` `"` `<` `>` `;` or start with `#`: in the
-subject DN string nginx and Mosquitto match, `bob,CN=alice` would end in `,CN=alice`.
-`--allow-dn-special-chars` overrides.
-
-`check` lists the CA, the CRL, and every live leaf, soonest expiry first, and flags anything
-expired, expiring, revoked, or not signed by the CA. The window is `--within DAYS`, `--by
-YYYY-MM-DD` (end of that day, local time), or by default a third of each certificate's lifetime
-(capped at 30 days for leaves and 180 for the CA). Filter with `--kind ca|client|server|crl`
-(repeatable), add `--include-revoked`, print only problems with `--quiet`, or get machine-readable
-output with `--json`. Exit codes follow the Nagios convention, so it drops into cron or a
-monitoring agent unchanged.
-
-`check PATH...` checks files instead of the store: PEM or DER certificates, chain files (each
-certificate is checked), CRLs, PKCS#12 bundles (`--password-file PATH`), and directories
-(`*.pem`, `*.crt`, `*.cer`, `*.crl`, `*.p12`, `*.pfx`, one level deep; unreadable entries are
-skipped with a note). No store is needed. Add `--ca PATH` to also flag certificates and CRLs not
-issued by that CA. See [`docs/monitoring.md`](docs/monitoring.md) for the JSON schema and
-cron / systemd-timer recipes.
-
-### Store layout
-
-```text
-$TINY_PKI_STORE/
-  ca/ca.crt  ca/ca.key  ca/crl.pem  ca/index.json
-  public/ca.crt  public/crl.pem   # key-free copies for TLS servers
-  clients/{cn}-{serial}.{crt,key}
-  servers/{cn}-{serial}.{crt,key}
-  bundles/{cn}-{serial}.p12
-```
-
-List by category:
-
-```bash
-tiny-pki --store ./stores/ca list
-tiny-pki --store ./stores/ca list clients
-tiny-pki --store ./stores/ca list servers
-tiny-pki --store ./stores/ca list revoked
-tiny-pki --store ./stores/ca list certs --json
-```
-
-See [`docs/store.md`](docs/store.md) for the index format and legacy-layout
-migration.
-
-### Shell completion
-
-`tiny-pki completion <bash|zsh|fish>` prints a completion script. Install it to
-the per-user completion dir (idempotent; `--force` to overwrite, `--json`
-reports the path):
-
-```bash
-tiny-pki completion bash --install
-tiny-pki completion zsh --install    # then put its dir on $fpath before compinit
-tiny-pki completion fish --install
-```
-
-Or place it yourself — bash-completion v2 lazy-loads this path (no rc edit):
-
-```bash
-tiny-pki completion bash > ~/.local/share/bash-completion/completions/tiny-pki.bash
-tiny-pki completion fish > ~/.config/fish/completions/tiny-pki.fish
-```
-
-Open a new shell afterwards. The script completes commands, each command's flags,
-and flag values such as `--key-type rsa|ec-p256`; keep `tiny-pki` on `PATH`. The
-REPL completes the same way, and `help <command>` lists a command's flags.
+| Page | Contents |
+| --- | --- |
+| [docs/cli.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/cli.md) | Every command and flag, plus rotation, nginx and CRL-timer workflows |
+| [docs/api.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/api.md) | Library functions, constants, errors and warnings |
+| [docs/store.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/store.md) | Store layout, `public/`, locking, `index.json`, and the store API |
+| [docs/monitoring.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/monitoring.md) | `check` output, JSON schema, exit codes, cron and systemd recipes |
+| [docs/security.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/security.md) | CA key handling, name constraints, choosing a key type, CRL freshness |
+| [docs/defaults.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/defaults.md) | Every default and the reasoning behind it |
+| [SECURITY.md](https://github.com/the-hcma/tiny-pki/blob/main/SECURITY.md) | Reporting a vulnerability |
 
 ## What stays in your app
 
-tiny-pki deliberately does **not**:
+tiny-pki deliberately does not:
 
-- Persist anything for library callers — store PEMs in your DB / files.
-- Encrypt keys at rest on its own — the optional `tiny_pki.secrets` Fernet
-  helpers take the secret you pass (e.g. Django `SECRET_KEY`) and derive a
-  domain-separated key from it with HKDF; wiring and rotation are yours (see
-  [`docs/security.md`](docs/security.md) — a dedicated secret is still safer
-  than a shared one).
-- Reload nginx, Mosquitto, or any TLS server after a new CRL.
-- Schedule CRL renewal — run `tiny-pki crl` (or call `generate_crl`) on a timer.
-- Decide who gets a certificate — authn/authz for issuance is the app's job.
+- Persist anything for library callers; store the PEMs in your database or files.
+- Encrypt keys at rest by itself. The optional `tiny_pki.secrets` Fernet helpers
+  take a secret you supply; wiring and rotating it are yours (see
+  [docs/security.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/security.md)).
+- Reload nginx, Mosquitto or any other TLS server after a new CRL.
+- Schedule CRL renewal; run `tiny-pki crl` or `generate_crl` on a timer.
+- Decide who gets a certificate; authenticating issuance requests is the
+  application's job.
+
+## Development
+
+```bash
+uv sync --group dev
+uv run ruff check src tests && uv run ruff format --check src tests
+uv run pyright
+uv run pytest
+uv run tiny-pki --version   # tiny-pki <version> (<commit>)
+```
+
+Contribution rules (stacked PRs, commit style, review flow) are in
+[AGENTS.md](https://github.com/the-hcma/tiny-pki/blob/main/AGENTS.md).
 
 ## License
 
-MIT © 2026 Henrique Andrade ([GitHub's thehcma](https://github.com/thehcma)) — see [`LICENSE`](./LICENSE).
-
-Code extracted from my-tracks was relicensed MIT by the copyright holder for this
-shared package.
+MIT © 2026 Henrique Andrade ([GitHub's thehcma](https://github.com/thehcma)); see
+[LICENSE](https://github.com/the-hcma/tiny-pki/blob/main/LICENSE). Code extracted from my-tracks was relicensed MIT by the
+copyright holder for this shared package.

@@ -124,7 +124,7 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-Enable it with `systemctl enable --now tiny-pki-check.timer`. A non-zero exit marks the service as failed, so `systemctl --failed` or an `OnFailure=` unit can raise the alert.
+Enable it with `systemctl enable --now tiny-pki-check.timer`. A non-zero exit marks the service as failed, so `systemctl --failed` or an `OnFailure=` unit can raise the alert. A matching timer that republishes the CRL is in [cli.md](cli.md#renewing-the-crl-on-a-timer).
 
 ### Nagios, Icinga, and other agents
 
@@ -141,7 +141,7 @@ tiny-pki --store /srv/pki check --json | jq -r '.results[] | select(.status != "
 Check the certificates nginx serves, against the CA that issued them and its CRL:
 
 ```bash
-tiny-pki check /etc/nginx/certs --ca /srv/pki/ca/ca.crt --crl /srv/pki/ca/crl.pem --within 14
+tiny-pki check /etc/nginx/certs --ca /srv/pki/public/ca.crt --crl /srv/pki/public/crl.pem --within 14
 ```
 
 Expiry and revocation are separate questions: drop `--crl` and the same command
@@ -149,5 +149,5 @@ still exits 0 for a revoked certificate. Check the CRL nginx loads (`ssl_crl`)
 too, so an expired CRL is caught before nginx starts rejecting every client:
 
 ```bash
-tiny-pki check /srv/pki/ca/crl.pem --ca /srv/pki/ca/ca.crt
+tiny-pki check /srv/pki/public/crl.pem --ca /srv/pki/public/ca.crt
 ```

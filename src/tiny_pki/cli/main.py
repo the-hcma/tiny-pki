@@ -66,7 +66,11 @@ def main(argv: list[str] | None = None) -> None:
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tiny-pki",
-        description="Private CA toolkit: issue, show, revoke, delete certificates.",
+        description="Private CA for mTLS: issue, revoke and monitor certificates and CRLs.",
+        epilog=(
+            "commands: " + ", ".join(sorted(PKI_COMMANDS | {"completion"})) + ". "
+            "Run without a command for the REPL; `tiny-pki help COMMAND` shows a command's flags."
+        ),
     )
     parser.add_argument(
         "--version",
