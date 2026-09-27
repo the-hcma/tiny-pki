@@ -45,9 +45,9 @@ These are already in place; they are listed for reference and for rebuilding the
   | Workflow name | `release-please.yml` |
   | Environment | `pypi` |
 
-## Bootstrapping 0.1.0
+## Versioning
 
-`release-please-config.json` pins `release-as: 0.1.0` and a `bootstrap-sha` so the first release PR is 0.1.0 and does not replay the whole history into the changelog. The bootstrap commit sits just before the last `feat:` commits, because Release Please skips a release that has no user-facing commits. Remove both after 0.1.0 is tagged, or every later release PR stays at 0.1.0.
+Release Please picks the next version from the commits since the last `vX.Y.Z` tag: before 1.0, `feat:` bumps the minor version and `fix:` the patch version. To force a version, add `release-as` to the package in `release-please-config.json` for that one release PR, and remove it once the tag exists.
 
 ## Manual publish (fallback)
 
