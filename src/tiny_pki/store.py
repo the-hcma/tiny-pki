@@ -2,14 +2,16 @@
 
 Writes require an explicit store directory (``--store`` / ``TINY_PKI_STORE``).
 Private keys, bundles, and ``index.json`` are written with mode ``0o600``;
-directories the store creates are ``0o700``. Leaf and bundle writes refuse a
-symlink at any path component, and index paths must point at a leaf file under
-``clients/`` or ``servers/``.
+directories the store creates are ``0o700``, except the key-free ``public/``
+(``0o755``), which mirrors ``ca.crt`` and ``crl.pem`` for TLS servers. Leaf and
+bundle writes refuse a symlink at any path component, and index paths must point
+at a leaf file under ``clients/`` or ``servers/``.
 
 Layout (one CA per store root)::
 
     $STORE/
       ca/ca.crt  ca/ca.key  ca/crl.pem  ca/crlnumber  ca/crldays  ca/index.json
+      public/ca.crt  public/crl.pem
       clients/{cn}-{serial}.{crt,key}
       servers/{cn}-{serial}.{crt,key}
       bundles/{cn}-{serial}.p12
@@ -146,6 +148,11 @@ class CertificateStore:
     @property
     def lock_path(self) -> Path:
         return self.root / "ca" / ".lock"
+
+    @property
+    def public_dir(self) -> Path:
+        """Key-free directory holding ``ca.crt`` and ``crl.pem`` for relying parties."""
+        return self.root / "public"
 
     @property
     def servers_dir(self) -> Path:
@@ -293,6 +300,7 @@ class CertificateStore:
         self._make_subdirs()
         for directory in (self.root, self.ca_dir, self.clients_dir, self.servers_dir, self.bundles_dir):
             _drop_world_write(directory)
+        self._sync_public_dir()
         if not self.index_path.exists():
             if self.ca_cert_path.is_file() and self.ca_key_path.is_file():
                 raise FileNotFoundError(f"Expected index.json under {self.ca_dir} (CA present but index missing)")
@@ -616,6 +624,7 @@ class CertificateStore:
             raise ValueError(f"CA already exists under {self.root}; pass force=True to replace")
         _write_plain(self._validated_write_path("ca/ca.crt"), cert_pem)
         _write_secret(self._validated_write_path("ca/ca.key"), key_pem)
+        _write_plain(self._validated_write_path("public/ca.crt"), cert_pem)
 
     @_locked
     def write_crl(self, crl_pem: bytes) -> None:
@@ -629,6 +638,7 @@ class CertificateStore:
         if number is not None and number > self._recorded_crl_number():
             _write_plain(self._validated_write_path("ca/crlnumber"), f"{number}\n".encode())
         _write_plain(self._validated_write_path("ca/crl.pem"), crl_pem)
+        _write_plain(self._validated_write_path("public/crl.pem"), crl_pem)
 
     def next_crl_number(self, *, now: datetime | None = None) -> int:
         """Return a CRL number above every one this store has published.
@@ -757,6 +767,7 @@ class CertificateStore:
         legacy_certs = self.root / "certs"
         if legacy_certs.is_dir() and not any(legacy_certs.iterdir()):
             legacy_certs.rmdir()
+        self._sync_public_dir()
 
     def _path_under_root(self, relative: str) -> Path:
         """Resolve an index-relative path and require it stay under the store root."""
@@ -823,6 +834,27 @@ class CertificateStore:
     def _make_subdirs(self) -> None:
         for directory in (self.ca_dir, self.clients_dir, self.servers_dir, self.bundles_dir):
             directory.mkdir(mode=_DIR_MODE, exist_ok=True)
+        public = self._validated_write_path("public")
+        if not public.exists():
+            public.mkdir(mode=_PUBLIC_DIR_MODE)
+        elif not public.is_dir():
+            raise ValueError(f"Expected {public} to be a directory for the public CA certificate and CRL")
+        _set_owned_mode(public, _PUBLIC_DIR_MODE)
+
+    def _sync_public_dir(self) -> None:
+        """Bring ``public/`` up to date with ``ca/`` (fills it in for stores created before it existed)."""
+        for name in ("ca.crt", "crl.pem"):
+            source = self._validated_write_path(f"ca/{name}")
+            if not source.is_file():
+                continue
+            data = source.read_bytes()
+            target = self._validated_write_path(f"public/{name}")
+            if (
+                not target.is_file()
+                or stat.S_IMODE(target.lstat().st_mode) != _PUBLIC_FILE_MODE
+                or target.read_bytes() != data
+            ):
+                _write_plain(target, data)
 
     def _write_index(self, entries: list[IssuedCertificate]) -> None:
         self.ca_dir.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
@@ -952,6 +984,8 @@ def _index_references_certs_paths(index_path: Path) -> bool:
 
 
 _DIR_MODE = 0o700
+_PUBLIC_DIR_MODE = 0o755
+_PUBLIC_FILE_MODE = 0o644
 # Per-thread lock depth keyed by lock path; flock is per open file, so a nested
 # lock() in the same thread must reuse the held lock instead of opening another.
 _HELD_LOCKS = threading.local()
@@ -991,6 +1025,16 @@ def _drop_world_write(directory: Path) -> None:
     getuid = getattr(os, "getuid", None)
     if info.st_mode & 0o002 and getuid is not None and info.st_uid == getuid():
         directory.chmod(stat.S_IMODE(info.st_mode) & ~0o002)
+
+
+def _set_owned_mode(directory: Path, mode: int) -> None:
+    """Set ``directory`` to exactly ``mode`` when we own it, so a TLS server can read it but not write it."""
+    info = directory.lstat()
+    if stat.S_ISLNK(info.st_mode) or stat.S_IMODE(info.st_mode) == mode:
+        return
+    getuid = getattr(os, "getuid", None)
+    if getuid is None or info.st_uid == getuid():
+        directory.chmod(mode)
 
 
 def _safe_filename(common_name: str) -> str:

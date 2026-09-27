@@ -106,7 +106,7 @@ tiny-pki --store ./stores/ca create client alice --days 730
 tiny-pki --store ./stores/ca create server api.home --san api.home --san 192.168.1.10
 tiny-pki --store ./stores/ca export p12 alice   # prompts for the bundle password (or --password-file PATH)
 tiny-pki --store ./stores/ca revoke alice --dry-run   # preview; writes nothing
-tiny-pki --store ./stores/ca revoke alice   # regenerates stores/ca/ca/crl.pem
+tiny-pki --store ./stores/ca revoke alice   # regenerates stores/ca/public/crl.pem
 tiny-pki --store ./stores/ca list clients
 tiny-pki --store ./stores/ca show certs
 tiny-pki --store ./stores/ca check --within 30   # exit 0 ok, 1 expiring, 2 expired/revoked/untrusted, 3 error
@@ -118,8 +118,10 @@ Or drop into the REPL (Vim keys by default; `edit-mode emacs` to switch):
 tiny-pki --store ./stores/ca
 ```
 
-Point nginx `ssl_client_certificate` at `stores/ca/ca/ca.crt` and `ssl_crl` at
-`stores/ca/ca/crl.pem` for mTLS with revocation. The CRL is valid for 30 days:
+Point nginx `ssl_client_certificate` at `stores/ca/public/ca.crt` and `ssl_crl` at
+`stores/ca/public/crl.pem` for mTLS with revocation. `public/` holds no key, so it
+is the directory to grant or bind-mount into a sandboxed TLS server (see
+[`docs/store.md`](docs/store.md#public-for-tls-servers)). The CRL is valid for 30 days:
 re-run `tiny-pki --store ./stores/ca crl` (and reload nginx) before it expires.
 `init --crl-days N` or `crl --days N` (1–365) changes the lifetime the store uses
 for every later publish.
@@ -152,6 +154,7 @@ cron / systemd-timer recipes.
 ```text
 $TINY_PKI_STORE/
   ca/ca.crt  ca/ca.key  ca/crl.pem  ca/index.json
+  public/ca.crt  public/crl.pem   # key-free copies for TLS servers
   clients/{cn}-{serial}.{crt,key}
   servers/{cn}-{serial}.{crt,key}
   bundles/{cn}-{serial}.p12
