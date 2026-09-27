@@ -11,6 +11,7 @@ $TINY_PKI_STORE/
     crl.pem       # current CRL (rewritten on revoke / delete / crl)
     crlnumber     # last published CRL number (keeps it monotonic across clock steps)
     index.json    # source of truth for issued certificates
+    .lock         # flock target that serializes writers (empty, mode 0600)
   clients/{cn}-{serial}.{crt,key}
   servers/{cn}-{serial}.{crt,key}
   bundles/{cn}-{serial}.p12
@@ -30,6 +31,30 @@ renamed into place, so a crash or a concurrent reader (an nginx reload) never
 sees a truncated key, CRL, or index.
 File names include the hex serial so re-issuing a CN never overwrites the old
 material.
+
+## Concurrency
+
+Every operation that modifies the store (`init`, `create`, `revoke`, `delete`,
+`crl`, `export p12` without `--out`, and the matching `CertificateStore`
+methods) holds an exclusive `flock` on `ca/.lock` for the whole
+read-modify-write of `index.json`, `crlnumber` and `crl.pem`. A CRL publish
+reads the revoked set, picks the CRL number and writes `crl.pem` under one
+lock, so a systemd timer running `crl` while an operator runs `revoke` can
+never leave a newest CRL that is missing a serial `index.json` records as
+revoked, and two concurrent `create` / `revoke` / `delete` runs never lose an
+index update. A second writer waits for the first to finish.
+
+Reads (`list`, `show`, `check`, `inspect`, `export pem`) take no lock; atomic
+renames mean they see either the old or the new file. The one exception is the
+first read of a [legacy flat layout](#legacy-flat-layout), which migrates the
+store in place and so takes the lock like any other write. On platforms without
+`fcntl.flock` (Windows), operations that modify the store, including that
+migration, raise `TinyPkiError` instead of running unlocked.
+
+Library callers that compose their own read-then-write sequence, such as
+signing a CRL from `revoked_entries()` and `next_crl_number()` before
+`write_crl()`, should hold `with store.lock():` around the whole sequence. The
+lock is re-entrant within a thread.
 
 ## `index.json`
 

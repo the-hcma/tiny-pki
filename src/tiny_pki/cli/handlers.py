@@ -1005,9 +1005,10 @@ def _publish_crl(
     revoked: list[tuple[int, datetime]] | None = None,
 ) -> None:
     """Regenerate ``ca/crl.pem`` (default: the index's revoked set) with a CRL number above every earlier one."""
-    entries = store.revoked_entries() if revoked is None else revoked
-    crl = generate_crl(ca_cert, ca_key, entries, crl_number=store.next_crl_number())
-    store.write_crl(crl)
+    with store.lock():
+        entries = store.revoked_entries() if revoked is None else revoked
+        crl = generate_crl(ca_cert, ca_key, entries, crl_number=store.next_crl_number())
+        store.write_crl(crl)
 
 
 def _write_secret_file(path: Path, data: str | bytes) -> None:
