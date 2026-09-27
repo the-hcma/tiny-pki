@@ -129,10 +129,14 @@ def generate_client_certificate(
     validity_days: int = DEFAULT_CLIENT_VALIDITY_DAYS,
     key_size: int = DEFAULT_LEAF_KEY_SIZE,
     allow_long_validity: bool = False,
+    allow_dn_special_chars: bool = False,
 ) -> tuple[bytes, bytes]:
     """Generate a client (CLIENT_AUTH) certificate signed by the given CA.
 
     ``common_name`` is the identity embedded in the CN (person, device, or service).
+    A CN containing an RFC 4514 special character (``,`` ``+`` ``=`` ``"`` ``<``
+    ``>`` ``;`` or a leading ``#``) is refused unless ``allow_dn_special_chars=True``,
+    because it can make the subject DN string look like another identity.
 
     When ``organization_name`` is omitted, the CA certificate's O is reused, falling
     back to ``DEFAULT_ORGANIZATION_NAME`` if the CA has no O attribute.
@@ -143,6 +147,8 @@ def generate_client_certificate(
             certificate would outlive the CA.
     """
     common_name = normalize_subject_attribute(common_name, "common_name", max_length=MAX_COMMON_NAME_LENGTH)
+    if not allow_dn_special_chars:
+        _require_plain_common_name(common_name)
     _require_key_size(key_size)
     _require_validity_days(validity_days)
 
@@ -211,6 +217,7 @@ def generate_server_certificate(
     key_size: int = DEFAULT_LEAF_KEY_SIZE,
     allow_long_validity: bool = False,
     include_common_name_in_sans: bool = True,
+    allow_dn_special_chars: bool = False,
 ) -> tuple[bytes, bytes]:
     """Generate a server (SERVER_AUTH) certificate signed by the given CA.
 
@@ -218,7 +225,8 @@ def generate_server_certificate(
     normalized (see :func:`tiny_pki.names.normalize_san_entries`). Clients ignore
     the CN, so when ``common_name`` is itself a valid host/IP that is missing from
     ``san_entries`` it is appended (with a ``TinyPkiWarning``) unless
-    ``include_common_name_in_sans=False``.
+    ``include_common_name_in_sans=False``. RFC 4514 special characters in the CN
+    are refused unless ``allow_dn_special_chars=True``, as for client certificates.
 
     Raises:
         TinyPkiError: If a name or SAN entry is invalid, ``validity_days`` exceeds
@@ -231,6 +239,8 @@ def generate_server_certificate(
             are emitted only after the certificate is issued, never for a rejection.
     """
     common_name = normalize_subject_attribute(common_name, "common_name", max_length=MAX_COMMON_NAME_LENGTH)
+    if not allow_dn_special_chars:
+        _require_plain_common_name(common_name)
     _require_key_size(key_size)
     _require_validity_days(validity_days)
     sans = normalize_san_entries(san_entries)
@@ -337,6 +347,8 @@ def max_leaf_validity_days(
 
 
 _CN_DNS_ID = re.compile(r"^[a-z0-9_.-]+$")
+# RFC 4514 section 2.4 characters that must be escaped in a DN string (backslash is refused elsewhere).
+_DN_SPECIAL_CHARS = frozenset(',+="<>;')
 
 
 def _address_in(
@@ -394,6 +406,28 @@ def _emit_warnings(messages: list[str]) -> None:
     """Emit held-back ``TinyPkiWarning``s, attributed to the public API's caller."""
     for message in messages:
         warnings.warn(message, TinyPkiWarning, stacklevel=3)
+
+
+def _require_plain_common_name(common_name: str) -> None:
+    """Refuse RFC 4514 special characters that make a DN string look like another identity.
+
+    Relying parties such as nginx (``$ssl_client_s_dn``) and Mosquitto match the
+    escaped subject string, so ``bob,CN=alice`` ends in ``,CN=alice`` there.
+    ``normalize_subject_attribute`` already strips leading and trailing spaces
+    and rejects ``\\``.
+    """
+    if common_name.startswith("#"):
+        raise TinyPkiError(
+            f"Expected common_name without a leading '#', got {common_name!r}"
+            " (pass allow_dn_special_chars=True, CLI: --allow-dn-special-chars, to allow it)"
+        )
+    for ch in common_name:
+        if ch in _DN_SPECIAL_CHARS:
+            raise TinyPkiError(
+                f"Expected common_name without the DN special character {ch!r}, got {common_name!r}:"
+                " it can make the subject DN look like another identity"
+                " (pass allow_dn_special_chars=True, CLI: --allow-dn-special-chars, to allow it)"
+            )
 
 
 def _is_ip_literal(text: str) -> bool:

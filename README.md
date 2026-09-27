@@ -125,6 +125,10 @@ Server certificates default to 90 days and client certificates to 397 days
 (capped at 200 / 825; `--allow-long-validity` overrides). Re-issue with `create`
 before they expire — see [`docs/defaults.md`](docs/defaults.md#lifetimes) for the rationale.
 
+Client and server names may not contain `,` `+` `=` `"` `<` `>` `;` or start with `#`: in the
+subject DN string nginx and Mosquitto match, `bob,CN=alice` would end in `,CN=alice`.
+`--allow-dn-special-chars` overrides.
+
 `check` lists the CA, the CRL, and every live leaf, soonest expiry first, and flags anything
 expired, expiring, revoked, or not signed by the CA. The window is `--within DAYS`, `--by
 YYYY-MM-DD` (end of that day, local time), or by default a third of each certificate's lifetime

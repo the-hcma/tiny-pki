@@ -13,8 +13,8 @@ The library needs only `cryptography` (`pip install tiny-pki`); none of the modu
 | Function | Returns |
 | --- | --- |
 | `generate_ca_certificate(common_name="Private CA", *, organization_name="tiny-pki", validity_days=3650, key_size=4096, permitted_subtrees=None)` | `(ca_cert_pem, ca_key_pem)` — self-signed, `BasicConstraints(ca=True, path_length=0)` (signs leaves only), `keyCertSign` + `cRLSign`; optional critical Name Constraints |
-| `generate_client_certificate(ca_cert_pem, ca_key_pem, common_name, *, organization_name=None, validity_days=397, key_size=3072, allow_long_validity=False)` | `(cert_pem, key_pem)` — `CLIENT_AUTH` EKU; CN is the identity |
-| `generate_server_certificate(ca_cert_pem, ca_key_pem, common_name, san_entries, *, organization_name=None, validity_days=90, key_size=3072, allow_long_validity=False, include_common_name_in_sans=True)` | `(cert_pem, key_pem)` — `SERVER_AUTH` EKU; `san_entries` are DNS names or IP literals (at least one) |
+| `generate_client_certificate(ca_cert_pem, ca_key_pem, common_name, *, organization_name=None, validity_days=397, key_size=3072, allow_long_validity=False, allow_dn_special_chars=False)` | `(cert_pem, key_pem)` — `CLIENT_AUTH` EKU; CN is the identity |
+| `generate_server_certificate(ca_cert_pem, ca_key_pem, common_name, san_entries, *, organization_name=None, validity_days=90, key_size=3072, allow_long_validity=False, include_common_name_in_sans=True, allow_dn_special_chars=False)` | `(cert_pem, key_pem)` — `SERVER_AUTH` EKU; `san_entries` are DNS names or IP literals (at least one) |
 | `max_leaf_validity_days(ca_cert_pem, *, kind="server", allow_long_validity=False)` | `int` — the largest `validity_days` issuing a `kind` leaf under this CA accepts right now (CA `notAfter` with the `CLOCK_SKEW_BACKDATE` backdate, and the per-kind cap unless `allow_long_validity`); `0` once the CA cannot sign any leaf. Use it to clamp or grey out `VALIDITY_PRESETS` in UIs |
 
 `organization_name=None` on leaves inherits the CA's `O`. `key_size` must be one of
@@ -77,6 +77,24 @@ Name rules (`tiny_pki.names`):
   exactly as given (after stripping).
 - Client certificates carry no SAN: nginx (`$ssl_client_s_dn`) and Mosquitto
   (`use_identity_as_username`) identify clients by CN.
+- Client and server CNs may not contain the RFC 4514 special characters `,` `+`
+  `=` `"` `<` `>` `;` or start with `#`. In an escaped DN string such as
+  nginx's `$ssl_client_s_dn`, the CN `bob,CN=alice` appears as
+  `O=tiny-pki,CN=bob\,CN=alice`, which ends in `,CN=alice`. Pass
+  `allow_dn_special_chars=True` (CLI: `--allow-dn-special-chars`) if a
+  deployment really needs them.
+- Match an nginx CN allowlist against the whole DN string, not a suffix:
+
+  ```nginx
+  map $ssl_client_s_dn $mtls_client {
+      default                 "";
+      "O=tiny-pki,CN=alice"   alice;
+      "O=tiny-pki,CN=bob"     bob;
+  }
+  ```
+
+  A regex such as `~,CN=alice$` also matches `CN=bob\,CN=alice` if a CA ever
+  issued one with the opt-out.
 
 | Function (`tiny_pki.names`) | Returns |
 | --- | --- |
