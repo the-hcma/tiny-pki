@@ -54,8 +54,9 @@ A fix lands as a normal Conventional-Commit `fix:` PR through the usual
 - The filesystem store (`tiny_pki.store`) — layout, `index.json` handling,
   legacy-layout migration, file permissions.
 - The build and release process: `.github/workflows/*`, `.github/ci/*`, the
-  build hook (`hatch_build.py`, `scripts/embed_build_metadata`), and the PyPI
-  uploads, which the maintainer makes from a clean, tagged `main` checkout.
+  build hook (`hatch_build.py`, `scripts/embed_build_metadata`), and PyPI
+  publishing through Release Please and trusted publishing
+  ([`RELEASING.md`](RELEASING.md)).
 
 ## What is out of scope
 
@@ -94,9 +95,9 @@ A fix lands as a normal Conventional-Commit `fix:` PR through the usual
 | Dependency alerts | GitHub **Dependabot security updates** enabled | alerts + auto-fix PRs |
 | Dependency updates | Dependabot ([`.github/dependabot.yml`](.github/dependabot.yml), weekly, 10-day cooldown, pip + github-actions ecosystems) + auto-merge ([`.github/workflows/dependabot-auto-merge.yml`](.github/workflows/dependabot-auto-merge.yml)) once required checks pass | opens PRs; auto-merges |
 | Vulnerability intake | **Private vulnerability reporting** enabled — [report an advisory](https://github.com/the-hcma/tiny-pki/security/advisories/new) | private channel, no public disclosure |
-| Actions supply chain | the `uv` binary that `setup-uv` installs is pinned to an exact release (`version: "0.12.19"`) in every workflow and bumped deliberately, not `latest`; every `uses:` in every workflow is SHA-pinned with a `# vX.Y.Z` comment, and the repo has **`sha_pinning_required`** turned on (any unpinned action fails); default workflow token is **read-only** and **cannot approve pull requests**. Actions are restricted to an explicit allowlist (`allowed_actions: selected`): GitHub-owned actions (`actions/checkout`, via `github_owned_allowed`) plus `astral-sh/setup-uv@*` and `nick-fields/retry@*`; verified-creator actions are **not** implicitly allowed. A workflow change that introduces a new third-party action fails with "action not allowed" until the allowlist is updated (in the same PR or a preceding one) | allowlist and SHA pinning enforced repo-wide; token scope enforced by GitHub |
+| Actions supply chain | the `uv` binary that `setup-uv` installs is pinned to an exact release (`version: "0.12.19"`) in every workflow and bumped deliberately, not `latest`; every `uses:` in every workflow is SHA-pinned with a `# vX.Y.Z` comment, and the repo has **`sha_pinning_required`** turned on (any unpinned action fails); default workflow token is **read-only** and **cannot create or approve pull requests** (Release Please's release PR is opened locally by the maintainer; see [`RELEASING.md`](RELEASING.md)). Actions are restricted to an explicit allowlist (`allowed_actions: selected`): GitHub-owned actions (`actions/checkout`, via `github_owned_allowed`) plus `astral-sh/setup-uv@*`, `nick-fields/retry@*`, `googleapis/release-please-action@*` and `pypa/gh-action-pypi-publish@*`; verified-creator actions are **not** implicitly allowed. A workflow change that introduces a new third-party action fails with "action not allowed" until the allowlist is updated (in the same PR or a preceding one) | allowlist and SHA pinning enforced repo-wide; token scope enforced by GitHub |
 | Branch protection | required status checks (`Python lint & format checks`, `Pytest (hermetic)`, strict/up-to-date), code-owner review required, force-pushes and branch deletion disallowed on `main` | blocks merge |
-| PyPI trusted publishing | not yet wired — tracked by [#11](https://github.com/the-hcma/tiny-pki/issues/11); when it lands, this table gets a row for the publish environment and its approval gate | n/a until #11 |
+| PyPI trusted publishing | [`.github/workflows/release-please.yml`](.github/workflows/release-please.yml) publishes through OIDC from the `pypi` environment; no PyPI token is stored anywhere. The environment only deploys from `main` and needs the maintainer's approval, and the PyPI trusted publisher is bound to this repo, that workflow file and that environment ([`RELEASING.md`](RELEASING.md)) | maintainer approves each publish |
 
 ## Governance tooling
 
