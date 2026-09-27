@@ -13,7 +13,7 @@ from hamcrest import assert_that, empty, equal_to, is_
 from tiny_pki.cli.commands import COMMAND_FLAGS, COMMANDS
 
 _ROOT = Path(__file__).resolve().parents[1]
-_DOCS = sorted([_ROOT / "README.md", _ROOT / "SECURITY.md", *(_ROOT / "docs").glob("*.md")])
+_DOCS = sorted([_ROOT / "README.md", _ROOT / "SECURITY.md", _ROOT / "CHANGELOG.md", *(_ROOT / "docs").glob("*.md")])
 _GITHUB_BLOB = "https://github.com/the-hcma/tiny-pki/blob/main/"
 _LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 _FENCE = re.compile(r"^```.*?^```", re.MULTILINE | re.DOTALL)
