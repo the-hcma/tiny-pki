@@ -205,7 +205,10 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
     if not args:
         raise ValueError("Expected create client|server <name>")
     kind = args[0]
-    opts = _parse_flags(args[1:], allowed={"allow-long-validity", "days", "key-size", "no-cn-san", "org", "san", "yes"})
+    opts = _parse_flags(
+        args[1:],
+        allowed={"allow-dn-special-chars", "allow-long-validity", "days", "key-size", "no-cn-san", "org", "san", "yes"},
+    )
     positional = opts["positional"]
     if kind not in {"client", "server"}:
         raise ValueError(f"Expected create client|server, got {kind!r}")
@@ -224,6 +227,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
     key_size = int(opts["flags"].get("key-size", str(DEFAULT_LEAF_KEY_SIZE)))
     org = opts["flags"].get("org")
     allow_long_validity = "allow-long-validity" in opts["flags"]
+    allow_dn_special_chars = "allow-dn-special-chars" in opts["flags"]
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", TinyPkiWarning)
@@ -236,6 +240,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
                 validity_days=days,
                 key_size=key_size,
                 allow_long_validity=allow_long_validity,
+                allow_dn_special_chars=allow_dn_special_chars,
             )
         else:
             sans = [s for s in opts["multi"].get("san", []) if s] or [name]
@@ -249,6 +254,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
                 key_size=key_size,
                 allow_long_validity=allow_long_validity,
                 include_common_name_in_sans=_confirm_cn_in_sans(name, sans, opts["flags"]),
+                allow_dn_special_chars=allow_dn_special_chars,
             )
     for warning in caught:
         print(theme.warn(f"warning: {warning.message}"), file=sys.stderr)
@@ -908,7 +914,17 @@ def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
     flags: dict[str, str] = {}
     multi: dict[str, list[str]] = {}
     valueless = frozenset(
-        {"allow-long-validity", "force", "include-revoked", "json", "legacy", "no-cn-san", "quiet", "yes"}
+        {
+            "allow-dn-special-chars",
+            "allow-long-validity",
+            "force",
+            "include-revoked",
+            "json",
+            "legacy",
+            "no-cn-san",
+            "quiet",
+            "yes",
+        }
     )
     i = 0
     while i < len(args):

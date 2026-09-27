@@ -36,7 +36,7 @@ ECDSA P-256 keys are tracked separately in
 
 | Setting | Default | Rationale |
 | --- | --- | --- |
-| Subject CN / O | trimmed; control, format, private-use, and separator characters rejected; 64 characters max | RFC 5280 upper bounds. Invisible characters let two different names look identical. |
+| Subject CN / O | trimmed; control, format, private-use, and separator characters rejected; 64 characters max. Leaf CNs also refuse the RFC 4514 special characters `, + = " < > ;` and a leading `#` (`allow_dn_special_chars=True` / `--allow-dn-special-chars` overrides) | RFC 5280 upper bounds. Invisible characters let two different names look identical, and DN special characters let a CN look like another identity in the `$ssl_client_s_dn` string relying parties match. |
 | DNS SANs | lowercased, trailing dot stripped, IDNs converted to punycode, LDH labels, wildcard only as the whole leftmost label with at least two labels after it | RFC 1035/5890/6125 and the Baseline Requirements. Matching is done on the A-label form. |
 | IP SANs | canonicalized; scope IDs and CIDR ranges rejected | An IP SAN names exactly one address. |
 | URL SANs | rejected | A pasted `https://…` never matches a hostname. |
