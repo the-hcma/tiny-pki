@@ -280,6 +280,7 @@ def _cmd_show(args: list[str], *, store: CertificateStore | None, theme: Theme) 
     if target in {"ca", "certs", "clients", "servers", "revoked"}:
         _cmd_list([target, *args[1:]], store=store, theme=theme)
         return
+    _require_one_positional(_parse_flags(args, allowed=set()), "show ca|certs|crl|<identity>")
     if target == "crl":
         crl = store.read_crl()
         if crl is None:
@@ -300,8 +301,11 @@ def _cmd_show(args: list[str], *, store: CertificateStore | None, theme: Theme) 
 
 def _cmd_list(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     store = _require_store(store)
-    as_json = "--json" in args
-    positional = [a for a in args if a != "--json"]
+    opts = _parse_flags(args, allowed={"json"})
+    as_json = "json" in opts["flags"]
+    positional = opts["positional"]
+    if len(positional) > 1:
+        raise ValueError(f"Unexpected extra arguments: {' '.join(positional[1:])}")
     target = positional[0] if positional else ""
 
     if target in {"", "summary"}:
@@ -433,9 +437,7 @@ def _print_entry_list(
 
 
 def _cmd_inspect(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
-    if not args:
-        raise ValueError("Expected inspect <identity|path>")
-    target = args[0]
+    target = _require_one_positional(_parse_flags(args, allowed=set()), "inspect <identity|path>")
     path = Path(target)
     if path.is_file():
         _print_cert_summary(path.read_bytes(), theme)
@@ -452,12 +454,20 @@ def _cmd_inspect(args: list[str], *, store: CertificateStore | None, theme: Them
 
 def _cmd_revoke(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     store = _require_store(store)
-    if not args:
-        raise ValueError("Expected revoke <identity|serial>")
-    target = store.get_certificate(args[0])
+    opts = _parse_flags(args, allowed={"dry-run"})
+    identity = _require_one_positional(opts, "revoke <identity|serial> [--dry-run]")
+    target = store.get_certificate(identity)
     if target is None:
-        raise KeyError(f"Expected issued certificate matching {args[0]!r}")
-    entry = store.mark_revoked(args[0])
+        raise KeyError(f"Expected issued certificate matching {identity!r}")
+    if "dry-run" in opts["flags"]:
+        if target.revoked_at is None:
+            print(theme.warn(f"would revoke {target.kind} {target.common_name} (serial {target.serial_number})"))
+            print(theme.dim(f"would update {store.crl_path}"))
+        else:
+            print(theme.dim(f"{target.common_name} is already revoked (at {target.revoked_at}); nothing to do"))
+        print(theme.dim("dry run: nothing written"))
+        return
+    entry = store.mark_revoked(identity)
     ca_cert, ca_key = store.read_ca()
     _publish_crl(store, ca_cert, ca_key)
     print(theme.warn(f"revoked {entry.common_name}"))
@@ -466,12 +476,23 @@ def _cmd_revoke(args: list[str], *, store: CertificateStore | None, theme: Theme
 
 def _cmd_delete(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     store = _require_store(store)
-    opts = _parse_flags(args, allowed={"force"})
-    if not opts["positional"]:
-        raise ValueError("Expected delete <identity|serial> [--force]")
-    force = "--force" in args or "force" in opts["flags"]
-    before = store.get_certificate(opts["positional"][0])
-    entry = store.delete_certificate(opts["positional"][0], force=force)
+    opts = _parse_flags(args, allowed={"dry-run", "force"})
+    identity = _require_one_positional(opts, "delete <identity|serial> [--force] [--dry-run]")
+    force = "force" in opts["flags"]
+    before = store.get_certificate(identity)
+    if "dry-run" in opts["flags"]:
+        if before is None:
+            raise KeyError(f"Expected issued certificate matching {identity!r}")
+        if before.revoked_at is None and not force:
+            raise ValueError(
+                f"Certificate {before.common_name!r} is still active; revoke it first, "
+                "or pass --force to revoke and delete it in one step"
+            )
+        verb = "revoke and delete" if before.revoked_at is None else "delete"
+        print(theme.warn(f"would {verb} {before.kind} {before.common_name} (serial {before.serial_number})"))
+        print(theme.dim("dry run: nothing written"))
+        return
+    entry = store.delete_certificate(identity, force=force)
     # Keep crl.pem aligned with tombstones / remaining revoked serials.
     if store.has_ca():
         ca_cert, ca_key = store.read_ca()
@@ -488,9 +509,7 @@ def _cmd_export(args: list[str], *, store: CertificateStore | None, theme: Theme
         raise ValueError("Expected export pem|p12 <identity> [--out PATH] [--legacy] [--password-file PATH]")
     fmt = args[0]
     opts = _parse_flags(args[1:], allowed={"legacy", "out", "password-file"})
-    if not opts["positional"]:
-        raise ValueError("Expected identity after export format")
-    identity = opts["positional"][0]
+    identity = _require_one_positional(opts, f"export {fmt} <identity>")
     entry = store.get_certificate(identity)
     if entry is None:
         raise KeyError(f"Expected issued certificate matching {identity!r}")
@@ -594,7 +613,9 @@ def _read_password_file(path: Path) -> str:
 
 
 def _cmd_crl(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
-    del args
+    opts = _parse_flags(args, allowed=set())
+    if opts["positional"]:
+        raise ValueError(f"crl takes no positional arguments, got {' '.join(opts['positional'])}")
     store = _require_store(store)
     ca_cert, ca_key = store.read_ca()
     _publish_crl(store, ca_cert, ca_key)
@@ -917,6 +938,7 @@ def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
         {
             "allow-dn-special-chars",
             "allow-long-validity",
+            "dry-run",
             "force",
             "include-revoked",
             "json",
@@ -952,6 +974,16 @@ def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
         positional.append(token)
         i += 1
     return {"positional": positional, "flags": flags, "multi": multi}
+
+
+def _require_one_positional(opts: _ParsedFlags, usage: str) -> str:
+    """Return the single positional argument, refusing none or extras before anything is written."""
+    positional = opts["positional"]
+    if not positional:
+        raise ValueError(f"Expected {usage}")
+    if len(positional) > 1:
+        raise ValueError(f"Unexpected extra arguments: {' '.join(positional[1:])} (expected {usage})")
+    return positional[0]
 
 
 def _safe_export_name(common_name: str) -> str:

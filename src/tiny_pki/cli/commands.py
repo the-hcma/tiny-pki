@@ -11,7 +11,7 @@ COMMAND_HELP: tuple[tuple[str, str], ...] = (
     ("completion", "Print or install bash/zsh/fish tab-completion scripts."),
     ("create", "Issue a certificate: create client|server <name> [options]."),
     ("crl", "Regenerate the CRL from revoked entries."),
-    ("delete", "Remove a revoked certificate's files; --force revokes an active one first."),
+    ("delete", "Remove a revoked certificate's files; --force revokes an active one first; --dry-run previews."),
     ("edit-mode", "Switch Emacs vs Vim keys: edit-mode emacs | vim."),
     ("exit", "Leave the REPL."),
     ("export", "Export pem|p12 for an identity."),
@@ -21,7 +21,7 @@ COMMAND_HELP: tuple[tuple[str, str], ...] = (
     ("list", "List ca|clients|servers|revoked|certs (optional --json)."),
     ("quit", "Leave the REPL (same as exit)."),
     ("renew-crl", "Alias for crl."),
-    ("revoke", "Revoke an identity and regenerate the CRL."),
+    ("revoke", "Revoke an identity and regenerate the CRL; --dry-run previews."),
     ("show", "Show ca|certs|crl|<identity> (aliases list categories)."),
 )
 
