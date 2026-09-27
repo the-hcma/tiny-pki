@@ -42,6 +42,7 @@ from tiny_pki import (
 )
 from tiny_pki._fsutil import write_file_atomic
 from tiny_pki.check import CertificateStatus, Status, check_certificate, check_crl, worst_status
+from tiny_pki.cli.commands import COMMAND_FLAGS
 from tiny_pki.cli.theme import Theme
 from tiny_pki.names import common_name_as_san, normalize_san_entries
 from tiny_pki.store import CHECK_KINDS, CertificateStore, CheckKind, IssuedCertificate, check_store
@@ -123,7 +124,7 @@ def _require_store(store: CertificateStore | None) -> CertificateStore:
 
 def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     store = _require_store(store)
-    opts = _parse_flags(args, allowed={"cn", "crl-days", "days", "key-size", "key-type", "org", "permit"})
+    opts = _parse_flags(args, command="init")
     if opts["positional"]:
         raise ValueError("init takes no positional arguments; use --cn / --org")
     if store.has_ca():
@@ -153,9 +154,7 @@ def _cmd_check(args: list[str], *, store: CertificateStore | None, theme: Theme)
     Exit status follows the monitoring-plugin convention: 0 all OK, 1 something
     expiring, 2 something expired / not yet valid / revoked / untrusted.
     """
-    opts = _parse_flags(
-        args, allowed={"by", "ca", "crl", "include-revoked", "json", "kind", "password-file", "quiet", "within"}
-    )
+    opts = _parse_flags(args, command="check")
     flags = opts["flags"]
     within = _parse_within(flags["within"]) if "within" in flags else None
     by = _parse_by(flags["by"]) if "by" in flags else None
@@ -212,21 +211,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
     if not args:
         raise ValueError("Expected create client|server <name>")
     kind = args[0]
-    opts = _parse_flags(
-        args[1:],
-        allowed={
-            "allow-dn-special-chars",
-            "allow-long-validity",
-            "days",
-            "keep-previous",
-            "key-size",
-            "key-type",
-            "no-cn-san",
-            "org",
-            "san",
-            "yes",
-        },
-    )
+    opts = _parse_flags(args[1:], command="create")
     positional = opts["positional"]
     if kind not in {"client", "server"}:
         raise ValueError(f"Expected create client|server, got {kind!r}")
@@ -293,7 +278,7 @@ def _cmd_show(args: list[str], *, store: CertificateStore | None, theme: Theme) 
     if target in {"ca", "certs", "clients", "servers", "revoked"}:
         _cmd_list([target, *args[1:]], store=store, theme=theme)
         return
-    _require_one_positional(_parse_flags(args, allowed=set()), "show ca|certs|crl|<identity>")
+    _require_one_positional(_parse_flags(args, command="show"), "show ca|certs|crl|<identity>")
     if target == "crl":
         crl = store.read_crl()
         if crl is None:
@@ -314,7 +299,7 @@ def _cmd_show(args: list[str], *, store: CertificateStore | None, theme: Theme) 
 
 def _cmd_list(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     store = _require_store(store)
-    opts = _parse_flags(args, allowed={"json"})
+    opts = _parse_flags(args, command="list")
     as_json = "json" in opts["flags"]
     positional = opts["positional"]
     if len(positional) > 1:
@@ -457,7 +442,7 @@ def _print_entry_list(
 
 
 def _cmd_inspect(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
-    target = _require_one_positional(_parse_flags(args, allowed=set()), "inspect <identity|path>")
+    target = _require_one_positional(_parse_flags(args, command="inspect"), "inspect <identity|path>")
     path = Path(target)
     if path.is_file():
         _print_cert_summary(path.read_bytes(), theme)
@@ -474,7 +459,7 @@ def _cmd_inspect(args: list[str], *, store: CertificateStore | None, theme: Them
 
 def _cmd_revoke(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     store = _require_store(store)
-    opts = _parse_flags(args, allowed={"dry-run"})
+    opts = _parse_flags(args, command="revoke")
     identity = _require_one_positional(opts, "revoke <identity|serial> [--dry-run]")
     target = store.get_certificate(identity, require_unique=True)
     if target is None:
@@ -497,7 +482,7 @@ def _cmd_revoke(args: list[str], *, store: CertificateStore | None, theme: Theme
 
 def _cmd_delete(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     store = _require_store(store)
-    opts = _parse_flags(args, allowed={"dry-run", "force"})
+    opts = _parse_flags(args, command="delete")
     identity = _require_one_positional(opts, "delete <identity|serial> [--force] [--dry-run]")
     force = "force" in opts["flags"]
     before = store.get_certificate(identity, require_unique=True)
@@ -525,7 +510,7 @@ def _cmd_export(args: list[str], *, store: CertificateStore | None, theme: Theme
     if len(args) < 2:
         raise ValueError("Expected export pem|p12 <identity> [--out PATH] [--legacy] [--password-file PATH]")
     fmt = args[0]
-    opts = _parse_flags(args[1:], allowed={"legacy", "out", "password-file"})
+    opts = _parse_flags(args[1:], command="export")
     identity = _require_one_positional(opts, f"export {fmt} <identity>")
     entry = store.get_certificate(identity)
     if entry is None:
@@ -630,7 +615,7 @@ def _read_password_file(path: Path) -> str:
 
 
 def _cmd_crl(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
-    opts = _parse_flags(args, allowed={"days"})
+    opts = _parse_flags(args, command="crl")
     if opts["positional"]:
         raise ValueError(f"crl takes no positional arguments, got {' '.join(opts['positional'])}")
     days = _parse_crl_days(opts["flags"]["days"], "--days") if "days" in opts["flags"] else None
@@ -918,38 +903,25 @@ def _parse_key_options(flags: dict[str, str]) -> tuple[KeyType, int | None]:
         raise ValueError(f"Expected a whole number for --key-size, got {flags['key-size']!r}") from exc
 
 
-def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
-    """Parse ``--flag value`` / ``--flag`` and collect positionals.
+def _parse_flags(args: list[str], *, command: str) -> _ParsedFlags:
+    """Parse ``--flag value`` / ``--flag`` against ``COMMAND_FLAGS[command]`` and collect positionals.
 
-    Repeated ``--san`` / ``--permit`` accumulate in ``multi``. Value-less flags (``--force``)
-    never consume the following positional token.
+    Repeatable flags (``--san``, ``--permit``, ``--kind``) accumulate in ``multi``. Switches
+    (``--force``) never consume the following positional token.
     """
+    specs = {flag.name: flag for flag in COMMAND_FLAGS[command]}
     positional: list[str] = []
     flags: dict[str, str] = {}
     multi: dict[str, list[str]] = {}
-    valueless = frozenset(
-        {
-            "allow-dn-special-chars",
-            "allow-long-validity",
-            "dry-run",
-            "force",
-            "keep-previous",
-            "include-revoked",
-            "json",
-            "legacy",
-            "no-cn-san",
-            "quiet",
-            "yes",
-        }
-    )
     i = 0
     while i < len(args):
         token = args[i]
         if token.startswith("--"):
             name = token[2:]
-            if name not in allowed:
+            spec = specs.get(name)
+            if spec is None:
                 raise ValueError(f"Unknown flag --{name}")
-            if name in valueless:
+            if spec.value is None:
                 value = ""
                 i += 1
             elif i + 1 < len(args) and not args[i + 1].startswith("--"):
@@ -958,20 +930,9 @@ def _parse_flags(args: list[str], *, allowed: set[str]) -> _ParsedFlags:
             else:
                 value = ""
                 i += 1
-            if not value and name in {
-                "by",
-                "ca",
-                "crl",
-                "crl-days",
-                "kind",
-                "out",
-                "password-file",
-                "permit",
-                "san",
-                "within",
-            }:
+            if not value and spec.value is not None and not spec.allow_empty:
                 raise ValueError(f"Expected a non-empty value for --{name}")
-            if name in {"kind", "permit", "san"}:
+            if spec.repeatable:
                 multi.setdefault(name, []).append(value)
             else:
                 flags[name] = value

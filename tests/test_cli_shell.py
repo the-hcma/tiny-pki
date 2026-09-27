@@ -55,7 +55,11 @@ def test_parse_completion_buffer() -> None:
     assert_that(parse_completion_buffer("show\t"), equal_to(ArgCtx(command="show", partial="")))
     assert_that(
         parse_completion_buffer("create client al"),
-        equal_to(ArgCtx(command="create", partial="al")),
+        equal_to(ArgCtx(command="create", partial="al", previous=("client",))),
+    )
+    assert_that(
+        parse_completion_buffer("create client alice --key-type "),
+        equal_to(ArgCtx(command="create", partial="", previous=("client", "alice", "--key-type"))),
     )
 
 
