@@ -13,6 +13,9 @@ $TINY_PKI_STORE/
     crldays       # CRL lifetime in days for every publish (init --crl-days / crl --days; 30 if absent)
     index.json    # source of truth for issued certificates
     .lock         # flock target that serializes writers (empty, mode 0600)
+  public/         # key-free copies for TLS servers (0755; files 0644)
+    ca.crt
+    crl.pem
   clients/{cn}-{serial}.{crt,key}
   servers/{cn}-{serial}.{crt,key}
   bundles/{cn}-{serial}.p12
@@ -20,18 +23,57 @@ $TINY_PKI_STORE/
 
 Private keys, PKCS#12 bundles, and `index.json` are created with mode `0600`
 from the first byte. Directories the store creates are `0700`, whatever the
-umask. Existing store directories you own lose their world-write bit when the
-store is opened. Group write is kept, since a group-shared store is a deliberate
-choice, and read access is left alone, so a TLS server that reads `ca/crl.pem`
-or `ca/ca.crt` as another user keeps working. If a new store
-must be readable by such a user (nginx workers do not need it; the master reads
-`ssl_*` files as root), grant access to those files deliberately. Leaf and bundle
+umask, except `public/` (below). Existing store directories you own lose their
+world-write bit when the store is opened. Group write is kept, since a
+group-shared store is a deliberate choice, and read access is left alone. Leaf and bundle
 writes, and leaf reads such as `export`, refuse a symlink at any path component.
 Every write goes to a temp file in the same directory, is `fsync`ed, and is
 renamed into place, so a crash or a concurrent reader (an nginx reload) never
 sees a truncated key, CRL, or index.
 File names include the hex serial so re-issuing a CN never overwrites the old
 material.
+
+## `public/` for TLS servers
+
+A relying party needs only the CA certificate and the current CRL, but `ca/`
+also holds `ca.key`. The store therefore mirrors `ca.crt` and `crl.pem` into a
+separate, key-free `public/` directory (mode `0755`, files `0644`) on every
+write that changes them, by atomic rename within that directory. Every write
+also resets an existing `public/` you own to those modes, so a restrictive or
+world-writable one is corrected; a non-directory `public` is refused. `ca/ca.crt`
+and `ca/crl.pem` remain for compatibility. A store created before `public/`
+existed gets it on its next write (for example `tiny-pki crl`); a legacy flat
+layout gets it when it is migrated.
+
+Point TLS servers at `public/`, and grant or bind-mount the **directory**, not
+the individual files. A single-file bind mount keeps pointing at the old inode
+after the atomic rename, so the server would keep reading a stale CRL;
+a directory mount sees each new file.
+
+```nginx
+ssl_client_certificate /srv/pki/home-ca/public/ca.crt;
+ssl_verify_client      on;
+ssl_crl                /srv/pki/home-ca/public/crl.pem;
+```
+
+For nginx (or Mosquitto) running entirely as an unprivileged user in a systemd
+sandbox, expose only `public/`:
+
+```ini
+[Service]
+User=home-warden-nginx
+ProtectHome=tmpfs
+BindReadOnlyPaths=/srv/pki/home-ca/public:/etc/nginx/pki
+```
+
+and use `/etc/nginx/pki/ca.crt` / `/etc/nginx/pki/crl.pem` in the config. The
+TLS server never sees `ca/`. Reload it after each CRL publish (nginx reads
+`ssl_crl` at startup and reload). Without a sandbox, give the server's user
+search permission on the store root only (`chmod o+x` or a shared group). The
+store creates every other directory `0700`, so that exposes `public/` and
+nothing else. The store never re-tightens a directory you widened yourself: if
+you previously granted access to `ca/` so a server could read `ca/crl.pem`,
+set it back with `chmod 700 ca` once the server reads `public/` instead.
 
 ## Concurrency
 
@@ -75,7 +117,7 @@ Lifecycle:
 
 - **create** — appends an entry. Re-issuing a live CN auto-revokes the previous
   serial (it stays in the CRL).
-- **revoke** — sets `revoked_at` and regenerates `ca/crl.pem`.
+- **revoke** — sets `revoked_at` and regenerates `ca/crl.pem` and `public/crl.pem`.
 - **delete** — only after revoke, or with `--force`, which revokes an active
   certificate first. The entry becomes a *tombstone*: files removed, paths
   cleared, serial kept so the CRL still lists it.
