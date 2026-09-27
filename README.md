@@ -130,6 +130,13 @@ Server certificates default to 90 days and client certificates to 397 days
 (capped at 200 / 825; `--allow-long-validity` overrides). Re-issue with `create`
 before they expire — see [`docs/defaults.md`](docs/defaults.md#lifetimes) for the rationale.
 
+Rotating a client certificate before it expires: `create client alice` revokes
+the old serial immediately, which cuts the device off until the new bundle is
+installed. For routine renewal use `create client alice --keep-previous`, export
+and install the new bundle, then `revoke 0x<old-serial>` (the `create` output,
+`list clients` and `check` all show the superseded serial). Reserve the plain
+re-issue, or `revoke alice`, for a lost device or a compromised key.
+
 Client and server names may not contain `,` `+` `=` `"` `<` `>` `;` or start with `#`: in the
 subject DN string nginx and Mosquitto match, `bob,CN=alice` would end in `,CN=alice`.
 `--allow-dn-special-chars` overrides.

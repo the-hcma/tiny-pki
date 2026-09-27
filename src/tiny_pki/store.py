@@ -169,12 +169,17 @@ class CertificateStore:
         key_pem: bytes,
         not_valid_after: datetime,
         fingerprint: str,
+        keep_previous: bool = False,
     ) -> IssuedCertificate:
         """Write cert/key PEMs and append an index entry.
 
         Revoked tombstones for the same common name are retained for CRL generation.
         Re-issuing under an existing live CN auto-revokes the superseded serial, and
         ``ca/crl.pem`` is republished (when the store has a CA) so it lists it.
+        ``keep_previous=True`` leaves earlier live certificates of the same kind
+        for the CN live (routine rotation); the CN then resolves to the new one,
+        and the older serials are :meth:`superseded_serials` until revoked by
+        serial. A live certificate of the other kind is still revoked.
         """
         self.ensure_layout()
         if kind not in ("client", "server"):
@@ -216,6 +221,9 @@ class CertificateStore:
             ):
                 if existing.serial_number == serial_hex:
                     continue
+                if keep_previous and existing.kind == kind:
+                    entries.append(existing)
+                    continue
                 if existing.cert_path:
                     unlink_paths.append(existing.cert_path)
                 if existing.key_path:
@@ -250,9 +258,10 @@ class CertificateStore:
         is republished (when the store has a CA) so it still lists it.
 
         The index is rewritten before unlinking files so a mid-delete failure
-        cannot leave the index pointing at missing paths.
+        cannot leave the index pointing at missing paths. A common name shared
+        by two live certificates is refused; pass the serial instead.
         """
-        entry = self.get_certificate(identity)
+        entry = self.get_certificate(identity, require_unique=True)
         if entry is None:
             raise KeyError(f"Expected issued certificate matching {identity!r}")
         if entry.revoked_at is None and not force:
@@ -306,14 +315,16 @@ class CertificateStore:
                 raise FileNotFoundError(f"Expected index.json under {self.ca_dir} (CA present but index missing)")
             self._write_index([])
 
-    def get_certificate(self, identity: str) -> IssuedCertificate | None:
+    def get_certificate(self, identity: str, *, require_unique: bool = False) -> IssuedCertificate | None:
         """Lookup by common name or hex serial (case-insensitive; ``0x`` optional).
 
         A needle that is one certificate's serial (with or without ``0x``) and a
         different certificate's common name is refused as ambiguous, so a CN
         crafted to look like a serial cannot redirect the lookup. When several
-        entries match a common name, a live (non-revoked) entry wins so re-issue
-        after revoke keeps resolving the current certificate.
+        entries match a common name, the newest live (non-revoked) entry wins, so
+        re-issue (including ``keep_previous`` rotation) resolves to the current
+        certificate. With ``require_unique=True`` a common name shared by two live
+        certificates raises ``ValueError`` instead, as revoke and delete need.
         """
         needle = identity.strip()
         if not needle:
@@ -337,9 +348,15 @@ class CertificateStore:
         candidates = by_serial or by_name
         if not candidates:
             return None
-        for entry in candidates:
-            if entry.revoked_at is None:
-                return entry
+        live = [entry for entry in candidates if entry.revoked_at is None]
+        if require_unique and not by_serial and len(live) > 1:
+            serials = ", ".join(f"0x{entry.serial_number}" for entry in live)
+            raise ValueError(
+                f"Expected {needle!r} to identify one certificate, but {len(live)} live certificates share "
+                f"that common name ({serials}); pass the serial of the one you mean"
+            )
+        if live:
+            return live[-1]
         return candidates[0]
 
     def has_ca(self) -> bool:
@@ -422,8 +439,9 @@ class CertificateStore:
         Idempotent: an already-revoked entry keeps its original ``revoked_at``.
         Identity resolution matches :meth:`get_certificate` (strip / ``0x`` serial).
         ``ca/crl.pem`` is republished (when the store has a CA) so it lists the serial.
+        A common name shared by two live certificates is refused; pass the serial instead.
         """
-        target = self.get_certificate(identity)
+        target = self.get_certificate(identity, require_unique=True)
         if target is None:
             raise KeyError(f"Expected issued certificate matching {identity!r}")
         when = (revoked_at or datetime.now(UTC)).astimezone(UTC)
@@ -502,11 +520,13 @@ class CertificateStore:
         key_size: int = DEFAULT_LEAF_KEY_SIZE,
         allow_long_validity: bool = False,
         allow_dn_special_chars: bool = False,
+        keep_previous: bool = False,
     ) -> IssuedCertificate:
         """Issue and record a client certificate, as ``tiny-pki create client``.
 
         Arguments match :func:`tiny_pki.generate_client_certificate`. A live
-        certificate with the same CN is revoked and ``ca/crl.pem`` republished.
+        certificate with the same CN is revoked and ``ca/crl.pem`` republished,
+        unless ``keep_previous=True`` (see :meth:`add_certificate`).
         """
         ca_cert, ca_key = self.read_ca()
         cert_pem, key_pem = generate_client_certificate(
@@ -519,7 +539,7 @@ class CertificateStore:
             allow_long_validity=allow_long_validity,
             allow_dn_special_chars=allow_dn_special_chars,
         )
-        return self._record(common_name, "client", cert_pem, key_pem)
+        return self._record(common_name, "client", cert_pem, key_pem, keep_previous=keep_previous)
 
     def issue_server(
         self,
@@ -579,6 +599,22 @@ class CertificateStore:
         if not entry.key_path:
             raise FileNotFoundError(f"Expected on-disk key for {entry.common_name!r}")
         return self._validated_write_path(entry.key_path).read_bytes()
+
+    def superseded_serials(self) -> dict[str, str]:
+        """Map each live serial that a newer live certificate of the same CN and kind replaces to that newer serial.
+
+        Only ``keep_previous`` rotation leaves such pairs; revoke the old serial
+        once the device has the new certificate.
+        """
+        newest: dict[tuple[str, CertKind], str] = {}
+        live = self.list_certificates(status="active")
+        for entry in live:
+            newest[entry.common_name.casefold(), entry.kind] = entry.serial_number
+        return {
+            entry.serial_number: newest[entry.common_name.casefold(), entry.kind]
+            for entry in live
+            if newest[entry.common_name.casefold(), entry.kind] != entry.serial_number
+        }
 
     def revoked_entries(self) -> list[tuple[int, datetime]]:
         """Return ``(serial_int, revoked_at)`` for CRL generation (includes tombstones)."""
@@ -656,7 +692,9 @@ class CertificateStore:
             raise ValueError(f"Expected a CRL number below 2**159 in {self.ca_dir}, but {last} was already published")
         return number
 
-    def _record(self, common_name: str, kind: CertKind, cert_pem: bytes, key_pem: bytes) -> IssuedCertificate:
+    def _record(
+        self, common_name: str, kind: CertKind, cert_pem: bytes, key_pem: bytes, *, keep_previous: bool = False
+    ) -> IssuedCertificate:
         return self.add_certificate(
             common_name=common_name,
             kind=kind,
@@ -665,6 +703,7 @@ class CertificateStore:
             key_pem=key_pem,
             not_valid_after=get_certificate_expiry(cert_pem),
             fingerprint=get_certificate_fingerprint(cert_pem),
+            keep_previous=keep_previous,
         )
 
     def _republish_crl(self) -> None:
@@ -878,7 +917,9 @@ def check_store(
     ``index.json`` is authoritative: a CRL missing a serial it records as revoked
     is ``untrusted`` (reported even when ``kinds`` leaves out ``"crl"``), and a leaf
     it records as revoked is ``revoked`` even if the CRL omits it. Revoked leaves
-    are listed only with ``include_revoked=True``.
+    are listed only with ``include_revoked=True``. A live leaf that a newer live
+    certificate for the same CN replaces is named ``"<cn> (superseded, 0x<serial>)"``
+    with a reason naming the newer serial.
 
     Returns:
         ``(name, status)`` rows: ``"ca"``, ``"crl"``, then each leaf by common name.
@@ -916,6 +957,7 @@ def check_store(
                 )
         if "crl" in kinds or crl_result.status is Status.UNTRUSTED:
             rows.append(("crl", crl_result))
+    superseded = store.superseded_serials()
     for entry in store.list_certificates(status="all" if include_revoked else "active"):
         if entry.kind not in kinds:
             continue
@@ -923,7 +965,18 @@ def check_store(
         result = check_certificate(cert_pem, within=within, by=by, ca_cert_pem=ca_cert, crl_pem=trusted_crl)
         if entry.revoked_at is not None and result.status is not Status.REVOKED:
             result = _escalate(result, Status.REVOKED, f"revoked in index.json on {entry.revoked_at}")
-        rows.append((entry.common_name, result))
+        name = entry.common_name
+        newer = superseded.get(entry.serial_number)
+        if newer is not None:
+            name = f"{entry.common_name} (superseded, 0x{entry.serial_number})"
+            result = replace(
+                result,
+                reasons=(
+                    *result.reasons,
+                    f"superseded by serial {newer}; revoke 0x{entry.serial_number} once the device has the new one",
+                ),
+            )
+        rows.append((name, result))
     return rows
 
 
