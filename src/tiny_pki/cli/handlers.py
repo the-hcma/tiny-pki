@@ -351,6 +351,7 @@ def _list_ca(store: CertificateStore, *, theme: Theme, as_json: bool) -> None:
                     "cert_path": str(store.ca_cert_path),
                     "crl_path": str(store.crl_path),
                     "crl_days": store.crl_validity_days,
+                    "public_dir": str(store.public_dir),
                     "index_path": str(store.index_path),
                 },
                 sort_keys=True,
@@ -361,6 +362,7 @@ def _list_ca(store: CertificateStore, *, theme: Theme, as_json: bool) -> None:
     print(theme.dim(f"cert {store.ca_cert_path}"))
     print(theme.dim(f"crl  {store.crl_path} (valid {store.crl_validity_days} days per publish)"))
     print(theme.dim(f"index {store.index_path}"))
+    print(theme.dim(f"public {store.public_dir} (ca.crt + crl.pem for TLS servers; no key)"))
 
 
 def _list_summary(store: CertificateStore, *, theme: Theme, as_json: bool) -> None:
