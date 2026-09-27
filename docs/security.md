@@ -2,106 +2,45 @@
 
 ## The CA private key is the whole trust boundary
 
-Anyone holding `ca.key` can mint certificates your servers will accept. Treat it
-like a root password:
+Anyone holding `ca.key` can mint certificates your servers will accept. Treat it like a root password:
 
-- **Library callers:** never store the CA key PEM in plaintext. Encrypt it at rest
-  (e.g. `tiny_pki.secrets.encrypt_private_key(key_pem, settings.SECRET_KEY)`) and
-  decrypt only in the process that signs. The issuing functions require an
-  **unencrypted** PEM in memory and reject passphrase-encrypted keys.
-- **CLI store:** `ca/ca.key` is written unencrypted with mode `0600`. Keep the
-  store on a disk only the operator account can read, back it up somewhere
-  equally protected, and never commit it (this repo's `.gitignore` excludes
-  store directories — keep it that way in consumer repos too).
-- Rotating the Fernet secret: `reencrypt_private_key(token, old, new)` for every
-  stored key, then switch the secret. Losing the secret means losing the keys.
-- Reusing an app-wide secret: the Fernet key is derived with HKDF and a fixed
-  `tiny-pki:fernet-key:v1` label, so it is independent of the session, CSRF,
-  or other keys your framework derives from the same `SECRET_KEY`. That
-  separation does **not** help if the secret itself leaks: the label is
-  public, and anyone with the secret can derive the key and decrypt every
-  stored private key. A dedicated random secret limits the blast radius of an
-  unrelated leak; a shared one does not.
-- Tokens written before HKDF used a plain `sha256(secret)` key. Move each one
-  with `reencrypt_private_key(token, secret, secret, old_info=None)` (or pass
-  a new secret to rotate at the same time); the default `decrypt_private_key`
-  rejects them with `InvalidToken`.
+- **Library callers:** never store the CA key PEM in plaintext. Encrypt it at rest (e.g. `tiny_pki.secrets.encrypt_private_key(key_pem, settings.SECRET_KEY)`) and decrypt only in the process that signs. The issuing functions require an **unencrypted** PEM in memory and reject passphrase-encrypted keys.
+- **CLI store:** `ca/ca.key` is written unencrypted with mode `0600`. Keep the store on a disk only the operator account can read, back it up somewhere equally protected, and never commit it (this repo's `.gitignore` excludes store directories — keep it that way in consumer repos too).
+- Rotating the Fernet secret: `reencrypt_private_key(token, old, new)` for every stored key, then switch the secret. Losing the secret means losing the keys.
+- Reusing an app-wide secret: the Fernet key is derived with HKDF and a fixed `tiny-pki:fernet-key:v1` label, so it is independent of the session, CSRF, or other keys your framework derives from the same `SECRET_KEY`. That separation does **not** help if the secret itself leaks: the label is public, and anyone with the secret can derive the key and decrypt every stored private key. A dedicated random secret limits the blast radius of an unrelated leak; a shared one does not.
+- Tokens written before HKDF used a plain `sha256(secret)` key. Move each one with `reencrypt_private_key(token, secret, secret, old_info=None)` (or pass a new secret to rotate at the same time); the default `decrypt_private_key` rejects them with `InvalidToken`.
 
 ## Limit what the CA can vouch for
 
-Installing the CA on a phone or laptop makes it trusted for **every** hostname.
-Two defaults narrow that:
+Installing the CA on a phone or laptop makes it trusted for **every** hostname. Two defaults narrow that:
 
 - The CA carries `path_length=0`, so it can't mint subordinate CAs.
-- Pass `permitted_subtrees` (CLI: `init --permit home --permit 192.168.0.0/16`)
-  to add critical Name Constraints. Constraints are fixed when the CA is
-  created; changing them means a new CA.
-- Relying parties only enforce the name types you list. With `--permit home`
-  alone, a stolen CA key can still sign an IP-address certificate that devices
-  accept; with only an IP range, it can sign `google.com`. tiny-pki refuses to
-  issue such certificates itself, but an attacker holding the key is not using
-  tiny-pki, so constrain **both** DNS and IP if you want a stolen key to be
-  unable to impersonate public sites.
-- Name constraints only cover DNS names and IP addresses. They do not limit
-  client identities, which are usually just a CN such as `alice`: a stolen CA
-  key constrained with `--permit home` can still sign a client certificate for
-  any single-label CN like `alice` or `admin`. OpenSSL checks a dotted CN
-  (`alice.home`) against the DNS constraints, so naming clients inside the
-  permitted domain is covered. Servers that authorize clients by a single-label
-  CN trust the CA key completely.
+- Pass `permitted_subtrees` (CLI: `init --permit home --permit 192.168.0.0/16`) to add critical Name Constraints. Constraints are fixed when the CA is created; changing them means a new CA.
+- Relying parties only enforce the name types you list. With `--permit home` alone, a stolen CA key can still sign an IP-address certificate that devices accept; with only an IP range, it can sign `google.com`. tiny-pki refuses to issue such certificates itself, but an attacker holding the key is not using tiny-pki, so constrain **both** DNS and IP if you want a stolen key to be unable to impersonate public sites.
+- Name constraints only cover DNS names and IP addresses. They do not limit client identities, which are usually just a CN such as `alice`: a stolen CA key constrained with `--permit home` can still sign a client certificate for any single-label CN like `alice` or `admin`. OpenSSL checks a dotted CN (`alice.home`) against the DNS constraints, so naming clients inside the permitted domain is covered. Servers that authorize clients by a single-label CN trust the CA key completely.
 
 ## Leaf keys and bundles
 
-Client keys are generated by tiny-pki, so they briefly exist wherever issuance
-runs. Hand them to the device once (PKCS#12 with a password, over a secure
-channel) and avoid keeping copies you don't need. `delete` removes the on-disk
-key after revocation.
+Client keys are generated by tiny-pki, so they briefly exist wherever issuance runs. Hand them to the device once (PKCS#12 with a password, over a secure channel) and avoid keeping copies you don't need. `delete` removes the on-disk key after revocation.
 
-The PKCS#12 password protects the key in transit. Use a long, random one: the
-bundle can be attacked offline. Send the password separately from the file.
-Prefer the interactive prompt. If you use `--password-file`, let the CLI delete
-the file afterwards, or delete it yourself once the device has the bundle.
-Reserve `--legacy` (3DES/SHA-1) for devices that can't import the default
-AES-256 bundle.
+The PKCS#12 password protects the key in transit. Use a long, random one: the bundle can be attacked offline. Send the password separately from the file. Prefer the interactive prompt. If you use `--password-file`, let the CLI delete the file afterwards, or delete it yourself once the device has the bundle. Reserve `--legacy` (3DES/SHA-1) for devices that can't import the default AES-256 bundle.
 
-`export pem` and `export p12 --out` write with mode `0600` through a temp file
-and an atomic rename, and refuse a destination that is already a symlink, so a
-link planted in the export directory cannot redirect the private key elsewhere.
+`export pem` and `export p12 --out` write with mode `0600` through a temp file and an atomic rename, and refuse a destination that is already a symlink, so a link planted in the export directory cannot redirect the private key elsewhere.
 
 ## Revocation only works if the CRL is fresh
 
-- Every revoke must be followed by publishing the new CRL **and** reloading the
-  TLS server (nginx reads `ssl_crl` at startup/reload). The CLI republishes
-  `public/crl.pem` on every revoke; the reload is yours.
-- CRLs carry a `nextUpdate` (30 days by default; a store keeps its own lifetime,
-  set with `init --crl-days N` or `crl --days N`). Once it passes, nginx/OpenSSL
-  fail verification for **every** client. Regenerate on a timer well inside that
-  window (`tiny-pki crl`, or `generate_crl` from your app); [cli.md](cli.md#renewing-the-crl-on-a-timer)
-  has a systemd timer that does both.
-- Pass the complete revoked set to `generate_crl` each time; omitting a serial
-  un-revokes it.
+- Every revoke must be followed by publishing the new CRL **and** reloading the TLS server (nginx reads `ssl_crl` at startup/reload). The CLI republishes `public/crl.pem` on every revoke; the reload is yours.
+- CRLs carry a `nextUpdate` (30 days by default; a store keeps its own lifetime, set with `init --crl-days N` or `crl --days N`). Once it passes, nginx/OpenSSL fail verification for **every** client. Regenerate on a timer well inside that window (`tiny-pki crl`, or `generate_crl` from your app); [cli.md](cli.md#renewing-the-crl-on-a-timer) has a systemd timer that does both.
+- Pass the complete revoked set to `generate_crl` each time; omitting a serial un-revokes it.
 
 ## Key types, sizes and validity
 
-The CA defaults to RSA 4096 and leaves to RSA 3072 (128-bit strength); 2048 is
-accepted but NIST only considers it acceptable through 2030.
+The CA defaults to RSA 4096 and leaves to RSA 3072 (128-bit strength); 2048 is accepted but NIST only considers it acceptable through 2030.
 
-`key_type="ec-p256"` / `--key-type ec-p256` issues ECDSA P-256 keys instead. They are
-as strong as RSA 3072 in practice, much faster to generate, and make smaller
-certificates and handshakes. The trade-off is how each fails: every ECDSA signature
-needs a fresh secret nonce, and a device whose random number generator repeats or
-leaks it gives away its private key. OpenSSL derives the nonce from the key as well
-as randomness, so the CA host is safe; the risk is old or embedded clients, whose
-keys sign every TLS handshake. Keep those clients on RSA (key types can be mixed
-under one CA). Neither key type survives a large quantum computer; NIST's draft transition
-plan (IR 8547) disallows both after 2035.
+`key_type="ec-p256"` / `--key-type ec-p256` issues ECDSA P-256 keys instead. They are as strong as RSA 3072 in practice, much faster to generate, and make smaller certificates and handshakes. The trade-off is how each fails: every ECDSA signature needs a fresh secret nonce, and a device whose random number generator repeats or leaks it gives away its private key. OpenSSL derives the nonce from the key as well as randomness, so the CA host is safe; the risk is old or embedded clients, whose keys sign every TLS handshake. Keep those clients on RSA (key types can be mixed under one CA). Neither key type survives a large quantum computer; NIST's draft transition plan (IR 8547) disallows both after 2035.
 
-Leaves default to 90 days (server) and 397 days (client), capped at 200 and 825 days unless you
-pass `allow_long_validity=True` / `--allow-long-validity`. Keep validity as short
-as your re-issue workflow tolerates — revocation relies on the CRL being deployed,
-expiry does not.
+Leaves default to 90 days (server) and 397 days (client), capped at 200 and 825 days unless you pass `allow_long_validity=True` / `--allow-long-validity`. Keep validity as short as your re-issue workflow tolerates — revocation relies on the CRL being deployed, expiry does not.
 
 ## Out of scope
 
-tiny-pki does not authenticate who asks for a certificate, rate-limit issuance,
-or audit-log operations. Those belong to the consuming application.
+tiny-pki does not authenticate who asks for a certificate, rate-limit issuance, or audit-log operations. Those belong to the consuming application.

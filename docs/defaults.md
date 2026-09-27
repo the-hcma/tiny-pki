@@ -1,9 +1,6 @@
 # Defaults and why
 
-This page lists every default tiny-pki ships with, the guidance behind it, and
-how to override it. It is the output of the defaults audit
-([#32](https://github.com/the-hcma/tiny-pki/issues/32)). Constants are exported
-from `tiny_pki` unless noted.
+This page lists every default tiny-pki ships with, the guidance behind it, and how to override it. It is the output of the defaults audit ([#32](https://github.com/the-hcma/tiny-pki/issues/32)). Constants are exported from `tiny_pki` unless noted.
 
 ## Keys and signatures
 

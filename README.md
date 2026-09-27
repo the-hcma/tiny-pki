@@ -1,45 +1,29 @@
 # tiny-pki
 
-[![PyPI version](https://img.shields.io/pypi/v/tiny-pki.svg)](https://pypi.org/project/tiny-pki/)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/the-hcma/tiny-pki/blob/main/LICENSE)
-[![CI](https://github.com/the-hcma/tiny-pki/actions/workflows/ci.yml/badge.svg)](https://github.com/the-hcma/tiny-pki/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/tiny-pki.svg)](https://pypi.org/project/tiny-pki/) [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/the-hcma/tiny-pki/blob/main/LICENSE) [![CI](https://github.com/the-hcma/tiny-pki/actions/workflows/ci.yml/badge.svg)](https://github.com/the-hcma/tiny-pki/actions/workflows/ci.yml)
 
-A small **private certificate authority** for mutual TLS on home and internal
-networks: issue a CA and its client and server certificates, revoke them with a
-CRL, hand them to phones as PKCS#12 bundles, and watch for expiry. Built on
-[`cryptography`](https://cryptography.io/) 50.0.1 or newer.
+A small **private certificate authority** for mutual TLS on home and internal networks: issue a CA and its client and server certificates, revoke them with a CRL, hand them to phones as PKCS#12 bundles, and watch for expiry. Built on [`cryptography`](https://cryptography.io/) 50.0.1 or newer.
 
 It comes in two layers; use either:
 
-- **Library** (`import tiny_pki`): bytes in, bytes out. No filesystem, no global
-  state, no framework. Your application stores the PEMs.
-- **CLI** (`tiny-pki`): one-shot commands and a REPL over a CA kept in a
-  directory, for operators running nginx or Mosquitto with mTLS.
+- **Library** (`import tiny_pki`): bytes in, bytes out. No filesystem, no global state, no framework. Your application stores the PEMs.
+- **CLI** (`tiny-pki`): one-shot commands and a REPL over a CA kept in a directory, for operators running nginx or Mosquitto with mTLS.
 
 What it covers:
 
-- CA, client and server certificates with RSA (the default) or ECDSA P-256 keys,
-  mixed freely under one CA.
+- CA, client and server certificates with RSA (the default) or ECDSA P-256 keys, mixed freely under one CA.
 - Name Constraints, so a stolen CA key cannot impersonate public sites.
-- CRLs with monotonic numbers, and a key-free `public/` directory to hand to a
-  sandboxed TLS server.
+- CRLs with monotonic numbers, and a key-free `public/` directory to hand to a sandboxed TLS server.
 - PKCS#12 bundles for phones and browsers, with a legacy mode for old keychains.
-- `check`, an expiry and revocation monitor with Nagios-style exit codes and
-  JSON output.
-- Rotation without downtime (`create client --keep-previous`), dry runs for
-  destructive commands, and a store that is safe under concurrent writers.
+- `check`, an expiry and revocation monitor with Nagios-style exit codes and JSON output.
+- Rotation without downtime (`create client --keep-previous`), dry runs for destructive commands, and a store that is safe under concurrent writers.
 - Tab completion for bash, zsh, fish and the REPL.
 
-Consumers: [my-tracks](https://github.com/the-hcma/my-tracks) (MQTT client
-certificates, library; [my-tracks#1345](https://github.com/the-hcma/my-tracks/issues/1345))
-and [home-warden](https://github.com/the-hcma/home-warden) (nginx mTLS, CLI store;
-[home-warden#49](https://github.com/the-hcma/home-warden/issues/49)).
+Consumers: [my-tracks](https://github.com/the-hcma/my-tracks) (MQTT client certificates, library; [my-tracks#1345](https://github.com/the-hcma/my-tracks/issues/1345)) and [home-warden](https://github.com/the-hcma/home-warden) (nginx mTLS, CLI store; [home-warden#49](https://github.com/the-hcma/home-warden/issues/49)).
 
 ## Install
 
-The library depends only on `cryptography`. The command-line tool also needs
-`prompt-toolkit`, which comes with the `cli` extra:
+The library depends only on `cryptography`. The command-line tool also needs `prompt-toolkit`, which comes with the `cli` extra:
 
 ```bash
 uv add tiny-pki                      # library, or: pip install tiny-pki
@@ -50,8 +34,7 @@ Without the extra, `tiny-pki` exits with a message saying how to install it.
 
 ## Quick start: library
 
-Issue a CA, a client certificate, a server certificate and a CRL, all as PEM
-bytes:
+Issue a CA, a client certificate, a server certificate and a CRL, all as PEM bytes:
 
 ```python
 from datetime import UTC, datetime
@@ -82,9 +65,7 @@ crl_pem = generate_crl(ca_cert, ca_key, [(serial, datetime.now(UTC))])
 p12 = generate_pkcs12(client_cert, client_key, ca_cert, "alice", b"change-me-to-a-long-random-password")
 ```
 
-Storing the results, and encrypting the CA key at rest, is up to your
-application; [docs/api.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/api.md) has the full API and
-[docs/security.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/security.md) the key-handling advice.
+Storing the results, and encrypting the CA key at rest, is up to your application; [docs/api.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/api.md) has the full API and [docs/security.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/security.md) the key-handling advice.
 
 ## Quick start: CLI
 
@@ -102,10 +83,7 @@ tiny-pki revoke alice               # republishes public/crl.pem
 tiny-pki check                      # exit 0 ok, 1 expiring, 2 expired/revoked/untrusted, 3 error
 ```
 
-Run `tiny-pki` with no command for the REPL, and `help COMMAND` for any
-command's flags. Point nginx's `ssl_client_certificate` at `public/ca.crt` and
-`ssl_crl` at `public/crl.pem`, reload it after each revoke, and republish the
-CRL (`tiny-pki crl`) on a timer: it is valid for 30 days by default.
+Run `tiny-pki` with no command for the REPL, and `help COMMAND` for any command's flags. Point nginx's `ssl_client_certificate` at `public/ca.crt` and `ssl_crl` at `public/crl.pem`, reload it after each revoke, and republish the CRL (`tiny-pki crl`) on a timer: it is valid for 30 days by default.
 
 ## Documentation
 
@@ -125,13 +103,10 @@ CRL (`tiny-pki crl`) on a timer: it is valid for 30 days by default.
 tiny-pki deliberately does not:
 
 - Persist anything for library callers; store the PEMs in your database or files.
-- Encrypt keys at rest by itself. The optional `tiny_pki.secrets` Fernet helpers
-  take a secret you supply; wiring and rotating it are yours (see
-  [docs/security.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/security.md)).
+- Encrypt keys at rest by itself. The optional `tiny_pki.secrets` Fernet helpers take a secret you supply; wiring and rotating it are yours (see [docs/security.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/security.md)).
 - Reload nginx, Mosquitto or any other TLS server after a new CRL.
 - Schedule CRL renewal; run `tiny-pki crl` or `generate_crl` on a timer.
-- Decide who gets a certificate; authenticating issuance requests is the
-  application's job.
+- Decide who gets a certificate; authenticating issuance requests is the application's job.
 
 ## Development
 
@@ -143,11 +118,8 @@ uv run pytest
 uv run tiny-pki --version   # tiny-pki <version> (<commit>)
 ```
 
-Contribution rules (stacked PRs, commit style, review flow) are in
-[AGENTS.md](https://github.com/the-hcma/tiny-pki/blob/main/AGENTS.md).
+Contribution rules (stacked PRs, commit style, review flow) are in [AGENTS.md](https://github.com/the-hcma/tiny-pki/blob/main/AGENTS.md).
 
 ## License
 
-MIT © 2026 Henrique Andrade ([GitHub's thehcma](https://github.com/thehcma)); see
-[LICENSE](https://github.com/the-hcma/tiny-pki/blob/main/LICENSE). Code extracted from my-tracks was relicensed MIT by the
-copyright holder for this shared package.
+MIT © 2026 Henrique Andrade ([GitHub's thehcma](https://github.com/thehcma)); see [LICENSE](https://github.com/the-hcma/tiny-pki/blob/main/LICENSE). Code extracted from my-tracks was relicensed MIT by the copyright holder for this shared package.
