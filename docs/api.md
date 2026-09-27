@@ -6,7 +6,7 @@ before calling — see [`security.md`](security.md)). Invalid input raises
 `TinyPkiError` (a `ValueError`) with the expected and actual values in the message;
 see [Errors and warnings](#errors-and-warnings).
 
-The library needs only `cryptography` (`pip install tiny-pki`); none of the modules below import the CLI's `prompt-toolkit`, which is installed only with the `tiny-pki[cli]` extra.
+The library needs only `cryptography` (`pip install tiny-pki`); none of the modules below import the CLI's `prompt-toolkit`, which is installed only with the `tiny-pki[cli]` extra. The command-line tool is documented in [cli.md](cli.md).
 
 ## Issue
 

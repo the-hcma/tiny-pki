@@ -1,7 +1,8 @@
 # Filesystem store (CLI)
 
 The CLI keeps one CA per store directory. Writes always need an explicit path
-(`--store PATH` or `TINY_PKI_STORE`); an empty value or `.` is refused.
+(`--store PATH` or `TINY_PKI_STORE`); an empty value or `.` is refused. The
+commands that work on a store are in [cli.md](cli.md).
 
 ```text
 $TINY_PKI_STORE/

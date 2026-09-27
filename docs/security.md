@@ -71,11 +71,13 @@ link planted in the export directory cannot redirect the private key elsewhere.
 ## Revocation only works if the CRL is fresh
 
 - Every revoke must be followed by publishing the new CRL **and** reloading the
-  TLS server (nginx reads `ssl_crl` at startup/reload).
+  TLS server (nginx reads `ssl_crl` at startup/reload). The CLI republishes
+  `public/crl.pem` on every revoke; the reload is yours.
 - CRLs carry a `nextUpdate` (30 days by default; a store keeps its own lifetime,
   set with `init --crl-days N` or `crl --days N`). Once it passes, nginx/OpenSSL
   fail verification for **every** client. Regenerate on a timer well inside that
-  window (`tiny-pki crl`, or `generate_crl` from your app).
+  window (`tiny-pki crl`, or `generate_crl` from your app); [cli.md](cli.md#renewing-the-crl-on-a-timer)
+  has a systemd timer that does both.
 - Pass the complete revoked set to `generate_crl` each time; omitting a serial
   un-revokes it.
 
@@ -92,8 +94,9 @@ leaks it gives away its private key. OpenSSL derives the nonce from the key as w
 as randomness, so the CA host is safe; the risk is old or embedded clients, whose
 keys sign every TLS handshake. Keep those clients on RSA (key types can be mixed
 under one CA). Neither key type survives a large quantum computer; NIST's draft transition
-plan (IR 8547) disallows both after 2035. Leaves default to
-90 days (server) and 397 days (client), capped at 200 and 825 days unless you
+plan (IR 8547) disallows both after 2035.
+
+Leaves default to 90 days (server) and 397 days (client), capped at 200 and 825 days unless you
 pass `allow_long_validity=True` / `--allow-long-validity`. Keep validity as short
 as your re-issue workflow tolerates — revocation relies on the CRL being deployed,
 expiry does not.
