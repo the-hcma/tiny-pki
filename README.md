@@ -202,8 +202,9 @@ tiny-pki completion bash > ~/.local/share/bash-completion/completions/tiny-pki.b
 tiny-pki completion fish > ~/.config/fish/completions/tiny-pki.fish
 ```
 
-Open a new shell afterwards. The script completes top-level flags and PKI
-verbs; keep `tiny-pki` on `PATH`.
+Open a new shell afterwards. The script completes commands, each command's flags,
+and flag values such as `--key-type rsa|ec-p256`; keep `tiny-pki` on `PATH`. The
+REPL completes the same way, and `help <command>` lists a command's flags.
 
 ## What stays in your app
 

@@ -13,7 +13,14 @@ from prompt_toolkit.enums import EditingMode
 from prompt_toolkit.history import FileHistory, History, InMemoryHistory
 from prompt_toolkit.patch_stdout import patch_stdout
 
-from tiny_pki.cli.commands import COMMAND_HELP, COMMANDS, PKI_COMMANDS
+from tiny_pki.cli.commands import (
+    COMMAND_FLAGS,
+    COMMAND_HELP,
+    COMMAND_USAGE,
+    COMMANDS,
+    PKI_COMMANDS,
+    POSITIONAL_CHOICES,
+)
 from tiny_pki.cli.completer import ReplCompleter
 from tiny_pki.cli.completion import run_completion
 from tiny_pki.cli.theme import Theme, stdout_color_enabled
@@ -164,17 +171,7 @@ def _prompt_markup(theme: Theme) -> HTML | str:
 
 
 def _argument_tokens(command: str, store: CertificateStore | None) -> tuple[str, ...]:
-    fixed: tuple[str, ...] = ()
-    if command == "create":
-        return ("client", "server")
-    if command == "edit-mode":
-        return ("emacs", "vim")
-    if command == "export":
-        fixed = ("pem", "p12")
-    elif command == "list":
-        return ("ca", "certs", "clients", "revoked", "servers")
-    elif command == "show":
-        fixed = ("ca", "certs", "clients", "crl", "revoked", "servers")
+    fixed = POSITIONAL_CHOICES.get(command, ())
     names: tuple[str, ...] = ()
     if command in {"delete", "export", "inspect", "revoke", "show"} and store is not None:
         try:
@@ -204,8 +201,7 @@ def _dispatch_parts(
     if command in {"exit", "quit"}:
         return None
     if command == "help":
-        _print_help(theme)
-        return 0
+        return _print_help(theme, args)
     if command == "completion":
         return run_completion(args)
     if command == "clear":
@@ -252,10 +248,29 @@ def _dispatch_pki(
         return handlers.CHECK_EXIT_UNKNOWN if command == "check" else 1
 
 
-def _print_help(theme: Theme) -> None:
-    width = max(len(name) for name, _ in COMMAND_HELP)
-    for name, description in COMMAND_HELP:
-        print(f"  {theme.ok(name.ljust(width))}  {description}")
+def _print_help(theme: Theme, args: list[str]) -> int:
+    """Print the command list, or ``help <command>``'s usage and flags."""
+    if not args:
+        width = max(len(name) for name, _ in COMMAND_HELP)
+        for name, description in COMMAND_HELP:
+            print(f"  {theme.ok(name.ljust(width))}  {description}")
+        print(theme.dim("Type help <command> for its flags."))
+        return 0
+    name = args[0]
+    if name not in COMMANDS:
+        print(theme.error(f"Unknown command {name!r}; type help"), file=sys.stderr)
+        return 1
+    flags = COMMAND_FLAGS.get(name, ())
+    usage = COMMAND_USAGE.get(name, name) + (" [options]" if flags else "")
+    print(f"usage: {usage}")
+    print(f"  {dict(COMMAND_HELP)[name]}")
+    if flags:
+        rows = [(f"{f.option} {'|'.join(f.choices) or f.value}" if f.value else f.option, f.help) for f in flags]
+        width = max(len(left) for left, _ in rows)
+        print("options:")
+        for left, text in rows:
+            print(f"  {theme.ok(left.ljust(width))}  {text}")
+    return 0
 
 
 if __name__ == "__main__":

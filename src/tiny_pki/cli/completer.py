@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
 
+from tiny_pki.cli.commands import COMMAND_FLAGS
 from tiny_pki.cli.theme import Theme
 
 _CMD_THEN_REST = re.compile(r"^(\S+)(\s+)(.*)$", re.DOTALL)
@@ -23,10 +24,11 @@ class CmdCtx:
 
 @dataclass(frozen=True)
 class ArgCtx:
-    """Completing arguments for a known command."""
+    """Completing arguments for a known command; ``previous`` holds the complete tokens before ``partial``."""
 
     command: str
     partial: str
+    previous: tuple[str, ...] = ()
 
 
 def parse_completion_buffer(buf: str) -> CmdCtx | ArgCtx:
@@ -38,13 +40,14 @@ def parse_completion_buffer(buf: str) -> CmdCtx | ArgCtx:
     if match is None:
         return CmdCtx(partial=stripped)
     command, _ws, rest = match.group(1), match.group(2), match.group(3)
+    tokens = tuple(rest.split())
     if not rest or stripped[-1:].isspace():
-        return ArgCtx(command=command, partial="")
-    return ArgCtx(command=command, partial=rest.split()[-1])
+        return ArgCtx(command=command, partial="", previous=tokens)
+    return ArgCtx(command=command, partial=tokens[-1], previous=tokens[:-1])
 
 
 class ReplCompleter(Completer):
-    """Complete command names and optional argument tokens."""
+    """Complete command names, their flags and flag values, and positional argument tokens."""
 
     def __init__(
         self,
@@ -71,6 +74,18 @@ class ReplCompleter(Completer):
                     yield Completion(cmd, start_position=-len(ctx.partial), style=style)
             return
         style = self._theme.completion_parameter_style()
-        for token in self._argument_tokens(ctx.command):
+        for token in self._candidates(ctx):
             if token.startswith(ctx.partial):
                 yield Completion(token, start_position=-len(ctx.partial), style=style)
+
+    def _candidates(self, ctx: ArgCtx) -> Iterable[str]:
+        flags = COMMAND_FLAGS.get(ctx.command, ())
+        pending = next((f for f in flags if ctx.previous[-1:] == (f.option,)), None)
+        if pending is not None and pending.value is not None:
+            return pending.choices
+        used = set(ctx.previous)
+        unused = [f.option for f in flags if f.repeatable or f.option not in used]
+        if ctx.partial.startswith("-"):
+            return unused
+        tokens = list(self._argument_tokens(ctx.command))
+        return [*tokens, *unused] if not ctx.partial else tokens

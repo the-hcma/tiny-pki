@@ -19,15 +19,15 @@ from tiny_pki.cli.main import main
 
 def test_completion_emits_a_script_per_shell(capsys: CaptureFixture[str]) -> None:
     for shell, needle, list_case in (
-        ("bash", "complete -F _tiny_pki_completion tiny-pki", "list) COMPREPLY="),
-        ("zsh", "_tiny-pki()", "list) _values 'target'"),
-        ("fish", "complete -c tiny-pki", "__fish_seen_subcommand_from list"),
+        ("bash", "complete -F _tiny_pki_completion tiny-pki", '-W "ca certs clients revoked servers"'),
+        ("zsh", "_tiny-pki()", "'1:argument:(ca certs clients revoked servers)'"),
+        ("fish", "complete -c tiny-pki", "__fish_seen_subcommand_from list' -a 'ca certs clients revoked servers'"),
     ):
         assert_that(run_completion([shell]), equal_to(0))
         out = capsys.readouterr().out
         assert_that(out, contains_string(needle))
         assert_that(out, contains_string("tiny-pki"))
-        assert_that(out, contains_string("--version"))
+        assert_that(out, contains_string("-l version" if shell == "fish" else "--version"))
         assert_that(out, contains_string("init"))
         assert_that(out, contains_string(list_case))
         assert_that(out, contains_string("clients"))
