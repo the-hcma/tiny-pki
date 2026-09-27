@@ -179,6 +179,7 @@ Expiry and validity checks for alerting (`tiny_pki.check`, re-exported from `tin
 | `DEFAULT_CA_KEY_SIZE` | `4096` |
 | `DEFAULT_CA_VALIDITY_DAYS` | `3650` |
 | `DEFAULT_CLIENT_VALIDITY_DAYS` | `397` |
+| `DEFAULT_CRL_VALIDITY_DAYS` | `30`: `generate_crl` default and a store's CRL lifetime until set |
 | `DEFAULT_LEAF_KEY_SIZE` | `3072` |
 | `DEFAULT_ORGANIZATION_NAME` | `"tiny-pki"` |
 | `DEFAULT_SERVER_VALIDITY_DAYS` | `90` |
@@ -186,6 +187,7 @@ Expiry and validity checks for alerting (`tiny_pki.check`, re-exported from `tin
 | `MAX_CLIENT_VALIDITY_DAYS` | `825` |
 | `MAX_LEAF_WARNING_DAYS` | `30` |
 | `MAX_SERVER_VALIDITY_DAYS` | `200` |
+| `MAX_STORE_CRL_VALIDITY_DAYS` | `365`: upper bound for `init --crl-days` / `crl --days` / `CertificateStore.set_crl_validity_days` |
 | `MAX_VALIDITY_DAYS` | `36500`: hard ceiling for any `validity_days` (CA, leaf, CRL), even with `allow_long_validity` |
 | `MIN_PKCS12_PASSWORD_LENGTH` | `16` |
 | `VALIDITY_PRESETS` | `[(90, "90 days"), …, (825, "825 days")]` for UI pickers; clamp with `max_leaf_validity_days(ca_cert_pem)` |

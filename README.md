@@ -121,6 +121,8 @@ tiny-pki --store ./stores/ca
 Point nginx `ssl_client_certificate` at `stores/ca/ca/ca.crt` and `ssl_crl` at
 `stores/ca/ca/crl.pem` for mTLS with revocation. The CRL is valid for 30 days:
 re-run `tiny-pki --store ./stores/ca crl` (and reload nginx) before it expires.
+`init --crl-days N` or `crl --days N` (1–365) changes the lifetime the store uses
+for every later publish.
 
 Server certificates default to 90 days and client certificates to 397 days
 (capped at 200 / 825; `--allow-long-validity` overrides). Re-issue with `create`

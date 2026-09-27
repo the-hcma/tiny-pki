@@ -72,7 +72,8 @@ link planted in the export directory cannot redirect the private key elsewhere.
 
 - Every revoke must be followed by publishing the new CRL **and** reloading the
   TLS server (nginx reads `ssl_crl` at startup/reload).
-- CRLs carry a `nextUpdate` (30 days by default). Once it passes, nginx/OpenSSL
+- CRLs carry a `nextUpdate` (30 days by default; a store keeps its own lifetime,
+  set with `init --crl-days N` or `crl --days N`). Once it passes, nginx/OpenSSL
   fail verification for **every** client. Regenerate on a timer well inside that
   window (`tiny-pki crl`, or `generate_crl` from your app).
 - Pass the complete revoked set to `generate_crl` each time; omitting a serial

@@ -10,7 +10,7 @@ COMMAND_HELP: tuple[tuple[str, str], ...] = (
     ("clear", "Clear the terminal screen."),
     ("completion", "Print or install bash/zsh/fish tab-completion scripts."),
     ("create", "Issue a certificate: create client|server <name> [options]."),
-    ("crl", "Regenerate the CRL from revoked entries."),
+    ("crl", "Regenerate the CRL from revoked entries; --days N changes the stored CRL lifetime."),
     ("delete", "Remove a revoked certificate's files; --force revokes an active one first; --dry-run previews."),
     ("edit-mode", "Switch Emacs vs Vim keys: edit-mode emacs | vim."),
     ("exit", "Leave the REPL."),

@@ -9,7 +9,7 @@ symlink at any path component, and index paths must point at a leaf file under
 Layout (one CA per store root)::
 
     $STORE/
-      ca/ca.crt  ca/ca.key  ca/crl.pem  ca/crlnumber  ca/index.json
+      ca/ca.crt  ca/ca.key  ca/crl.pem  ca/crlnumber  ca/crldays  ca/index.json
       clients/{cn}-{serial}.{crt,key}
       servers/{cn}-{serial}.{crt,key}
       bundles/{cn}-{serial}.p12
@@ -49,7 +49,13 @@ from cryptography import x509
 
 from tiny_pki._fsutil import write_file_atomic
 from tiny_pki.check import CertificateStatus, Status, check_certificate, check_crl
-from tiny_pki.constants import DEFAULT_CLIENT_VALIDITY_DAYS, DEFAULT_LEAF_KEY_SIZE, DEFAULT_SERVER_VALIDITY_DAYS
+from tiny_pki.constants import (
+    DEFAULT_CLIENT_VALIDITY_DAYS,
+    DEFAULT_CRL_VALIDITY_DAYS,
+    DEFAULT_LEAF_KEY_SIZE,
+    DEFAULT_SERVER_VALIDITY_DAYS,
+    MAX_STORE_CRL_VALIDITY_DAYS,
+)
 from tiny_pki.errors import TinyPkiError
 from tiny_pki.inspect import get_certificate_expiry, get_certificate_fingerprint, get_certificate_serial_number
 from tiny_pki.issue import generate_client_certificate, generate_server_certificate
@@ -121,6 +127,17 @@ class CertificateStore:
     @property
     def crl_path(self) -> Path:
         return self.root / "ca" / "crl.pem"
+
+    @property
+    def crl_validity_days(self) -> int:
+        """Lifetime (days to ``nextUpdate``) of every CRL this store publishes; 30 until set."""
+        path = self._validated_write_path("ca/crldays")
+        if not path.is_file():
+            return DEFAULT_CRL_VALIDITY_DAYS
+        text = path.read_text(encoding="utf-8").strip()
+        if not text.isdigit():
+            raise ValueError(f"Expected a decimal number of days in {path}")
+        return _require_crl_validity_days(int(text))
 
     @property
     def index_path(self) -> Path:
@@ -431,19 +448,42 @@ class CertificateStore:
         return found
 
     @_locked
-    def publish_crl(self) -> bytes:
+    def publish_crl(self, *, validity_days: int | None = None) -> bytes:
         """Sign the index's revoked set with the store's CA key and publish it as ``ca/crl.pem``.
 
         The revoked set, the CRL number and the write happen under one lock, so a
-        concurrent revoke is never dropped from the newest CRL.
+        concurrent revoke is never dropped from the newest CRL. ``validity_days``
+        signs for that many days and, once the CRL is written, becomes the stored
+        lifetime (see :meth:`set_crl_validity_days`); otherwise
+        :attr:`crl_validity_days` is used. A failed publish leaves it unchanged.
 
         Returns:
             The published CRL in PEM format.
         """
+        days = self.crl_validity_days if validity_days is None else _require_crl_validity_days(validity_days)
         ca_cert, ca_key = self.read_ca()
-        crl = generate_crl(ca_cert, ca_key, self.revoked_entries(), crl_number=self.next_crl_number())
+        crl = generate_crl(
+            ca_cert,
+            ca_key,
+            self.revoked_entries(),
+            validity_days=days,
+            crl_number=self.next_crl_number(),
+        )
         self.write_crl(crl)
+        if validity_days is not None:
+            self.set_crl_validity_days(validity_days)
         return crl
+
+    @_locked
+    def set_crl_validity_days(self, days: int) -> None:
+        """Persist the CRL lifetime used by every later publish, including implicit ones.
+
+        Raises:
+            TinyPkiError: ``days`` is outside 1..``MAX_STORE_CRL_VALIDITY_DAYS`` (365).
+        """
+        _require_crl_validity_days(days)
+        self.ca_dir.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
+        _write_plain(self._validated_write_path("ca/crldays"), f"{days}\n".encode())
 
     def issue_client(
         self,
@@ -926,6 +966,15 @@ def _crl_number(crl_pem: bytes) -> int | None:
         return crl.extensions.get_extension_for_class(x509.CRLNumber).value.crl_number
     except (ValueError, x509.ExtensionNotFound):
         return None
+
+
+def _require_crl_validity_days(days: object) -> int:
+    """Return ``days`` if it is a plain int in range; bool and float would not round-trip through ``ca/crldays``."""
+    if isinstance(days, bool) or not isinstance(days, int):
+        raise TinyPkiError(f"Expected a whole number of days for the CRL lifetime, got {days!r}")
+    if not 1 <= days <= MAX_STORE_CRL_VALIDITY_DAYS:
+        raise TinyPkiError(f"Expected a CRL lifetime between 1 and {MAX_STORE_CRL_VALIDITY_DAYS} days, got {days}")
+    return days
 
 
 def _drop_world_write(directory: Path) -> None:

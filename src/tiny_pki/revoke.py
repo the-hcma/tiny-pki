@@ -9,7 +9,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from tiny_pki._rsa import load_rsa_private_key
-from tiny_pki.constants import CLOCK_SKEW_BACKDATE, MAX_VALIDITY_DAYS
+from tiny_pki.constants import CLOCK_SKEW_BACKDATE, DEFAULT_CRL_VALIDITY_DAYS, MAX_VALIDITY_DAYS
 from tiny_pki.errors import TinyPkiError
 
 
@@ -18,7 +18,7 @@ def generate_crl(
     ca_key_pem: bytes,
     revoked_entries: list[tuple[int, datetime]],
     *,
-    validity_days: int = 30,
+    validity_days: int = DEFAULT_CRL_VALIDITY_DAYS,
     crl_number: int | None = None,
 ) -> bytes:
     """Generate a CRL signed by the CA.
