@@ -238,5 +238,8 @@ an older, shorter secret.
 
 ## Optional: `tiny_pki.store`
 
-`CertificateStore(root)` is the filesystem store the CLI uses. Library callers
-normally don't need it; it is documented in [`store.md`](store.md).
+`CertificateStore(root)` is the filesystem store the CLI uses. Its
+`issue_client` / `issue_server` / `revoke` / `delete` / `publish_crl` methods and
+`check_store(store, ...)` do what the matching CLI verbs do and keep `crl.pem`
+in step with `index.json`. Library callers that keep certificates in their own
+database don't need it; it is documented in [`store.md`](store.md#using-the-store-from-python).

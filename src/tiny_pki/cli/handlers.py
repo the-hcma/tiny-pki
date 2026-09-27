@@ -14,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, cast
 
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
@@ -30,10 +30,7 @@ from tiny_pki import (
     MAX_VALIDITY_DAYS,
     TinyPkiWarning,
     generate_ca_certificate,
-    generate_client_certificate,
-    generate_crl,
     generate_pkcs12,
-    generate_server_certificate,
     get_certificate_expiry,
     get_certificate_fingerprint,
     get_certificate_issuer,
@@ -45,13 +42,13 @@ from tiny_pki._fsutil import write_file_atomic
 from tiny_pki.check import CertificateStatus, Status, check_certificate, check_crl, worst_status
 from tiny_pki.cli.theme import Theme
 from tiny_pki.names import common_name_as_san, normalize_san_entries
-from tiny_pki.store import CertificateStore, IssuedCertificate
+from tiny_pki.store import CHECK_KINDS, CertificateStore, CheckKind, IssuedCertificate, check_store
 
 CHECK_EXIT_CRITICAL = 2
 CHECK_EXIT_OK = 0
 CHECK_EXIT_UNKNOWN = 3
 CHECK_EXIT_WARNING = 1
-_CHECK_KINDS = ("ca", "client", "crl", "server")
+_CHECK_KINDS = tuple(sorted(CHECK_KINDS))
 _CHECK_SUFFIXES = frozenset({".cer", ".crl", ".crt", ".p12", ".pem", ".pfx"})
 
 
@@ -141,7 +138,7 @@ def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) 
         permitted_subtrees=opts["multi"].get("permit"),
     )
     store.write_ca(cert_pem, key_pem)
-    _publish_crl(store, cert_pem, key_pem, revoked=[])
+    store.publish_crl()
     print(theme.ok(f"CA created: {get_certificate_subject(cert_pem)}"))
     print(theme.dim(f"fingerprint {get_certificate_fingerprint(cert_pem)}"))
 
@@ -184,7 +181,13 @@ def _cmd_check(args: list[str], *, store: CertificateStore | None, theme: Theme)
         if {"ca", "crl", "password-file"} & flags.keys():
             raise ValueError("--ca / --crl / --password-file apply to file targets; the store uses its own CA and CRL")
         store = _require_store(store)
-        rows = _check_store(store, within=within, by=by, kinds=kinds, include_revoked="include-revoked" in flags)
+        rows = check_store(
+            store,
+            within=within,
+            by=by,
+            kinds=cast(set[CheckKind], kinds),
+            include_revoked="include-revoked" in flags,
+        )
     rows.sort(key=lambda row: (row[1].not_after is None, row[1].not_after or datetime.max.replace(tzinfo=UTC)))
     worst = worst_status([result for _, result in rows])
     if "json" in opts["flags"]:
@@ -221,7 +224,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
         raise ValueError("--san / --no-cn-san / --yes are only supported for server certificates")
     if "no-cn-san" in opts["flags"] and not opts["multi"].get("san"):
         raise ValueError("Expected --san with --no-cn-san; without --san the CN is the only SAN")
-    ca_cert, ca_key = store.read_ca()
+    store.read_ca()
     default_days = DEFAULT_CLIENT_VALIDITY_DAYS if kind == "client" else DEFAULT_SERVER_VALIDITY_DAYS
     days = _parse_days(opts["flags"].get("days", str(default_days)), default=default_days)
     key_size = int(opts["flags"].get("key-size", str(DEFAULT_LEAF_KEY_SIZE)))
@@ -232,9 +235,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", TinyPkiWarning)
         if kind == "client":
-            cert_pem, key_pem = generate_client_certificate(
-                ca_cert,
-                ca_key,
+            entry = store.issue_client(
                 name,
                 organization_name=org,
                 validity_days=days,
@@ -244,9 +245,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
             )
         else:
             sans = [s for s in opts["multi"].get("san", []) if s] or [name]
-            cert_pem, key_pem = generate_server_certificate(
-                ca_cert,
-                ca_key,
+            entry = store.issue_server(
                 name,
                 sans,
                 organization_name=org,
@@ -259,17 +258,6 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
     for warning in caught:
         print(theme.warn(f"warning: {warning.message}"), file=sys.stderr)
 
-    entry = store.add_certificate(
-        common_name=name,
-        kind=kind,  # type: ignore[arg-type]
-        serial_number=get_certificate_serial_number(cert_pem),
-        cert_pem=cert_pem,
-        key_pem=key_pem,
-        not_valid_after=get_certificate_expiry(cert_pem),
-        fingerprint=get_certificate_fingerprint(cert_pem),
-    )
-    # Re-issue may auto-revoke a prior live CN — keep crl.pem aligned with the index.
-    _publish_crl(store, ca_cert, ca_key)
     print(theme.ok(f"issued {kind} {entry.common_name}"))
     print(theme.dim(f"serial {entry.serial_number}  fp {entry.fingerprint}"))
 
@@ -467,11 +455,12 @@ def _cmd_revoke(args: list[str], *, store: CertificateStore | None, theme: Theme
             print(theme.dim(f"{target.common_name} is already revoked (at {target.revoked_at}); nothing to do"))
         print(theme.dim("dry run: nothing written"))
         return
-    entry = store.mark_revoked(identity)
-    ca_cert, ca_key = store.read_ca()
-    _publish_crl(store, ca_cert, ca_key)
+    entry = store.revoke(identity)
     print(theme.warn(f"revoked {entry.common_name}"))
-    print(theme.dim(f"crl updated: {store.crl_path}"))
+    if store.has_ca():
+        print(theme.dim(f"crl updated: {store.crl_path}"))
+    else:
+        print(theme.warn(f"warning: no CA under {store.root}, so no CRL was published"), file=sys.stderr)
 
 
 def _cmd_delete(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
@@ -492,11 +481,7 @@ def _cmd_delete(args: list[str], *, store: CertificateStore | None, theme: Theme
         print(theme.warn(f"would {verb} {before.kind} {before.common_name} (serial {before.serial_number})"))
         print(theme.dim("dry run: nothing written"))
         return
-    entry = store.delete_certificate(identity, force=force)
-    # Keep crl.pem aligned with tombstones / remaining revoked serials.
-    if store.has_ca():
-        ca_cert, ca_key = store.read_ca()
-        _publish_crl(store, ca_cert, ca_key)
+    entry = store.delete(identity, force=force)
     if before is not None and before.revoked_at is None:
         print(theme.ok(f"revoked and deleted {entry.common_name} (serial {entry.serial_number})"))
     else:
@@ -617,8 +602,7 @@ def _cmd_crl(args: list[str], *, store: CertificateStore | None, theme: Theme) -
     if opts["positional"]:
         raise ValueError(f"crl takes no positional arguments, got {' '.join(opts['positional'])}")
     store = _require_store(store)
-    ca_cert, ca_key = store.read_ca()
-    _publish_crl(store, ca_cert, ca_key)
+    store.publish_crl()
     print(theme.ok(f"crl regenerated: {store.crl_path}"))
 
 
@@ -690,56 +674,6 @@ def _check_row_json(name: str, result: CertificateStatus) -> dict[str, object]:
         "days_remaining": result.days_remaining,
         "reasons": list(result.reasons),
     }
-
-
-def _check_store(
-    store: CertificateStore,
-    *,
-    within: timedelta | None,
-    by: datetime | None,
-    kinds: set[str],
-    include_revoked: bool,
-) -> list[tuple[str, CertificateStatus]]:
-    """Check the CA, the CRL, and every issued leaf (revoked ones only on request)."""
-    crl_pem = store.read_crl()
-    if not store.ca_cert_path.is_file():
-        raise FileNotFoundError(f"Expected a CA certificate at {store.ca_cert_path}")
-    ca_cert = store.ca_cert_path.read_bytes()
-    rows: list[tuple[str, CertificateStatus]] = []
-    if "ca" in kinds:
-        rows.append(("ca", check_certificate(ca_cert, within=within, by=by, ca_cert_pem=ca_cert)))
-    index_revoked = {int(e.serial_number, 16) for e in store.list_certificates(status="revoked")}
-    trusted_crl: bytes | None = None
-    if crl_pem is None:
-        if index_revoked:
-            raise FileNotFoundError(
-                f"Expected a CRL at {store.crl_path} listing {len(index_revoked)} serial(s) revoked in index.json"
-            )
-    else:
-        crl_result = check_crl(crl_pem, within=within, by=by, ca_cert_pem=ca_cert)
-        if crl_result.status is not Status.UNTRUSTED:
-            trusted_crl = crl_pem
-            listed = {r.serial_number for r in x509.load_pem_x509_crl(crl_pem)}
-            missing = sorted(index_revoked - listed)
-            if missing:
-                shown = ", ".join(format(s, "x") for s in missing[:5]) + (" ..." if len(missing) > 5 else "")
-                crl_result = _escalate(
-                    crl_result,
-                    Status.UNTRUSTED,
-                    f"missing {len(missing)} serial(s) revoked in index.json ({shown}); republish with `crl`",
-                )
-        # An incomplete CRL is reported even when --kind leaves out "crl", like a missing one.
-        if "crl" in kinds or crl_result.status is Status.UNTRUSTED:
-            rows.append(("crl", crl_result))
-    for entry in store.list_certificates(status="all" if include_revoked else "active"):
-        if entry.kind not in kinds:
-            continue
-        cert_pem = store.read_certificate_pem(entry)
-        result = check_certificate(cert_pem, within=within, by=by, ca_cert_pem=ca_cert, crl_pem=trusted_crl)
-        if entry.revoked_at is not None and result.status is not Status.REVOKED:
-            result = _escalate(result, Status.REVOKED, f"revoked in index.json on {entry.revoked_at}")
-        rows.append((entry.common_name, result))
-    return rows
 
 
 def _escalate(result: CertificateStatus, status: Status, reason: str) -> CertificateStatus:
@@ -995,20 +929,6 @@ def _safe_export_name(common_name: str) -> str:
     output path a single component either way.
     """
     return common_name.replace("/", "_").replace("\\", "_")
-
-
-def _publish_crl(
-    store: CertificateStore,
-    ca_cert: bytes,
-    ca_key: bytes,
-    *,
-    revoked: list[tuple[int, datetime]] | None = None,
-) -> None:
-    """Regenerate ``ca/crl.pem`` (default: the index's revoked set) with a CRL number above every earlier one."""
-    with store.lock():
-        entries = store.revoked_entries() if revoked is None else revoked
-        crl = generate_crl(ca_cert, ca_key, entries, crl_number=store.next_crl_number())
-        store.write_crl(crl)
 
 
 def _write_secret_file(path: Path, data: str | bytes) -> None:
