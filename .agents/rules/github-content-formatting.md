@@ -1,5 +1,5 @@
 ---
-description: Format agent-authored GitHub issue/PR bodies and comments so they render correctly (blank lines + no hand-wrapped paragraphs)
+description: Format agent-authored GitHub issue/PR bodies, comments and committed Markdown files so they render correctly (blank lines + no hand-wrapped paragraphs)
 alwaysApply: true
 ---
 
@@ -11,6 +11,13 @@ Write multi-paragraph or multi-line-list bodies to a temp file and post with `--
 
 ```bash
 "${REPOSITORY_HELPERS_DIR:-$HOME/work/ai/repository-helpers}/scripts/lint-github-markdown" <path>
+```
+
+The same rule covers `.md` files committed to this repo: one physical line per paragraph, list item and blockquote, with no hard line breaks. YAML front matter, code blocks, tables, headings and HTML keep their own lines. Check a file, or unwrap it in place, before committing:
+
+```bash
+"${REPOSITORY_HELPERS_DIR:-$HOME/work/ai/repository-helpers}/scripts/lint-github-markdown" --repo-files <file.md>…
+"${REPOSITORY_HELPERS_DIR:-$HOME/work/ai/repository-helpers}/scripts/lint-github-markdown" --repo-files --fix <file.md>…
 ```
 
 Full authoring rules, the pre-flight linter, and `scripts/gh-issue` — the canonical rule in repository-helpers:
