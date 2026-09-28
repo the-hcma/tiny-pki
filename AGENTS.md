@@ -24,6 +24,8 @@ At the **start of every agent session**, before acting from assumed conventions:
 
 `CLAUDE.md` (a `@AGENTS.md` import) and `.github/copilot-instructions.md` exist so Claude Code and Copilot reach this same guidance; do not put rules in them.
 
+Markdown files you commit, this one included, use one physical line per paragraph, list item and blockquote, with no hard line breaks (see `.agents/rules/github-content-formatting.md`).
+
 Before creating any branch or writing code, initialize the session from the repository root using [repository-helpers](https://github.com/the-hcma/repository-helpers):
 
 ```bash
