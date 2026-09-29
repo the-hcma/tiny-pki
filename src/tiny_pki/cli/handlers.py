@@ -640,10 +640,7 @@ def _key_secret(
     explicit_path = flags.get("key-secret-file")
     if not required and not store.ca_key_encrypted:
         if explicit_path is not None:
-            print(
-                theme.warn("warning: --key-secret-file is unused because the CA private key is not encrypted"),
-                file=sys.stderr,
-            )
+            raise ValueError("--key-secret-file was given but the CA private key is not encrypted")
         return None
     secret_path = explicit_path or os.environ.get("TINY_PKI_KEY_SECRET_FILE")
     if secret_path is None:

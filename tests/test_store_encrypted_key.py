@@ -149,8 +149,10 @@ def test_init_keeps_plaintext_default_even_with_secret_file_environment(
         "--key-secret-file",
         str(tmp_path / "missing-explicit-secret"),
         capsys=capsys,
+        expect_ok=False,
     )
-    assert_that(error, contains_string("key-secret-file is unused"))
+    assert_that(error, contains_string("--key-secret-file was given but the CA private key is not encrypted"))
+    _run(store_path, "crl", capsys=capsys)
 
 
 def test_encrypted_init_offers_to_remove_staging_secret_file(
