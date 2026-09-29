@@ -11,6 +11,7 @@ The library needs only `cryptography` (`pip install tiny-pki`); none of the modu
 | `generate_ca_certificate(common_name="Private CA", *, organization_name="tiny-pki", validity_days=3650, key_size=None, key_type="rsa", permitted_subtrees=None)` | `(ca_cert_pem, ca_key_pem)` — self-signed, `BasicConstraints(ca=True, path_length=0)` (signs leaves only), `keyCertSign` + `cRLSign`; optional critical Name Constraints |
 | `generate_client_certificate(ca_cert_pem, ca_key_pem, common_name, *, organization_name=None, validity_days=397, key_size=None, key_type="rsa", allow_long_validity=False, allow_dn_special_chars=False)` | `(cert_pem, key_pem)` — `CLIENT_AUTH` EKU; CN is the identity |
 | `generate_server_certificate(ca_cert_pem, ca_key_pem, common_name, san_entries, *, organization_name=None, validity_days=90, key_size=None, key_type="rsa", allow_long_validity=False, include_common_name_in_sans=True, allow_dn_special_chars=False)` | `(cert_pem, key_pem)` — `SERVER_AUTH` EKU; `san_entries` are DNS names or IP literals (at least one) |
+| `sign_client_csr(ca_cert_pem, ca_key_pem, csr_pem, common_name, *, organization_name=None, validity_days=397, allow_long_validity=False, allow_dn_special_chars=False)` | `cert_pem` — the same client profile as `generate_client_certificate`, for the public key in a device's CSR; see [Signing a CSR](#signing-a-csr) |
 | `max_leaf_validity_days(ca_cert_pem, *, kind="server", allow_long_validity=False)` | `int` — the largest `validity_days` issuing a `kind` leaf under this CA accepts right now (CA `notAfter` with the `CLOCK_SKEW_BACKDATE` backdate, and the per-kind cap unless `allow_long_validity`); `0` once the CA cannot sign any leaf. Use it to clamp or grey out `VALIDITY_PRESETS` in UIs |
 
 `organization_name=None` on leaves inherits the CA's `O`. `validity_days` must be between 1 and `MAX_VALIDITY_DAYS` (36500).
@@ -64,6 +65,25 @@ Name rules (`tiny_pki.names`):
 | `normalize_subject_attribute(value, field_name, *, max_length)` | stripped, validated CN/O |
 | `common_name_as_san(common_name)` | the SAN form of a host-like CN, else `None` |
 
+### Signing a CSR
+
+`sign_client_csr` issues a client certificate for a key that never leaves the device (a keychain, TPM, or YubiKey). The CSR is PEM (including Windows `certreq`'s `NEW CERTIFICATE REQUEST` header) or DER.
+
+- Only the CSR's public key is used. `common_name`, the organization, the validity window, and every extension come from the CA side exactly as in `generate_client_certificate`, so the result is indistinguishable apart from key origin, and the same name, Name Constraints, and lifetime checks apply.
+- A different CN in the CSR's subject and any extensions it requests (`BasicConstraints(ca=True)`, other extended key usages, SANs) are ignored, each with a `TinyPkiWarning` emitted after issuance. A CSR therefore cannot obtain a CA or server certificate, or choose its own identity.
+- The CSR must carry a valid self-signature using SHA-256, SHA-384, or SHA-512, and an RSA key of an `ALLOWED_KEY_SIZES` size with public exponent 65537 or an ECDSA P-256 key; anything else raises `TinyPkiError` listing every problem.
+
+`inspect_csr(csr_pem)` summarizes a CSR without signing it and returns a `CsrSummary`:
+
+| Field | Meaning |
+| --- | --- |
+| `subject`, `common_name`, `sans` | what the CSR asks for (RFC 4514 subject string, its CN or `None`, DNS and IP SANs) |
+| `key_type`, `key_size` | `"rsa"` with its size, `"ec-p256"` with `None`, or a description of an unsupported key |
+| `signature_hash` | e.g. `"sha256"`, or `None` when unknown |
+| `public_key_fingerprint` | SHA-256 of the DER SubjectPublicKeyInfo, colon-separated upper-case hex: compare it with the device owner out of band |
+| `requested_extensions` | extension class names (or dotted OIDs) the CSR requests, all ignored when signing |
+| `problems` | every reason `sign_client_csr` would refuse the CSR; empty when it can be signed |
+
 ## Revoke
 
 | Function | Returns |
@@ -87,7 +107,7 @@ Name rules (`tiny_pki.names`):
 
 ## Inspect
 
-All take a certificate PEM.
+All take a certificate PEM. For a CSR, see `inspect_csr` under [Signing a CSR](#signing-a-csr).
 
 | Function | Returns |
 | --- | --- |

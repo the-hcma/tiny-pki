@@ -41,6 +41,7 @@ from tiny_pki.constants import (
 )
 from tiny_pki.errors import TinyPkiError, TinyPkiWarning
 from tiny_pki.inspect import (
+    CsrSummary,
     get_certificate_expiry,
     get_certificate_fingerprint,
     get_certificate_issuer,
@@ -48,6 +49,7 @@ from tiny_pki.inspect import (
     get_certificate_sans,
     get_certificate_serial_number,
     get_certificate_subject,
+    inspect_csr,
     is_certificate_self_signed,
 )
 from tiny_pki.issue import (
@@ -55,6 +57,7 @@ from tiny_pki.issue import (
     generate_client_certificate,
     generate_server_certificate,
     max_leaf_validity_days,
+    sign_client_csr,
 )
 from tiny_pki.revoke import generate_crl
 from tiny_pki.version import package_version
@@ -67,6 +70,7 @@ __all__ = [
     "CLOCK_SKEW_BACKDATE",
     "CertificateKind",
     "CertificateStatus",
+    "CsrSummary",
     "DEFAULT_CA_KEY_SIZE",
     "DEFAULT_CA_VALIDITY_DAYS",
     "DEFAULT_CLIENT_VALIDITY_DAYS",
@@ -104,7 +108,9 @@ __all__ = [
     "get_certificate_sans",
     "get_certificate_serial_number",
     "get_certificate_subject",
+    "inspect_csr",
     "is_certificate_self_signed",
     "max_leaf_validity_days",
+    "sign_client_csr",
     "worst_status",
 ]

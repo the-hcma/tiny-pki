@@ -31,6 +31,7 @@ from tiny_pki import (
     KEY_TYPES,
     MAX_STORE_CRL_VALIDITY_DAYS,
     MAX_VALIDITY_DAYS,
+    CsrSummary,
     KeyType,
     TinyPkiWarning,
     generate_ca_certificate,
@@ -41,7 +42,9 @@ from tiny_pki import (
     get_certificate_sans,
     get_certificate_serial_number,
     get_certificate_subject,
+    inspect_csr,
 )
+from tiny_pki._csr import is_csr_data
 from tiny_pki._fsutil import write_file_atomic
 from tiny_pki.check import CertificateStatus, Status, check_certificate, check_crl, worst_status
 from tiny_pki.cli.commands import COMMAND_FLAGS
@@ -93,6 +96,7 @@ def dispatch(
         "list": _cmd_list,
         "revoke": _cmd_revoke,
         "show": _cmd_show,
+        "sign": _cmd_sign,
     }
     handler = handlers.get(command)
     if handler is None:
@@ -278,10 +282,62 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
     print(theme.ok(f"issued {kind} {entry.common_name}"))
     print(theme.dim(f"serial {entry.serial_number}  fp {entry.fingerprint}"))
     if "keep-previous" in opts["flags"]:
-        for old, new in store.superseded_serials().items():
-            if new == entry.serial_number:
-                hint = f"previous serial {old} stays live; run `revoke 0x{old}` once the device has the new one"
-                print(theme.warn(hint))
+        _print_superseded_hints(store, entry, theme)
+
+
+def _cmd_sign(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
+    store = _require_store(store)
+    if not args:
+        raise ValueError("Expected sign client <name> --csr PATH")
+    kind = args[0]
+    if kind != "client":
+        raise ValueError(f"Expected sign client, got {kind!r}; only client certificates can be signed from a CSR")
+    opts = _parse_flags(args[1:], command="sign")
+    name = _require_one_positional(opts, "sign client <name> --csr PATH")
+    csr_flag = opts["flags"].get("csr")
+    if not csr_flag:
+        raise ValueError("Expected --csr PATH with the device's certificate signing request")
+    csr_path = Path(csr_flag)
+    try:
+        csr_pem = csr_path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"Expected a readable --csr file, got {csr_path} ({exc.strerror})") from exc
+    days = _parse_days(
+        opts["flags"].get("days", str(DEFAULT_CLIENT_VALIDITY_DAYS)), default=DEFAULT_CLIENT_VALIDITY_DAYS
+    )
+    key_secret = _key_secret(opts["flags"], store=store, theme=theme)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", TinyPkiWarning)
+        entry = store.sign_client_csr(
+            name,
+            csr_pem,
+            organization_name=opts["flags"].get("org"),
+            validity_days=days,
+            allow_long_validity="allow-long-validity" in opts["flags"],
+            allow_dn_special_chars="allow-dn-special-chars" in opts["flags"],
+            keep_previous="keep-previous" in opts["flags"],
+            key_secret=key_secret,
+        )
+    for warning in caught:
+        print(theme.warn(f"warning: {warning.message}"), file=sys.stderr)
+
+    print(theme.ok(f"issued client {entry.common_name} from {csr_path} (the private key stays on the device)"))
+    print(theme.dim(f"serial {entry.serial_number}  fp {entry.fingerprint}"))
+    out_flag = opts["flags"].get("out")
+    if out_flag:
+        out = Path(out_flag)
+        write_file_atomic(out, store.read_certificate_pem(entry), mode=0o644)
+        print(theme.ok(f"wrote {out}"))
+    if "keep-previous" in opts["flags"]:
+        _print_superseded_hints(store, entry, theme)
+
+
+def _print_superseded_hints(store: CertificateStore, entry: IssuedCertificate, theme: Theme) -> None:
+    for old, new in store.superseded_serials().items():
+        if new == entry.serial_number:
+            hint = f"previous serial {old} stays live; run `revoke 0x{old}` once the device has the new one"
+            print(theme.warn(hint))
 
 
 def _cmd_show(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
@@ -457,7 +513,11 @@ def _cmd_inspect(args: list[str], *, store: CertificateStore | None, theme: Them
     target = _require_one_positional(_parse_flags(args, command="inspect"), "inspect <identity|path>")
     path = Path(target)
     if path.is_file():
-        _print_cert_summary(path.read_bytes(), theme)
+        data = path.read_bytes()
+        if is_csr_data(data):
+            _print_csr_summary(inspect_csr(data), theme)
+        else:
+            _print_cert_summary(data, theme)
         return
     store = _require_store(store)
     entry = store.get_certificate(target)
@@ -529,7 +589,19 @@ def _cmd_export(args: list[str], *, store: CertificateStore | None, theme: Theme
     entry = store.get_certificate(identity)
     if entry is None:
         raise KeyError(f"Expected issued certificate matching {identity!r}")
+    if fmt not in {"pem", "p12"}:
+        raise ValueError(f"Expected export pem|p12, got {fmt!r}")
     cert_pem = store.read_certificate_pem(entry)
+    if not entry.key_path:
+        if fmt == "p12":
+            raise ValueError(
+                f"Expected a private key for {entry.common_name!r} to build a PKCS#12 bundle, but it was signed "
+                "from a CSR and its key stays on the device; use export pem for the certificate"
+            )
+        out = Path(opts["flags"].get("out", f"{_safe_export_name(entry.common_name)}.pem"))
+        write_file_atomic(out, cert_pem, mode=0o644)
+        print(theme.ok(f"wrote {out} (certificate only: the private key stays on the device)"))
+        return
     key_pem = store.read_key_pem(entry)
     ca_cert = store.read_ca_certificate()
 
@@ -796,6 +868,24 @@ def _print_cert_summary(
     sans = get_certificate_sans(cert_pem)
     if sans:
         print(f"sans      {', '.join(sans)}")
+
+
+def _print_csr_summary(summary: CsrSummary, theme: Theme) -> None:
+    key = f"{summary.key_type} {summary.key_size}" if summary.key_size is not None else summary.key_type
+    print(f"csr subject {summary.subject or '(empty)'}")
+    if summary.sans:
+        print(f"sans      {', '.join(summary.sans)}")
+    print(f"key       {key}")
+    print(f"signature {summary.signature_hash or 'unknown'}")
+    print(f"public key sha256 {summary.public_key_fingerprint or 'unavailable'}")
+    if summary.requested_extensions:
+        print(theme.dim(f"requests  {', '.join(summary.requested_extensions)} (ignored when signing)"))
+    if summary.problems:
+        print(theme.error("status    refused: sign would reject this CSR"))
+        for problem in summary.problems:
+            print(theme.dim(f"          {problem}"))
+    else:
+        print(f"status    {theme.ok('signable')}")
 
 
 def _check_file(

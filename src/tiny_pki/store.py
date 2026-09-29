@@ -12,7 +12,7 @@ Layout (one CA per store root)::
     $STORE/
       ca/ca.crt  ca/ca.key  ca/crl.pem  ca/crlnumber  ca/crldays  ca/index.json
       public/ca.crt  public/crl.pem
-      clients/{cn}-{serial}.{crt,key}
+      clients/{cn}-{serial}.{crt,key}   (no .key for a certificate signed from a CSR)
       servers/{cn}-{serial}.{crt,key}
       bundles/{cn}-{serial}.p12
 
@@ -21,7 +21,7 @@ automatically on first ``ensure_layout``.
 
 Methods that change the index (``add_certificate``, ``mark_revoked``,
 ``delete_certificate`` and the CLI-shaped ``issue_client`` / ``issue_server`` /
-``revoke`` / ``delete``) republish ``ca/crl.pem`` with the store's CA key, so the
+``sign_client_csr`` / ``revoke`` / ``delete``) republish ``ca/crl.pem`` with the store's CA key, so the
 CRL never lags ``index.json``. :func:`check_store` is the store health check
 behind ``tiny-pki check``.
 
@@ -63,7 +63,7 @@ from tiny_pki.constants import (
 )
 from tiny_pki.errors import TinyPkiError
 from tiny_pki.inspect import get_certificate_expiry, get_certificate_fingerprint, get_certificate_serial_number
-from tiny_pki.issue import generate_client_certificate, generate_server_certificate
+from tiny_pki.issue import generate_client_certificate, generate_server_certificate, sign_client_csr
 from tiny_pki.revoke import generate_crl
 from tiny_pki.secrets import (
     decrypt_private_key_scrypt,
@@ -173,13 +173,16 @@ class CertificateStore:
         kind: CertKind,
         serial_number: int,
         cert_pem: bytes,
-        key_pem: bytes,
+        key_pem: bytes | None,
         not_valid_after: datetime,
         fingerprint: str,
         keep_previous: bool = False,
         key_secret: str | None = None,
     ) -> IssuedCertificate:
         """Write cert/key PEMs and append an index entry.
+
+        ``key_pem=None`` records a certificate whose private key never reached the
+        store (issued from a CSR): no key file is written and ``key_path`` is empty.
 
         Revoked tombstones for the same common name are retained for CRL generation.
         Re-issuing under an existing live CN auto-revokes the superseded serial, and
@@ -204,9 +207,10 @@ class CertificateStore:
         leaf_dir = "clients" if kind == "client" else "servers"
         safe = _safe_filename(common_name)
         cert_rel = f"{leaf_dir}/{safe}-{serial_hex}.crt"
-        key_rel = f"{leaf_dir}/{safe}-{serial_hex}.key"
+        key_rel = f"{leaf_dir}/{safe}-{serial_hex}.key" if key_pem is not None else ""
         _write_plain(self._validated_write_path(cert_rel), cert_pem)
-        _write_secret(self._validated_write_path(key_rel), key_pem)
+        if key_pem is not None:
+            _write_secret(self._validated_write_path(key_rel), key_pem)
 
         entry = IssuedCertificate(
             common_name=common_name,
@@ -620,6 +624,41 @@ class CertificateStore:
         )
         return self._record(common_name, "server", cert_pem, key_pem, key_secret=key_secret)
 
+    @_locked
+    def sign_client_csr(
+        self,
+        common_name: str,
+        csr_pem: bytes,
+        *,
+        organization_name: str | None = None,
+        validity_days: int = DEFAULT_CLIENT_VALIDITY_DAYS,
+        allow_long_validity: bool = False,
+        allow_dn_special_chars: bool = False,
+        keep_previous: bool = False,
+        key_secret: str | None = None,
+    ) -> IssuedCertificate:
+        """Sign a device's CSR as a client certificate and record it, as ``tiny-pki sign client``.
+
+        Arguments match :func:`tiny_pki.sign_client_csr`. The entry has no
+        ``key_path``: the private key stays on the device. Replacement,
+        ``keep_previous`` and CRL republishing behave as in :meth:`issue_client`.
+        """
+        ca_material = self._require_ca_signing_key(key_secret)
+        if ca_material is None:
+            raise FileNotFoundError(f"Expected CA files under {self.ca_dir}")
+        ca_cert, ca_key = ca_material
+        cert_pem = sign_client_csr(
+            ca_cert,
+            ca_key,
+            csr_pem,
+            common_name,
+            organization_name=organization_name,
+            validity_days=validity_days,
+            allow_long_validity=allow_long_validity,
+            allow_dn_special_chars=allow_dn_special_chars,
+        )
+        return self._record(common_name, "client", cert_pem, None, keep_previous=keep_previous, key_secret=key_secret)
+
     def revoke(self, identity: str, *, key_secret: str | None = None) -> IssuedCertificate:
         """Revoke a certificate, as ``tiny-pki revoke``; see :meth:`mark_revoked`."""
         return self.mark_revoked(identity, key_secret=key_secret)
@@ -800,7 +839,7 @@ class CertificateStore:
         common_name: str,
         kind: CertKind,
         cert_pem: bytes,
-        key_pem: bytes,
+        key_pem: bytes | None,
         *,
         keep_previous: bool = False,
         key_secret: str | None = None,

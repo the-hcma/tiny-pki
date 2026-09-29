@@ -107,6 +107,16 @@ COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
     "list": (_JSON,),
     "revoke": (_KEY_SECRET_FILE, _DRY_RUN),
     "show": (),
+    "sign": (
+        Flag("allow-dn-special-chars", 'allow , + = " < > ; or a leading # in the CN'),
+        Flag("allow-long-validity", "allow validity beyond the 825 day client cap"),
+        Flag("csr", "the device's certificate signing request (PEM or DER)", value="PATH", path=True),
+        Flag("days", "validity in days (default 397)", value="N", allow_empty=True),
+        Flag("keep-previous", "keep the previous certificate live for rotation"),
+        _KEY_SECRET_FILE,
+        _ORG,
+        Flag("out", "also write the issued certificate to this file", value="PATH", path=True),
+    ),
 }
 COMMAND_FLAGS["renew-crl"] = COMMAND_FLAGS["crl"]
 COMMAND_FLAGS["completion"] = (
@@ -132,6 +142,7 @@ COMMAND_USAGE: dict[str, str] = {
     "renew-crl": "renew-crl",
     "revoke": "revoke NAME|0xSERIAL",
     "show": "show ca|certs|crl|NAME",
+    "sign": "sign client NAME --csr PATH",
 }
 
 COMMAND_HELP: tuple[tuple[str, str], ...] = (
@@ -151,12 +162,13 @@ COMMAND_HELP: tuple[tuple[str, str], ...] = (
     ("export", "Export pem|p12 for an identity."),
     ("help", "Show this list, or help <command> for its usage and flags."),
     ("init", "Create a new CA in --store."),
-    ("inspect", "Inspect a store identity or PEM path."),
+    ("inspect", "Inspect a store identity, a certificate file, or a CSR file."),
     ("list", "List ca|clients|servers|revoked|certs (optional --json)."),
     ("quit", "Leave the REPL (same as exit)."),
     ("renew-crl", "Alias for crl."),
     ("revoke", "Revoke an identity and regenerate the CRL; --dry-run previews."),
     ("show", "Show ca|certs|crl|<identity> (aliases list categories)."),
+    ("sign", "Issue a client certificate for a device's CSR; the private key stays on the device."),
 )
 
 COMMANDS: tuple[str, ...] = tuple(sorted({name for name, _ in COMMAND_HELP}))
@@ -169,6 +181,7 @@ POSITIONAL_CHOICES: dict[str, tuple[str, ...]] = {
     "help": COMMANDS,
     "list": ("ca", "certs", "clients", "revoked", "servers"),
     "show": ("ca", "certs", "clients", "crl", "revoked", "servers"),
+    "sign": ("client",),
 }
 
 PKI_COMMANDS: frozenset[str] = frozenset(
@@ -186,5 +199,6 @@ PKI_COMMANDS: frozenset[str] = frozenset(
         "renew-crl",
         "revoke",
         "show",
+        "sign",
     }
 )

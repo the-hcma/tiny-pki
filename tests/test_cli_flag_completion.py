@@ -48,6 +48,8 @@ def _bash_complete(tmp_path: Path, *words: str) -> list[str]:
         (("--store", "/tmp/s", "init", "--key-type", "e"), ["ec-p256"]),
         (("--color", ""), ["auto", "always", "never"]),
         (("create", ""), ["client", "server"]),
+        (("sign", ""), ["client"]),
+        (("sign", "client", "alice", "--cs"), ["--csr"]),
         (("revoke", "alice", "--"), ["--dry-run", "--key-secret-file"]),
         (("delete", "--"), ["--force", "--dry-run", "--key-secret-file"]),
         (("check", "--kind", ""), ["ca", "client", "crl", "server"]),
