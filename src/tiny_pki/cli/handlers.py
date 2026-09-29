@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import getpass
 import json
+import os
+import stat
 import sys
 import warnings
 from collections import Counter
@@ -82,7 +84,9 @@ def dispatch(
         "check": _cmd_check,
         "create": _cmd_create,
         "crl": _cmd_crl,
+        "decrypt-key": _cmd_decrypt_key,
         "delete": _cmd_delete,
+        "encrypt-key": _cmd_encrypt_key,
         "export": _cmd_export,
         "init": _cmd_init,
         "inspect": _cmd_inspect,
@@ -129,6 +133,10 @@ def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) 
         raise ValueError("init takes no positional arguments; use --cn / --org")
     if store.has_ca():
         raise ValueError(f"CA already exists under {store.root}")
+    encrypted_key = "encrypt-key" in opts["flags"]
+    if "key-secret-file" in opts["flags"] and not encrypted_key:
+        raise ValueError("--key-secret-file requires --encrypt-key for init")
+    key_secret = _required_key_secret(opts["flags"], store=store, theme=theme, confirm=True) if encrypted_key else None
     crl_days = _parse_crl_days(opts["flags"]["crl-days"], "--crl-days") if "crl-days" in opts["flags"] else None
     cn = opts["flags"].get("cn", "Private CA")
     org = opts["flags"].get("org", DEFAULT_ORGANIZATION_NAME)
@@ -142,10 +150,12 @@ def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) 
         key_type=key_type,
         permitted_subtrees=opts["multi"].get("permit"),
     )
-    store.write_ca(cert_pem, key_pem)
-    store.publish_crl(validity_days=crl_days)
+    store.write_ca(cert_pem, key_pem, key_secret=key_secret)
+    store.publish_crl(validity_days=crl_days, key_secret=key_secret)
     print(theme.ok(f"CA created: {get_certificate_subject(cert_pem)}"))
     print(theme.dim(f"fingerprint {get_certificate_fingerprint(cert_pem)}"))
+    if encrypted_key and "key-secret-file" in opts["flags"]:
+        _offer_to_remove_key_secret_file(Path(opts["flags"]["key-secret-file"]), theme)
 
 
 def _cmd_check(args: list[str], *, store: CertificateStore | None, theme: Theme) -> int:
@@ -226,7 +236,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
         raise ValueError("--keep-previous is only supported for client certificates")
     if "no-cn-san" in opts["flags"] and not opts["multi"].get("san"):
         raise ValueError("Expected --san with --no-cn-san; without --san the CN is the only SAN")
-    store.read_ca()
+    key_secret = _key_secret(opts["flags"], store=store, theme=theme)
     default_days = DEFAULT_CLIENT_VALIDITY_DAYS if kind == "client" else DEFAULT_SERVER_VALIDITY_DAYS
     days = _parse_days(opts["flags"].get("days", str(default_days)), default=default_days)
     key_type, key_size = _parse_key_options(opts["flags"])
@@ -246,6 +256,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
                 allow_long_validity=allow_long_validity,
                 allow_dn_special_chars=allow_dn_special_chars,
                 keep_previous="keep-previous" in opts["flags"],
+                key_secret=key_secret,
             )
         else:
             sans = [s for s in opts["multi"].get("san", []) if s] or [name]
@@ -259,6 +270,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
                 allow_long_validity=allow_long_validity,
                 include_common_name_in_sans=_confirm_cn_in_sans(name, sans, opts["flags"]),
                 allow_dn_special_chars=allow_dn_special_chars,
+                key_secret=key_secret,
             )
     for warning in caught:
         print(theme.warn(f"warning: {warning.message}"), file=sys.stderr)
@@ -348,7 +360,7 @@ def _cmd_list(args: list[str], *, store: CertificateStore | None, theme: Theme) 
 
 
 def _list_ca(store: CertificateStore, *, theme: Theme, as_json: bool) -> None:
-    ca_cert, _ = store.read_ca()
+    ca_cert = store.read_ca_certificate()
     if as_json:
         print(
             json.dumps(
@@ -377,7 +389,7 @@ def _list_summary(store: CertificateStore, *, theme: Theme, as_json: bool) -> No
     clients = store.list_certificates(kind="client", status="active")
     servers = store.list_certificates(kind="server", status="active")
     revoked = store.list_certificates(status="revoked")
-    ca_cn = get_certificate_subject(store.read_ca()[0]) if store.has_ca() else None
+    ca_cn = get_certificate_subject(store.read_ca_certificate()) if store.has_ca() else None
     if as_json:
         print(
             json.dumps(
@@ -472,7 +484,8 @@ def _cmd_revoke(args: list[str], *, store: CertificateStore | None, theme: Theme
             print(theme.dim(f"{target.common_name} is already revoked (at {target.revoked_at}); nothing to do"))
         print(theme.dim("dry run: nothing written"))
         return
-    entry = store.revoke(identity)
+    key_secret = _key_secret(opts["flags"], store=store, theme=theme)
+    entry = store.revoke(identity, key_secret=key_secret)
     print(theme.warn(f"revoked {entry.common_name}"))
     if store.has_ca():
         print(theme.dim(f"crl updated: {store.crl_path}"))
@@ -498,7 +511,8 @@ def _cmd_delete(args: list[str], *, store: CertificateStore | None, theme: Theme
         print(theme.warn(f"would {verb} {before.kind} {before.common_name} (serial {before.serial_number})"))
         print(theme.dim("dry run: nothing written"))
         return
-    entry = store.delete(identity, force=force)
+    key_secret = _key_secret(opts["flags"], store=store, theme=theme)
+    entry = store.delete(identity, force=force, key_secret=key_secret)
     if before is not None and before.revoked_at is None:
         print(theme.ok(f"revoked and deleted {entry.common_name} (serial {entry.serial_number})"))
     else:
@@ -517,7 +531,7 @@ def _cmd_export(args: list[str], *, store: CertificateStore | None, theme: Theme
         raise KeyError(f"Expected issued certificate matching {identity!r}")
     cert_pem = store.read_certificate_pem(entry)
     key_pem = store.read_key_pem(entry)
-    ca_cert, _ = store.read_ca()
+    ca_cert = store.read_ca_certificate()
 
     if fmt == "pem":
         out = Path(opts["flags"].get("out", f"{_safe_export_name(entry.common_name)}.pem"))
@@ -614,14 +628,152 @@ def _read_password_file(path: Path) -> str:
     return password
 
 
+def _key_secret(
+    flags: dict[str, str],
+    *,
+    store: CertificateStore,
+    theme: Theme,
+    required: bool = False,
+    confirm: bool = False,
+) -> str | None:
+    """Load a CA-key secret from a file/credential or prompt without exposing it in argv."""
+    explicit_path = flags.get("key-secret-file")
+    if not required and not store.ca_key_encrypted:
+        if explicit_path is not None:
+            print(
+                theme.warn("warning: --key-secret-file is unused because the CA private key is not encrypted"),
+                file=sys.stderr,
+            )
+        return None
+    secret_path = explicit_path or os.environ.get("TINY_PKI_KEY_SECRET_FILE")
+    if secret_path is None:
+        credentials_dir = os.environ.get("CREDENTIALS_DIRECTORY")
+        if credentials_dir is not None:
+            credential = Path(credentials_dir) / "tiny-pki-key"
+            if credential.is_file():
+                secret_path = str(credential)
+    if secret_path is not None:
+        return _read_key_secret_file(Path(secret_path), theme=theme)
+    if not sys.stdin.isatty():
+        raise ValueError(
+            "Expected --key-secret-file PATH, TINY_PKI_KEY_SECRET_FILE, or systemd tiny-pki-key credential"
+        )
+    try:
+        secret = getpass.getpass("CA key secret: ")
+        if not secret:
+            raise ValueError("Expected a non-empty CA key secret")
+        if confirm and getpass.getpass("Repeat CA key secret: ") != secret:
+            raise ValueError("Expected the repeated CA key secret to match")
+    except EOFError as exc:
+        raise ValueError("Expected a CA key secret") from exc
+    return secret
+
+
+def _required_key_secret(flags: dict[str, str], *, store: CertificateStore, theme: Theme, confirm: bool = False) -> str:
+    secret = _key_secret(flags, store=store, theme=theme, required=True, confirm=confirm)
+    if secret is None:
+        raise ValueError("Expected a CA key secret")
+    return secret
+
+
+def _read_key_secret_file(path: Path, *, theme: Theme) -> str:
+    """Read the first UTF-8 line from a secret file without echoing its contents."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"Expected a readable CA key secret file, got {path} ({exc.strerror})") from exc
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Expected a UTF-8 CA key secret file, got undecodable bytes in {path}") from exc
+    lines = text.splitlines()
+    secret = lines[0] if lines else ""
+    if not secret:
+        raise ValueError(f"Expected a non-empty CA key secret on the first line of {path}")
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError as exc:
+        print(theme.warn(f"warning: could not verify permissions on CA key secret file {path}: {exc}"), file=sys.stderr)
+    else:
+        if mode & 0o077:
+            print(
+                theme.warn(f"warning: CA key secret file {path} is accessible to group or other users"),
+                file=sys.stderr,
+            )
+    return secret
+
+
+def _offer_to_remove_key_secret_file(path: Path, theme: Theme) -> None:
+    """Offer to remove a secret staging file after encrypting the CA key."""
+    print(theme.warn(f"warning: {path} contains the CA key secret in plaintext"), file=sys.stderr)
+    resolved_path = path.resolve()
+    configured_path = os.environ.get("TINY_PKI_KEY_SECRET_FILE")
+    if configured_path and resolved_path == Path(configured_path).expanduser().resolve():
+        print(theme.warn(f"warning: keeping {path}; TINY_PKI_KEY_SECRET_FILE points to this file"), file=sys.stderr)
+        return
+    credentials_dir = os.environ.get("CREDENTIALS_DIRECTORY")
+    if credentials_dir:
+        resolved_credentials_dir = Path(credentials_dir).expanduser().resolve()
+        if resolved_path.is_relative_to(resolved_credentials_dir):
+            print(theme.warn(f"warning: keeping {path}; it is under CREDENTIALS_DIRECTORY"), file=sys.stderr)
+            return
+    if not sys.stdin.isatty():
+        print(
+            theme.warn(f"warning: left {path} in place; remove it after provisioning a durable secret source"),
+            file=sys.stderr,
+        )
+        return
+    try:
+        answer = input(f"Remove temporary secret file {path} now? [y/N] ")
+    except (EOFError, KeyboardInterrupt):
+        answer = "n"
+    if answer.strip().lower() in {"y", "yes"}:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            print(theme.warn(f"warning: could not remove {path}: {exc}"), file=sys.stderr)
+        else:
+            print(theme.ok(f"removed {path}"))
+    else:
+        print(
+            theme.warn(f"warning: left {path} in place; protect it and remove it when no longer needed"),
+            file=sys.stderr,
+        )
+
+
 def _cmd_crl(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     opts = _parse_flags(args, command="crl")
     if opts["positional"]:
         raise ValueError(f"crl takes no positional arguments, got {' '.join(opts['positional'])}")
     days = _parse_crl_days(opts["flags"]["days"], "--days") if "days" in opts["flags"] else None
     store = _require_store(store)
-    store.publish_crl(validity_days=days)
+    key_secret = _key_secret(opts["flags"], store=store, theme=theme)
+    store.publish_crl(validity_days=days, key_secret=key_secret)
     print(theme.ok(f"crl regenerated: {store.crl_path} (valid {store.crl_validity_days} days)"))
+
+
+def _cmd_encrypt_key(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
+    store = _require_store(store)
+    opts = _parse_flags(args, command="encrypt-key")
+    if opts["positional"]:
+        raise ValueError("encrypt-key takes no positional arguments")
+    if store.ca_key_encrypted:
+        raise ValueError("The CA private key is already encrypted")
+    key_secret = _required_key_secret(opts["flags"], store=store, theme=theme, confirm=True)
+    store.encrypt_ca_key(key_secret)
+    print(theme.ok(f"CA private key encrypted: {store.ca_key_path}"))
+    if "key-secret-file" in opts["flags"]:
+        _offer_to_remove_key_secret_file(Path(opts["flags"]["key-secret-file"]), theme)
+
+
+def _cmd_decrypt_key(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
+    store = _require_store(store)
+    opts = _parse_flags(args, command="decrypt-key")
+    if opts["positional"]:
+        raise ValueError("decrypt-key takes no positional arguments")
+    if not store.ca_key_encrypted:
+        raise ValueError("The CA private key is not encrypted")
+    key_secret = _required_key_secret(opts["flags"], store=store, theme=theme)
+    store.decrypt_ca_key(key_secret)
+    print(theme.ok(f"CA private key decrypted: {store.ca_key_path}"))
 
 
 def _print_cert_summary(

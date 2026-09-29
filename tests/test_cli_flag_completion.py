@@ -48,16 +48,29 @@ def _bash_complete(tmp_path: Path, *words: str) -> list[str]:
         (("--store", "/tmp/s", "init", "--key-type", "e"), ["ec-p256"]),
         (("--color", ""), ["auto", "always", "never"]),
         (("create", ""), ["client", "server"]),
-        (("revoke", "alice", "--"), ["--dry-run"]),
-        (("delete", "--"), ["--force", "--dry-run"]),
+        (("revoke", "alice", "--"), ["--dry-run", "--key-secret-file"]),
+        (("delete", "--"), ["--force", "--dry-run", "--key-secret-file"]),
         (("check", "--kind", ""), ["ca", "client", "crl", "server"]),
         (("list", "--"), ["--json"]),
         (("completion", ""), ["bash", "fish", "zsh"]),
         (("create", "client", "alice", "--da"), ["--days"]),
         (("list", ""), ["ca", "certs", "clients", "revoked", "servers"]),
         (("show", "c"), ["ca", "certs", "clients", "crl"]),
-        (("init", ""), ["--cn", "--crl-days", "--days", "--key-size", "--key-type", "--org", "--permit"]),
-        (("revoke", "alice", ""), ["--dry-run"]),
+        (
+            ("init", ""),
+            [
+                "--cn",
+                "--crl-days",
+                "--days",
+                "--encrypt-key",
+                "--key-secret-file",
+                "--key-size",
+                "--key-type",
+                "--org",
+                "--permit",
+            ],
+        ),
+        (("revoke", "alice", ""), ["--dry-run", "--key-secret-file"]),
         (("list", "--color", ""), ["auto", "always", "never"]),
         (("check", "--edit-mode", "e"), ["emacs"]),
         (("help", "re"), ["renew-crl", "revoke"]),
@@ -141,10 +154,13 @@ def _repl(text: str) -> list[str]:
 
 
 def test_repl_completes_flags_and_values() -> None:
-    assert_that(_repl("create client alice --ke"), contains_inanyorder("--keep-previous", "--key-size", "--key-type"))
+    assert_that(
+        _repl("create client alice --ke"),
+        contains_inanyorder("--keep-previous", "--key-secret-file", "--key-size", "--key-type"),
+    )
     assert_that(_repl("create client alice --key-type "), contains_inanyorder("rsa", "ec-p256"))
     assert_that(_repl("init --key-size 3"), equal_to(["3072"]))
-    assert_that(_repl("revoke alice --"), equal_to(["--dry-run"]))
+    assert_that(_repl("revoke alice --"), contains_inanyorder("--dry-run", "--key-secret-file"))
 
 
 def test_repl_completes_positional_choices_from_the_table() -> None:

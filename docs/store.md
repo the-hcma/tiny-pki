@@ -6,7 +6,7 @@ The CLI keeps one CA per store directory. Writes always need an explicit path (`
 $TINY_PKI_STORE/
   ca/
     ca.crt        # CA certificate
-    ca.key        # CA private key (mode 0600, unencrypted PEM)
+    ca.key        # CA private key (mode 0600; plaintext PEM or versioned Fernet ciphertext)
     crl.pem       # current CRL (rewritten on revoke / delete / crl)
     crlnumber     # last published CRL number (keeps it monotonic across clock steps)
     crldays       # CRL lifetime in days for every publish (init --crl-days / crl --days; 30 if absent)
@@ -20,7 +20,7 @@ $TINY_PKI_STORE/
   bundles/{cn}-{serial}.p12
 ```
 
-Private keys, PKCS#12 bundles, and `index.json` are created with mode `0600` from the first byte. Directories the store creates are `0700`, whatever the umask, except `public/` (below). Existing store directories you own lose their world-write bit when the store is opened. Group write is kept, since a group-shared store is a deliberate choice, and read access is left alone. Leaf and bundle writes, and leaf reads such as `export`, refuse a symlink at any path component. Every write goes to a temp file in the same directory, is `fsync`ed, and is renamed into place, so a crash or a concurrent reader (an nginx reload) never sees a truncated key, CRL, or index. File names include the hex serial so re-issuing a CN never overwrites the old material.
+Private keys, PKCS#12 bundles, and `index.json` are created with mode `0600` from the first byte. `ca/ca.key` is plaintext PEM by default; `init --encrypt-key` stores a versioned Fernet ciphertext with a per-key salt and Scrypt-derived key instead. Use a long, random secret: Scrypt slows offline guessing but cannot make a weak secret strong. Directories the store creates are `0700`, whatever the umask, except `public/` (below). Existing store directories you own lose their world-write bit when the store is opened. Group write is kept, since a group-shared store is a deliberate choice, and read access is left alone. Leaf and bundle writes, and leaf reads such as `export`, refuse a symlink at any path component. Every write goes to a temp file in the same directory, is `fsync`ed, and is renamed into place, so a crash or a concurrent reader (an nginx reload) never sees a truncated key, CRL, or index. File names include the hex serial so re-issuing a CN never overwrites the old material.
 
 ## `public/` for TLS servers
 
@@ -121,4 +121,8 @@ rows = check_store(store, within=None, include_revoked=False)  # check (store)
 | `set_crl_validity_days(days)` / `crl_validity_days` | `init --crl-days`, `crl --days` | Set or read the CRL lifetime (1–365 days, default 30) that every publish uses. |
 | `check_store(store, *, within, by, kinds, include_revoked)` | `check` | `(name, CertificateStatus)` rows with the same statuses and reasons as `check --json`. `index.json` is authoritative: a CRL missing a serial it records as revoked is `untrusted`. |
 
-The lower-level `add_certificate`, `mark_revoked` and `delete_certificate` also republish `ca/crl.pem` whenever the store has a CA, so no call sequence leaves the CRL behind the index.
+The lower-level `add_certificate`, `mark_revoked` and `delete_certificate` also republish `ca/crl.pem` whenever the store has a CA, so no call sequence leaves the CRL behind the index. They validate the CA signing key before updating the index; on encrypted stores they therefore need `key_secret=`, while plaintext stores need no secret.
+
+For an encrypted CA key, pass `key_secret=` to `read_ca`, `write_ca`, `add_certificate`, `issue_client`, `issue_server`, `publish_crl`, `mark_revoked`, `revoke`, `delete_certificate`, and `delete` as applicable. These methods continue to work without a secret for plaintext stores. `read_ca_certificate()` reads only the public certificate and remains usable without a secret; `check_store()` also needs no key secret.
+
+`encrypt_ca_key(secret)` and `decrypt_ca_key(secret)` migrate `ca/ca.key` in place under the store lock. Ciphertext records the Scrypt work parameters alongside a random per-key salt before the Fernet token. Both use atomic mode-0600 replacement; a wrong decryption secret leaves the original ciphertext untouched.

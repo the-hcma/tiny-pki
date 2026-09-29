@@ -48,8 +48,10 @@ from pathlib import Path
 from typing import Any, Concatenate, Literal, cast
 
 from cryptography import x509
+from cryptography.fernet import InvalidToken
 
 from tiny_pki._fsutil import write_file_atomic
+from tiny_pki._keys import load_ca_private_key
 from tiny_pki.check import CertificateStatus, Status, check_certificate, check_crl
 from tiny_pki.constants import (
     DEFAULT_CLIENT_VALIDITY_DAYS,
@@ -63,6 +65,10 @@ from tiny_pki.errors import TinyPkiError
 from tiny_pki.inspect import get_certificate_expiry, get_certificate_fingerprint, get_certificate_serial_number
 from tiny_pki.issue import generate_client_certificate, generate_server_certificate
 from tiny_pki.revoke import generate_crl
+from tiny_pki.secrets import (
+    decrypt_private_key_scrypt,
+    encrypt_private_key_scrypt,
+)
 
 if sys.platform != "win32":
     import fcntl
@@ -171,6 +177,7 @@ class CertificateStore:
         not_valid_after: datetime,
         fingerprint: str,
         keep_previous: bool = False,
+        key_secret: str | None = None,
     ) -> IssuedCertificate:
         """Write cert/key PEMs and append an index entry.
 
@@ -180,11 +187,13 @@ class CertificateStore:
         ``keep_previous=True`` leaves earlier live certificates of the same kind
         for the CN live (routine rotation); the CN then resolves to the new one,
         and the older serials are :meth:`superseded_serials` until revoked by
-        serial. A live certificate of the other kind is still revoked.
+        serial. A live certificate of the other kind is still revoked. Encrypted
+        stores require ``key_secret`` so the CRL can be republished.
         """
         self.ensure_layout()
         if kind not in ("client", "server"):
             raise ValueError(f"Expected kind 'client' or 'server', got {kind!r}")
+        self._require_ca_signing_key(key_secret)
         common_name = common_name.strip()
         if not common_name:
             raise ValueError("Expected a non-empty common_name")
@@ -247,11 +256,13 @@ class CertificateStore:
         self._write_index(entries)
         for rel in unlink_paths:
             (self.root / rel).unlink(missing_ok=True)
-        self._republish_crl()
+        self._republish_crl(key_secret=key_secret)
         return entry
 
     @_locked
-    def delete_certificate(self, identity: str, *, force: bool = False) -> IssuedCertificate:
+    def delete_certificate(
+        self, identity: str, *, force: bool = False, key_secret: str | None = None
+    ) -> IssuedCertificate:
         """Remove cert/key files from disk, keeping a revoked tombstone in the index.
 
         Active (non-revoked) certificates require ``force=True``, which revokes
@@ -270,6 +281,7 @@ class CertificateStore:
                 f"Certificate {entry.common_name!r} is still active; revoke it first, "
                 "or pass force=True (CLI: --force) to revoke and delete it in one step"
             )
+        self._require_ca_signing_key(key_secret)
 
         tombstone = IssuedCertificate(
             common_name=entry.common_name,
@@ -290,12 +302,12 @@ class CertificateStore:
             (self.root / entry.cert_path).unlink(missing_ok=True)
         if entry.key_path:
             (self.root / entry.key_path).unlink(missing_ok=True)
-        self._republish_crl()
+        self._republish_crl(key_secret=key_secret)
         return tombstone
 
-    def delete(self, identity: str, *, force: bool = False) -> IssuedCertificate:
+    def delete(self, identity: str, *, force: bool = False, key_secret: str | None = None) -> IssuedCertificate:
         """Delete a certificate's files, as ``tiny-pki delete``; see :meth:`delete_certificate`."""
-        return self.delete_certificate(identity, force=force)
+        return self.delete_certificate(identity, force=force, key_secret=key_secret)
 
     @_locked
     def ensure_layout(self) -> None:
@@ -364,6 +376,15 @@ class CertificateStore:
         self._maybe_migrate_legacy_layout()
         return self.ca_cert_path.is_file() and self.ca_key_path.is_file()
 
+    @property
+    def ca_key_encrypted(self) -> bool:
+        """Whether the stored CA key uses tiny-pki's versioned Fernet format."""
+        self._maybe_migrate_legacy_layout()
+        if not self.ca_key_path.is_file():
+            return False
+        ca_key = self.ca_key_path.read_bytes()
+        return ca_key.startswith(_ENCRYPTED_CA_KEY_PREFIX)
+
     @contextmanager
     def lock(self) -> Generator[None]:
         """Hold the store's exclusive write lock (``flock`` on ``ca/.lock``) until the block exits.
@@ -397,10 +418,13 @@ class CertificateStore:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             depth[key] = 1
+            materials: dict[Path, tuple[bytes, bytes]] = _HELD_LOCKS.__dict__.setdefault("ca_material", {})
+            materials.pop(key, None)
             try:
                 yield
             finally:
                 del depth[key]
+                materials.pop(key, None)
         finally:
             os.close(fd)
 
@@ -434,7 +458,9 @@ class CertificateStore:
         return result
 
     @_locked
-    def mark_revoked(self, identity: str, *, revoked_at: datetime | None = None) -> IssuedCertificate:
+    def mark_revoked(
+        self, identity: str, *, revoked_at: datetime | None = None, key_secret: str | None = None
+    ) -> IssuedCertificate:
         """Mark an issued cert revoked in the index.
 
         Idempotent: an already-revoked entry keeps its original ``revoked_at``.
@@ -445,6 +471,7 @@ class CertificateStore:
         target = self.get_certificate(identity, require_unique=True)
         if target is None:
             raise KeyError(f"Expected issued certificate matching {identity!r}")
+        self._require_ca_signing_key(key_secret)
         when = (revoked_at or datetime.now(UTC)).astimezone(UTC)
         entries = self._read_index()
         updated: list[IssuedCertificate] = []
@@ -471,11 +498,11 @@ class CertificateStore:
         if found is None:
             raise KeyError(f"Expected issued certificate matching {identity!r}")
         self._write_index(updated)
-        self._republish_crl()
+        self._republish_crl(key_secret=key_secret)
         return found
 
     @_locked
-    def publish_crl(self, *, validity_days: int | None = None) -> bytes:
+    def publish_crl(self, *, validity_days: int | None = None, key_secret: str | None = None) -> bytes:
         """Sign the index's revoked set with the store's CA key and publish it as ``ca/crl.pem``.
 
         The revoked set, the CRL number and the write happen under one lock, so a
@@ -488,7 +515,10 @@ class CertificateStore:
             The published CRL in PEM format.
         """
         days = self.crl_validity_days if validity_days is None else _require_crl_validity_days(validity_days)
-        ca_cert, ca_key = self.read_ca()
+        ca_material = self._require_ca_signing_key(key_secret)
+        if ca_material is None:
+            raise FileNotFoundError(f"Expected CA files under {self.ca_dir}")
+        ca_cert, ca_key = ca_material
         crl = generate_crl(
             ca_cert,
             ca_key,
@@ -512,6 +542,7 @@ class CertificateStore:
         self.ca_dir.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
         _write_plain(self._validated_write_path("ca/crldays"), f"{days}\n".encode())
 
+    @_locked
     def issue_client(
         self,
         common_name: str,
@@ -523,6 +554,7 @@ class CertificateStore:
         allow_long_validity: bool = False,
         allow_dn_special_chars: bool = False,
         keep_previous: bool = False,
+        key_secret: str | None = None,
     ) -> IssuedCertificate:
         """Issue and record a client certificate, as ``tiny-pki create client``.
 
@@ -530,7 +562,10 @@ class CertificateStore:
         certificate with the same CN is revoked and ``ca/crl.pem`` republished,
         unless ``keep_previous=True`` (see :meth:`add_certificate`).
         """
-        ca_cert, ca_key = self.read_ca()
+        ca_material = self._require_ca_signing_key(key_secret)
+        if ca_material is None:
+            raise FileNotFoundError(f"Expected CA files under {self.ca_dir}")
+        ca_cert, ca_key = ca_material
         cert_pem, key_pem = generate_client_certificate(
             ca_cert,
             ca_key,
@@ -542,8 +577,11 @@ class CertificateStore:
             allow_long_validity=allow_long_validity,
             allow_dn_special_chars=allow_dn_special_chars,
         )
-        return self._record(common_name, "client", cert_pem, key_pem, keep_previous=keep_previous)
+        return self._record(
+            common_name, "client", cert_pem, key_pem, keep_previous=keep_previous, key_secret=key_secret
+        )
 
+    @_locked
     def issue_server(
         self,
         common_name: str,
@@ -556,13 +594,17 @@ class CertificateStore:
         allow_long_validity: bool = False,
         include_common_name_in_sans: bool = True,
         allow_dn_special_chars: bool = False,
+        key_secret: str | None = None,
     ) -> IssuedCertificate:
         """Issue and record a server certificate, as ``tiny-pki create server``.
 
         Arguments match :func:`tiny_pki.generate_server_certificate`. A live
         certificate with the same CN is revoked and ``ca/crl.pem`` republished.
         """
-        ca_cert, ca_key = self.read_ca()
+        ca_material = self._require_ca_signing_key(key_secret)
+        if ca_material is None:
+            raise FileNotFoundError(f"Expected CA files under {self.ca_dir}")
+        ca_cert, ca_key = ca_material
         cert_pem, key_pem = generate_server_certificate(
             ca_cert,
             ca_key,
@@ -576,18 +618,66 @@ class CertificateStore:
             include_common_name_in_sans=include_common_name_in_sans,
             allow_dn_special_chars=allow_dn_special_chars,
         )
-        return self._record(common_name, "server", cert_pem, key_pem)
+        return self._record(common_name, "server", cert_pem, key_pem, key_secret=key_secret)
 
-    def revoke(self, identity: str) -> IssuedCertificate:
+    def revoke(self, identity: str, *, key_secret: str | None = None) -> IssuedCertificate:
         """Revoke a certificate, as ``tiny-pki revoke``; see :meth:`mark_revoked`."""
-        return self.mark_revoked(identity)
+        return self.mark_revoked(identity, key_secret=key_secret)
 
-    def read_ca(self) -> tuple[bytes, bytes]:
-        """Return ``(ca_cert_pem, ca_key_pem)``."""
+    def read_ca(self, *, key_secret: str | None = None) -> tuple[bytes, bytes]:
+        """Return ``(ca_cert_pem, ca_key_pem)``, decrypting the key when required."""
         self._maybe_migrate_legacy_layout()
         if not self.ca_cert_path.is_file() or not self.ca_key_path.is_file():
             raise FileNotFoundError(f"Expected CA files under {self.ca_dir}")
-        return self.ca_cert_path.read_bytes(), self.ca_key_path.read_bytes()
+        ca_key = self.ca_key_path.read_bytes()
+        if ca_key.startswith(_ENCRYPTED_CA_KEY_PREFIX):
+            if key_secret is None:
+                raise TinyPkiError("The CA private key is encrypted; provide a key secret to use signing commands")
+            try:
+                ca_key = decrypt_private_key_scrypt(ca_key[len(_ENCRYPTED_CA_KEY_PREFIX) :], key_secret)
+            except InvalidToken as exc:
+                raise TinyPkiError("Could not unlock the CA private key; the supplied secret may be incorrect") from exc
+        return self.ca_cert_path.read_bytes(), ca_key
+
+    def read_ca_certificate(self) -> bytes:
+        """Return the CA certificate without reading or unlocking its private key."""
+        self._maybe_migrate_legacy_layout()
+        if not self.ca_cert_path.is_file():
+            raise FileNotFoundError(f"Expected a CA certificate under {self.ca_dir}")
+        return self.ca_cert_path.read_bytes()
+
+    @_locked
+    def encrypt_ca_key(self, key_secret: str) -> None:
+        """Encrypt a plaintext CA key in place while holding the store lock."""
+        self.ensure_layout()
+        if not self.ca_key_path.is_file():
+            raise FileNotFoundError(f"Expected a CA private key under {self.ca_dir}")
+        if self.ca_key_encrypted:
+            raise ValueError("The CA private key is already encrypted")
+        key_pem = self.ca_key_path.read_bytes()
+        ca_cert = x509.load_pem_x509_certificate(self.read_ca_certificate())
+        load_ca_private_key(ca_cert, key_pem)
+        encrypted = _ENCRYPTED_CA_KEY_PREFIX + encrypt_private_key_scrypt(key_pem, key_secret)
+        write_file_atomic(self._validated_write_path("ca/ca.key"), encrypted, mode=0o600)
+
+    @_locked
+    def decrypt_ca_key(self, key_secret: str) -> None:
+        """Decrypt an encrypted CA key in place while holding the store lock."""
+        self.ensure_layout()
+        if not self.ca_key_path.is_file():
+            raise FileNotFoundError(f"Expected a CA private key under {self.ca_dir}")
+        if not self.ca_key_encrypted:
+            raise ValueError("The CA private key is not encrypted")
+        stored_key = self.ca_key_path.read_bytes()
+        if not stored_key.startswith(_ENCRYPTED_CA_KEY_PREFIX):
+            raise ValueError("The CA private key is not encrypted")
+        try:
+            key_pem = decrypt_private_key_scrypt(stored_key[len(_ENCRYPTED_CA_KEY_PREFIX) :], key_secret)
+        except InvalidToken as exc:
+            raise TinyPkiError("Could not unlock the CA private key; the supplied secret may be incorrect") from exc
+        ca_cert = x509.load_pem_x509_certificate(self.read_ca_certificate())
+        load_ca_private_key(ca_cert, key_pem)
+        write_file_atomic(self._validated_write_path("ca/ca.key"), key_pem, mode=0o600)
 
     def read_certificate_pem(self, entry: IssuedCertificate) -> bytes:
         if not entry.cert_path:
@@ -654,18 +744,26 @@ class CertificateStore:
         return path
 
     @_locked
-    def write_ca(self, cert_pem: bytes, key_pem: bytes, *, force: bool = False) -> None:
+    def write_ca(self, cert_pem: bytes, key_pem: bytes, *, force: bool = False, key_secret: str | None = None) -> None:
         """Persist the CA certificate and private key (key mode 0600).
 
         Refuses to overwrite an existing CA unless ``force=True``.
         """
         # Migrate first so legacy root CA material is visible to has_ca().
         self.ensure_layout()
-        if self.has_ca() and not force:
+        existing_ca = self.has_ca()
+        if existing_ca and not force:
             raise ValueError(f"CA already exists under {self.root}; pass force=True to replace")
+        if existing_ca and self.ca_key_encrypted and key_secret is None:
+            raise TinyPkiError("Replacing an encrypted CA requires key_secret so the replacement stays encrypted")
+        stored_key = key_pem
+        if key_secret is not None:
+            stored_key = _ENCRYPTED_CA_KEY_PREFIX + encrypt_private_key_scrypt(key_pem, key_secret)
         _write_plain(self._validated_write_path("ca/ca.crt"), cert_pem)
-        _write_secret(self._validated_write_path("ca/ca.key"), key_pem)
+        _write_secret(self._validated_write_path("ca/ca.key"), stored_key)
         _write_plain(self._validated_write_path("public/ca.crt"), cert_pem)
+        materials: dict[Path, tuple[bytes, bytes]] = _HELD_LOCKS.__dict__.setdefault("ca_material", {})
+        materials.pop(self.lock_path, None)
 
     @_locked
     def write_crl(self, crl_pem: bytes) -> None:
@@ -698,7 +796,14 @@ class CertificateStore:
         return number
 
     def _record(
-        self, common_name: str, kind: CertKind, cert_pem: bytes, key_pem: bytes, *, keep_previous: bool = False
+        self,
+        common_name: str,
+        kind: CertKind,
+        cert_pem: bytes,
+        key_pem: bytes,
+        *,
+        keep_previous: bool = False,
+        key_secret: str | None = None,
     ) -> IssuedCertificate:
         return self.add_certificate(
             common_name=common_name,
@@ -709,11 +814,28 @@ class CertificateStore:
             not_valid_after=get_certificate_expiry(cert_pem),
             fingerprint=get_certificate_fingerprint(cert_pem),
             keep_previous=keep_previous,
+            key_secret=key_secret,
         )
 
-    def _republish_crl(self) -> None:
+    def _require_ca_signing_key(self, key_secret: str | None) -> tuple[bytes, bytes] | None:
+        if not self.has_ca():
+            return None
+        depth: dict[Path, int] = _HELD_LOCKS.__dict__.setdefault("depth", {})
+        materials: dict[Path, tuple[bytes, bytes]] = _HELD_LOCKS.__dict__.setdefault("ca_material", {})
+        if depth.get(self.lock_path):
+            cached = materials.get(self.lock_path)
+            if cached is not None:
+                return cached
+        ca_cert_pem, ca_key_pem = self.read_ca(key_secret=key_secret)
+        load_ca_private_key(x509.load_pem_x509_certificate(ca_cert_pem), ca_key_pem)
+        material = (ca_cert_pem, ca_key_pem)
+        if depth.get(self.lock_path):
+            materials[self.lock_path] = material
+        return material
+
+    def _republish_crl(self, *, key_secret: str | None = None) -> None:
         if self.has_ca():
-            self.publish_crl()
+            self.publish_crl(key_secret=key_secret)
 
     def _recorded_crl_number(self) -> int:
         path = self._validated_write_path("ca/crlnumber")
@@ -1044,6 +1166,7 @@ def _index_references_certs_paths(index_path: Path) -> bool:
 _DIR_MODE = 0o700
 _PUBLIC_DIR_MODE = 0o755
 _PUBLIC_FILE_MODE = 0o644
+_ENCRYPTED_CA_KEY_PREFIX = b"TINY-PKI-ENCRYPTED-CA-KEY-V1\n"
 # Per-thread lock depth keyed by lock path; flock is per open file, so a nested
 # lock() in the same thread must reuse the held lock instead of opening another.
 _HELD_LOCKS = threading.local()
