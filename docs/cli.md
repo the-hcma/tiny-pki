@@ -11,7 +11,7 @@ tiny-pki [--store DIR] [--color auto|always|never] [--edit-mode vim|emacs] [COMM
 - [Global options](#global-options)
 - [Identities](#identities)
 - [Exit status](#exit-status)
-- Commands: [init](#init), [create](#create), [list](#list), [show](#show), [inspect](#inspect), [export](#export), [revoke](#revoke), [delete](#delete), [crl](#crl), [check](#check), [completion](#completion), [REPL commands](#repl-commands)
+- Commands: [init](#init), [create](#create), [list](#list), [show](#show), [inspect](#inspect), [export](#export), [revoke](#revoke), [delete](#delete), [crl](#crl), [encrypt-key](#encrypt-key), [decrypt-key](#decrypt-key), [check](#check), [completion](#completion), [REPL commands](#repl-commands)
 - Workflows: [rotating a client certificate](#rotating-a-client-certificate), [a lost device or compromised key](#a-lost-device-or-a-compromised-key), [serving mTLS from nginx](#serving-mtls-from-nginx), [renewing the CRL on a timer](#renewing-the-crl-on-a-timer)
 
 ## Global options
@@ -53,6 +53,8 @@ Creates the CA certificate and key under `ca/`, publishes an empty CRL, and fill
 | `--key-size 2048\|3072\|4096` | RSA key size (default 4096). Refused with `--key-type ec-p256`. |
 | `--permit NAME` | Add a Name Constraint: a DNS suffix (`home` covers `home` and every name under it) or an IP network (`192.168.0.0/16`). Repeat it for each; constrain both DNS and IP (see [security.md](security.md#limit-what-the-ca-can-vouch-for)). Constraints cannot be changed later. |
 | `--crl-days N` | CRL lifetime in days, 1–365 (default 30), saved in the store and used by every later publish. |
+| `--encrypt-key` | Encrypt `ca/ca.key` at rest when creating the CA; the secret is read from `--key-secret-file`, a configured credential file, or an interactive prompt. |
+| `--key-secret-file PATH` | Read the high-entropy CA-key secret from the first line of this file; use only with `--encrypt-key` for `init`. |
 
 ```bash
 tiny-pki --store ./stores/ca init --cn "Home CA" --permit home --permit 192.168.0.0/16
@@ -69,6 +71,7 @@ Issues a client certificate (`CLIENT_AUTH`, identified by its CN) or a server ce
 | Flag | Meaning |
 | --- | --- |
 | `--days N` | Validity in days (default 397 for clients, 90 for servers; capped at 825 and 200). |
+| `--key-secret-file PATH` | Read the CA-key secret from the first line of a file when the CA key is encrypted. |
 | `--allow-long-validity` | Allow a validity beyond the cap. Apple platforms reject server certificates over 825 days, and tiny-pki warns. |
 | `--key-type rsa\|ec-p256` | Key algorithm (default `rsa`). It may differ from the CA's. |
 | `--key-size 2048\|3072\|4096` | RSA key size (default 3072). Refused with `--key-type ec-p256`. |
@@ -135,7 +138,7 @@ The password is never taken as an argument, because arguments end up in shell hi
 ### revoke
 
 ```text
-tiny-pki --store DIR revoke NAME|0xSERIAL [--dry-run]
+tiny-pki --store DIR revoke NAME|0xSERIAL [--dry-run] [--key-secret-file PATH]
 ```
 
 Marks the certificate revoked and republishes `ca/crl.pem` and `public/crl.pem`. Reload the TLS server afterwards so it reads the new CRL.
@@ -143,11 +146,12 @@ Marks the certificate revoked and republishes `ca/crl.pem` and `public/crl.pem`.
 | Flag | Meaning |
 | --- | --- |
 | `--dry-run` | Say what would be revoked and write nothing. |
+| `--key-secret-file PATH` | Read the CA-key secret from the first line of a file when the CA key is encrypted. |
 
 ### delete
 
 ```text
-tiny-pki --store DIR delete NAME|0xSERIAL [--force] [--dry-run]
+tiny-pki --store DIR delete NAME|0xSERIAL [--force] [--dry-run] [--key-secret-file PATH]
 ```
 
 Removes a revoked certificate's files. The index keeps a tombstone with the serial, so the CRL still lists it.
@@ -156,11 +160,12 @@ Removes a revoked certificate's files. The index keeps a tombstone with the seri
 | --- | --- |
 | `--force` | Revoke an active certificate first, then delete it. Without it, deleting an active certificate is refused. |
 | `--dry-run` | Say what would be deleted (and revoked) and write nothing. |
+| `--key-secret-file PATH` | Read the CA-key secret from the first line of a file when the CA key is encrypted. |
 
 ### crl
 
 ```text
-tiny-pki --store DIR crl [--days N]
+tiny-pki --store DIR crl [--days N] [--key-secret-file PATH]
 ```
 
 Signs a fresh CRL from the index and writes it to `ca/crl.pem` and `public/crl.pem`. `renew-crl` is an alias. Run it on a timer well inside the CRL lifetime: once the CRL expires, nginx rejects every client (see [renewing the CRL on a timer](#renewing-the-crl-on-a-timer)).
@@ -168,6 +173,51 @@ Signs a fresh CRL from the index and writes it to `ca/crl.pem` and `public/crl.p
 | Flag | Meaning |
 | --- | --- |
 | `--days N` | Change the stored CRL lifetime (1–365 days) and use it for this and every later publish. |
+| `--key-secret-file PATH` | Read the CA-key secret from the first line of a file when the CA key is encrypted. |
+
+### encrypt-key
+
+```text
+tiny-pki --store DIR encrypt-key [--key-secret-file PATH]
+```
+
+Encrypts an existing plaintext CA private key in place under the store lock using a per-key salt and Scrypt-derived Fernet key. Use a long, random secret; Scrypt slows offline guesses but does not make a weak secret strong. On a terminal, the secret is prompted for twice; non-interactive runs must provide a file or credential. After encryption, the CLI offers to remove an explicitly supplied `--key-secret-file` as a temporary plaintext copy. Removal defaults to No, and is refused when the file is configured as `TINY_PKI_KEY_SECRET_FILE` or is under `$CREDENTIALS_DIRECTORY`. Confirm removal only after ensuring the secret is safely available for future signing; non-interactive runs leave the file in place and warn.
+
+| Flag | Meaning |
+| --- | --- |
+| `--key-secret-file PATH` | Read the new high-entropy secret from the first line of a file. |
+
+### decrypt-key
+
+```text
+tiny-pki --store DIR decrypt-key [--key-secret-file PATH]
+```
+
+Decrypts an encrypted CA private key in place under the store lock. A missing or incorrect secret leaves the encrypted key unchanged.
+
+| Flag | Meaning |
+| --- | --- |
+| `--key-secret-file PATH` | Read the existing secret from the first line of a file. |
+
+### CA key secret sources
+
+Signing commands automatically prompt for the CA-key secret when the store key is encrypted and stdin is a terminal. For unattended use, pass `--key-secret-file PATH`, set `TINY_PKI_KEY_SECRET_FILE` to a file path, or provide the systemd credential `tiny-pki-key` under `$CREDENTIALS_DIRECTORY`; the secret itself is never accepted as an argument. An explicit `--key-secret-file` on a plaintext store is an error; ambient environment and systemd credential settings are ignored because no secret is needed. The file's first UTF-8 line is used, and tiny-pki warns if the file has group/other access permissions. tiny-pki does not delete a secret file used for signing because later signing operations need the same secret. If you use a temporary staging file to initialize or encrypt the CA key, the CLI offers to remove an explicitly supplied `--key-secret-file` after encryption, with removal defaulting to No; it will not delete the configured environment secret file or files under `$CREDENTIALS_DIRECTORY`. Read-only commands such as `list`, `show`, `check`, and `export pem` do not need the secret.
+
+For a systemd service, provision an encrypted credential and name it `tiny-pki-key` so systemd exposes it at `$CREDENTIALS_DIRECTORY/tiny-pki-key`:
+
+```bash
+systemd-creds encrypt --name=tiny-pki-key --with-key=host /secure/path/ca-key-secret /etc/credstore.encrypted/tiny-pki-key
+```
+
+Add this to the service unit (adjust the executable and store paths for your host):
+
+```ini
+[Service]
+LoadCredentialEncrypted=tiny-pki-key:/etc/credstore.encrypted/tiny-pki-key
+ExecStart=/usr/local/bin/tiny-pki --store /srv/pki/home-ca --color never crl
+```
+
+`systemd-creds encrypt` reads the source file and writes a credential encrypted with this host's systemd credential key. Protect the source secret file during provisioning and remove it securely when it is no longer needed; the encrypted credential is host-bound and is not a portable backup. A TPM2-backed credential can be chosen instead where its hardware and recovery trade-offs are appropriate. At service start, systemd decrypts the credential and makes its plaintext available to the service as a file, which tiny-pki reads. This avoids putting the secret in unit text, environment variables, command arguments, or logs, but it does not keep the secret hidden from the service itself, its privileged parent/root, or an attacker who compromises the service while it is running. Back up the encrypted CA key and its secret-recovery material separately; losing either can make the CA unable to sign.
 
 ### check
 

@@ -65,7 +65,7 @@ crl_pem = generate_crl(ca_cert, ca_key, [(serial, datetime.now(UTC))])
 p12 = generate_pkcs12(client_cert, client_key, ca_cert, "alice", b"change-me-to-a-long-random-password")
 ```
 
-Storing the results, and encrypting the CA key at rest, is up to your application; [docs/api.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/api.md) has the full API and [docs/security.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/security.md) the key-handling advice.
+Library callers decide where to store the results and how to encrypt private keys at rest; the CLI store can encrypt its CA key with `init --encrypt-key`. [docs/api.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/api.md) has the full API and [docs/security.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/security.md) the key-handling advice.
 
 ## Quick start: CLI
 
@@ -85,6 +85,8 @@ tiny-pki check                      # exit 0 ok, 1 expiring, 2 expired/revoked/u
 
 Run `tiny-pki` with no command for the REPL, and `help COMMAND` for any command's flags. Point nginx's `ssl_client_certificate` at `public/ca.crt` and `ssl_crl` at `public/crl.pem`, reload it after each revoke, and republish the CRL (`tiny-pki crl`) on a timer: it is valid for 30 days by default.
 
+To encrypt the CA key during initialization, provide a protected file containing a long, random secret: `tiny-pki init --encrypt-key --key-secret-file /secure/path/ca-key-secret`. The secret itself is never passed as a command-line argument; only the file path is. On an interactive terminal, the CLI offers to remove that explicitly supplied file after initialization, with removal defaulting to No; it will not delete the configured environment secret file or files under `$CREDENTIALS_DIRECTORY`. Confirm removal only after provisioning and verifying a durable protected source for future signing; without one, keep the file.
+
 ## Documentation
 
 | Page | Contents |
@@ -100,10 +102,10 @@ Run `tiny-pki` with no command for the REPL, and `help COMMAND` for any command'
 
 ## What stays in your app
 
-tiny-pki deliberately does not:
+The library core deliberately does not:
 
 - Persist anything for library callers; store the PEMs in your database or files.
-- Encrypt keys at rest by itself. The optional `tiny_pki.secrets` Fernet helpers take a secret you supply; wiring and rotating it are yours (see [docs/security.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/security.md)).
+- Persist library-call results or manage key encryption. The optional `tiny_pki.secrets` Fernet helpers take a secret you supply; wiring and rotating it are yours (see [docs/security.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/security.md)). The filesystem CLI separately supports CA-key encryption and migration.
 - Reload nginx, Mosquitto or any other TLS server after a new CRL.
 - Schedule CRL renewal; run `tiny-pki crl` or `generate_crl` on a timer.
 - Decide who gets a certificate; authenticating issuance requests is the application's job.

@@ -48,6 +48,9 @@ _ORG = Flag("org", "organization (O) in the subject", value="NAME", allow_empty=
 _DRY_RUN = Flag("dry-run", "show what would change and write nothing")
 _JSON = Flag("json", "machine-readable JSON output")
 _PASSWORD_FILE = Flag("password-file", "read the PKCS#12 password from this file", value="PATH", path=True)
+_KEY_SECRET_FILE = Flag(
+    "key-secret-file", "read the CA-key secret from this file or systemd credential", value="PATH", path=True
+)
 
 COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
     "check": (
@@ -71,6 +74,7 @@ COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
         Flag("allow-dn-special-chars", 'allow , + = " < > ; or a leading # in the CN'),
         Flag("allow-long-validity", "allow validity beyond the 200 / 825 day caps"),
         _DAYS,
+        _KEY_SECRET_FILE,
         Flag("keep-previous", "client only: keep the previous certificate live for rotation"),
         _KEY_SIZE,
         _KEY_TYPE,
@@ -79,8 +83,10 @@ COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
         Flag("san", "server only: DNS name or IP address (repeatable)", value="NAME", repeatable=True),
         Flag("yes", "server only: add the CN to the SANs without asking"),
     ),
-    "crl": (Flag("days", "change the stored CRL lifetime (1-365)", value="N"),),
-    "delete": (Flag("force", "revoke an active certificate first"), _DRY_RUN),
+    "crl": (_KEY_SECRET_FILE, Flag("days", "change the stored CRL lifetime (1-365)", value="N")),
+    "decrypt-key": (_KEY_SECRET_FILE,),
+    "delete": (_KEY_SECRET_FILE, Flag("force", "revoke an active certificate first"), _DRY_RUN),
+    "encrypt-key": (_KEY_SECRET_FILE,),
     "export": (
         Flag("legacy", "p12 only: 3DES / SHA-1 encryption for old Android and Apple keychains"),
         Flag("out", "output file", value="PATH", path=True),
@@ -90,6 +96,8 @@ COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
         Flag("cn", 'CA common name (default "Private CA")', value="NAME", allow_empty=True),
         Flag("crl-days", "CRL lifetime in days (1-365, default 30)", value="N"),
         Flag("days", "CA validity in days (default 3650)", value="N", allow_empty=True),
+        Flag("encrypt-key", "encrypt the CA private key at rest"),
+        _KEY_SECRET_FILE,
         _KEY_SIZE,
         _KEY_TYPE,
         _ORG,
@@ -97,7 +105,7 @@ COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
     ),
     "inspect": (),
     "list": (_JSON,),
-    "revoke": (_DRY_RUN,),
+    "revoke": (_KEY_SECRET_FILE, _DRY_RUN),
     "show": (),
 }
 COMMAND_FLAGS["renew-crl"] = COMMAND_FLAGS["crl"]
@@ -112,8 +120,10 @@ COMMAND_USAGE: dict[str, str] = {
     "completion": "completion bash|zsh|fish [--install] [--force] [--json]",
     "create": "create client|server NAME",
     "crl": "crl",
+    "decrypt-key": "decrypt-key",
     "delete": "delete NAME|0xSERIAL",
     "edit-mode": "edit-mode [emacs|vim]",
+    "encrypt-key": "encrypt-key",
     "export": "export pem|p12 NAME",
     "help": "help [COMMAND]",
     "init": "init",
@@ -133,8 +143,10 @@ COMMAND_HELP: tuple[tuple[str, str], ...] = (
     ("completion", "Print or install bash/zsh/fish tab-completion scripts."),
     ("create", "Issue a client or server certificate."),
     ("crl", "Regenerate the CRL from revoked entries; --days N changes the stored CRL lifetime."),
+    ("decrypt-key", "Decrypt the CA private key in place."),
     ("delete", "Remove a revoked certificate's files; --force revokes an active one first; --dry-run previews."),
     ("edit-mode", "Switch Emacs vs Vim keys: edit-mode emacs | vim."),
+    ("encrypt-key", "Encrypt the CA private key in place."),
     ("exit", "Leave the REPL."),
     ("export", "Export pem|p12 for an identity."),
     ("help", "Show this list, or help <command> for its usage and flags."),
@@ -164,7 +176,9 @@ PKI_COMMANDS: frozenset[str] = frozenset(
         "check",
         "create",
         "crl",
+        "decrypt-key",
         "delete",
+        "encrypt-key",
         "export",
         "init",
         "inspect",

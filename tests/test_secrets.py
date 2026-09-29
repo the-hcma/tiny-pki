@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import struct
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives.hashes import SHA256
@@ -17,8 +18,10 @@ from tiny_pki.secrets import (
     DEFAULT_INFO,
     MIN_SECRET_LENGTH,
     decrypt_private_key,
+    decrypt_private_key_scrypt,
     derive_fernet_key,
     encrypt_private_key,
+    encrypt_private_key_scrypt,
     reencrypt_private_key,
 )
 
@@ -108,6 +111,28 @@ def test_encrypt_decrypt_roundtrip() -> None:
     encrypted = encrypt_private_key(key_pem, _SECRET)
     assert_that(encrypted, is_not(equal_to(key_pem)))
     assert_that(decrypt_private_key(encrypted, _SECRET), equal_to(key_pem))
+
+
+def test_scrypt_encrypt_decrypt_uses_a_random_salt() -> None:
+    _, key_pem = generate_ca_certificate(key_size=2048)
+    encrypted = encrypt_private_key_scrypt(key_pem, _SECRET)
+    second_encryption = encrypt_private_key_scrypt(key_pem, _SECRET)
+    assert_that(encrypted, is_not(equal_to(second_encryption)))
+    assert_that(key_pem not in encrypted, equal_to(True))
+    assert_that(encrypted[:12], equal_to(struct.pack(">III", 2**17, 8, 1)))
+    assert_that(decrypt_private_key_scrypt(encrypted, _SECRET), equal_to(key_pem))
+    assert_that(
+        calling(decrypt_private_key_scrypt).with_args(encrypted, _OTHER),
+        raises(InvalidToken),
+    )
+
+
+def test_scrypt_decrypt_rejects_unsupported_parameters() -> None:
+    encrypted = struct.pack(">III", 2**30, 8, 1) + bytes(16) + b"token"
+    assert_that(
+        calling(decrypt_private_key_scrypt).with_args(encrypted, _SECRET),
+        raises(TinyPkiError, "Unsupported CA-key Scrypt parameters"),
+    )
 
 
 def test_reencrypt_rotates_off_a_short_secret() -> None:

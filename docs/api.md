@@ -156,7 +156,13 @@ Other `ValueError`s still come from `cryptography` itself, for example PEM or DE
 Fernet helpers for encrypting private keys at rest. Import from the submodule:
 
 ```python
-from tiny_pki.secrets import decrypt_private_key, encrypt_private_key, reencrypt_private_key
+from tiny_pki.secrets import (
+    decrypt_private_key,
+    decrypt_private_key_scrypt,
+    encrypt_private_key,
+    encrypt_private_key_scrypt,
+    reencrypt_private_key,
+)
 ```
 
 | Function | Returns |
@@ -165,12 +171,16 @@ from tiny_pki.secrets import decrypt_private_key, encrypt_private_key, reencrypt
 | `decrypt_private_key(encrypted_data, secret, *, info=DEFAULT_INFO)` | PEM `bytes` (raises `cryptography.fernet.InvalidToken` on a wrong secret or `info`) |
 | `reencrypt_private_key(encrypted_data, old_secret, new_secret, *, old_info=DEFAULT_INFO, new_info=DEFAULT_INFO)` | new token — use when rotating the secret or migrating off the legacy derivation |
 | `derive_fernet_key(secret, *, info=DEFAULT_INFO)` | the Fernet key (`urlsafe_b64(HKDF-SHA256(secret, salt=None, info=info))`) |
+| `encrypt_private_key_scrypt(pem_data, secret)` | envelope with Scrypt parameters, per-key salt, and Fernet token |
+| `decrypt_private_key_scrypt(encrypted_data, secret)` | PEM `bytes` from the Scrypt envelope |
 
 The Fernet key is derived with HKDF-SHA256 (RFC 5869) using the fixed label `DEFAULT_INFO` (`b"tiny-pki:fernet-key:v1"`). The label gives domain separation: the derived key is independent of anything else your app derives from the same secret, so passing an app-wide secret such as Django's `SECRET_KEY` does not reuse a key another component also computes. Pass a different non-empty `info` to derive further independent keys from one secret. It does **not** protect against the secret itself leaking — the label is public, so anyone holding the secret can derive the key.
 
 `info=None` selects the legacy derivation used before HKDF (`urlsafe_b64(sha256(secret))`). Use it only to read old tokens, typically via `reencrypt_private_key(token, secret, secret, old_info=None)`; an empty `info` raises `TinyPkiError`.
 
 HKDF does no stretching, so the secret must already be high-entropy — e.g. Django's `SECRET_KEY`, not a human password. `encrypt_private_key` and `derive_fernet_key` raise `TinyPkiError` for secrets shorter than `MIN_SECRET_LENGTH` (32 characters). The length check is a floor, not a strength test: 32 random characters are fine, 32 repeated letters are not. `decrypt_private_key` accepts any non-empty secret, so `reencrypt_private_key(token, old_weak, new_strong)` can move keys stored under an older, shorter secret.
+
+`encrypt_private_key_scrypt` records the Scrypt parameters (`n=2^17`, `r=8`, `p=1`), generates a random 16-byte salt, and derives the Fernet key. Its matching decrypt helper validates the recorded profile before deriving the key. This slows offline guessing when a secret is weaker than intended, but does not remove the need for a long, random secret; the CLI store uses this format for encrypted CA keys.
 
 ## Optional: `tiny_pki.store`
 
