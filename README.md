@@ -13,7 +13,7 @@ What it covers:
 
 - CA, client and server certificates with RSA (the default) or ECDSA P-256 keys, mixed freely under one CA.
 - Name Constraints, so a stolen CA key cannot impersonate public sites.
-- CRLs with monotonic numbers, and a key-free `public/` directory to hand to a sandboxed TLS server.
+- CRLs with monotonic numbers, OCSP responses for stapling (`tiny-pki ocsp`), and a key-free `public/` directory to hand to a sandboxed TLS server.
 - PKCS#12 bundles for phones and browsers, with a legacy mode for old keychains.
 - Signing a CSR (`sign client|server NAME --csr PATH`), so laptop, TPM, YubiKey and server keys never leave the machine that made them.
 - `check`, an expiry and revocation monitor with Nagios-style exit codes and JSON output.

@@ -35,6 +35,7 @@ The PKCS#12 password protects the key in transit. Use a long, random one: the bu
 - Every revoke must be followed by publishing the new CRL **and** reloading the TLS server (nginx reads `ssl_crl` at startup/reload). The CLI republishes `public/crl.pem` on every revoke; the reload is yours.
 - CRLs carry a `nextUpdate` (30 days by default; a store keeps its own lifetime, set with `init --crl-days N` or `crl --days N`). Once it passes, nginx/OpenSSL fail verification for **every** client. Regenerate on a timer well inside that window (`tiny-pki crl`, or `generate_crl` from your app); [cli.md](cli.md#renewing-the-crl-on-a-timer) has a systemd timer that does both.
 - Pass the complete revoked set to `generate_crl` each time; omitting a serial un-revokes it.
+- OCSP stapling (`tiny-pki ocsp`) follows the same rules: the store refreshes a server certificate's response whenever it is issued, revoked or deleted, and every response on each `crl` run, but the TLS server only picks up a new response when reloaded, and a response stays acceptable to clients until its `nextUpdate` (7 days by default). OCSP responses are signed with the CA key itself, so an online OCSP endpoint built on `respond_ocsp` keeps the CA key online.
 
 ## Key types, sizes and validity
 

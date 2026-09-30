@@ -10,6 +10,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import unicodedata
+from urllib.parse import urlsplit
 
 from tiny_pki.errors import TinyPkiError
 
@@ -59,6 +60,34 @@ def normalize_dns_name(name: str) -> str:
     if len(result) > MAX_DNS_NAME_LENGTH:
         raise TinyPkiError(f"Expected a DNS name of at most {MAX_DNS_NAME_LENGTH} characters, got {len(result)}")
     return result
+
+
+def normalize_http_url(url: str, field_name: str) -> str:
+    """Return ``url`` stripped, requiring an ``http://`` or ``https://`` URL with a host.
+
+    Used for URLs written into certificates (such as the OCSP responder in
+    Authority Information Access), which relying parties fetch as-is.
+
+    Raises:
+        TinyPkiError: For another scheme, a missing host, or non-ASCII, whitespace
+            or control characters.
+    """
+    text = url.strip() if url else ""
+    try:
+        parts = urlsplit(text)
+        host = parts.hostname
+    except ValueError:
+        host = None
+        parts = None
+    if (
+        parts is None
+        or parts.scheme not in ("http", "https")
+        or not host
+        or not text.isascii()
+        or any(ch.isspace() or not ch.isprintable() for ch in text)
+    ):
+        raise TinyPkiError(f"Expected an http:// or https:// URL with a host for {field_name}, got {url!r}")
+    return text
 
 
 def normalize_san_entries(entries: list[str]) -> list[str]:

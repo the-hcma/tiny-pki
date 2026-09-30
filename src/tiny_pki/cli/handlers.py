@@ -29,6 +29,7 @@ from tiny_pki import (
     DEFAULT_ORGANIZATION_NAME,
     DEFAULT_SERVER_VALIDITY_DAYS,
     KEY_TYPES,
+    MAX_OCSP_VALIDITY_DAYS,
     MAX_STORE_CRL_VALIDITY_DAYS,
     MAX_VALIDITY_DAYS,
     CsrSummary,
@@ -94,6 +95,7 @@ def dispatch(
         "init": _cmd_init,
         "inspect": _cmd_inspect,
         "list": _cmd_list,
+        "ocsp": _cmd_ocsp,
         "revoke": _cmd_revoke,
         "show": _cmd_show,
         "sign": _cmd_sign,
@@ -495,6 +497,9 @@ def _list_ca(store: CertificateStore, *, theme: Theme, as_json: bool) -> None:
                     "crl_days": store.crl_validity_days,
                     "public_dir": str(store.public_dir),
                     "index_path": str(store.index_path),
+                    "ocsp_days": store.ocsp_validity_days,
+                    "ocsp_dir": str(store.ocsp_dir),
+                    "ocsp_url": store.ocsp_url,
                 },
                 sort_keys=True,
             )
@@ -505,6 +510,11 @@ def _list_ca(store: CertificateStore, *, theme: Theme, as_json: bool) -> None:
     print(theme.dim(f"crl  {store.crl_path} (valid {store.crl_validity_days} days per publish)"))
     print(theme.dim(f"index {store.index_path}"))
     print(theme.dim(f"public {store.public_dir} (ca.crt + crl.pem for TLS servers; no key)"))
+    ocsp_days = store.ocsp_validity_days
+    if ocsp_days is not None:
+        print(theme.dim(f"ocsp {store.ocsp_dir} (stapling responses, valid {ocsp_days} days per publish)"))
+    if store.ocsp_url is not None:
+        print(theme.dim(f"ocsp url {store.ocsp_url} (in new certificates)"))
 
 
 def _list_summary(store: CertificateStore, *, theme: Theme, as_json: bool) -> None:
@@ -886,6 +896,50 @@ def _cmd_crl(args: list[str], *, store: CertificateStore | None, theme: Theme) -
     print(theme.ok(f"crl regenerated: {store.crl_path} (valid {store.crl_validity_days} days)"))
 
 
+def _cmd_ocsp(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
+    opts = _parse_flags(args, command="ocsp")
+    positional = opts["positional"]
+    flags = opts["flags"]
+    action = positional[0] if positional else "publish"
+    if action not in {"disable", "publish", "url"}:
+        raise ValueError(f"Expected ocsp publish|disable|url, got {action!r}")
+    if len(positional) > (2 if action == "url" else 1):
+        raise ValueError(f"Unexpected extra arguments: {' '.join(positional[1:])}")
+    if action != "publish" and flags.keys() & {"days", "key-secret-file"}:
+        raise ValueError("--days / --key-secret-file are only supported for ocsp publish")
+    if action != "url" and "clear" in flags:
+        raise ValueError("--clear is only supported for ocsp url")
+    store = _require_store(store)
+    if action == "url":
+        if "clear" in flags:
+            if len(positional) == 2:
+                raise ValueError("Expected ocsp url URL or ocsp url --clear, not both")
+            store.set_ocsp_url(None)
+            print(theme.ok("OCSP URL cleared; new certificates carry no Authority Information Access"))
+        elif len(positional) == 2:
+            store.set_ocsp_url(positional[1])
+            print(theme.ok(f"new certificates point at the OCSP responder {store.ocsp_url}"))
+            print(theme.dim("certificates already issued keep what they were issued with"))
+        else:
+            print(store.ocsp_url or theme.dim("(no OCSP URL; new certificates carry no Authority Information Access)"))
+        return
+    if action == "disable":
+        store.disable_ocsp()
+        print(theme.ok(f"OCSP stapling disabled; removed {store.ocsp_dir}"))
+        return
+    days = _parse_ocsp_days(flags["days"]) if "days" in flags else None
+    key_secret = _key_secret(flags, store=store, theme=theme)
+    written = store.publish_ocsp(validity_days=days, key_secret=key_secret)
+    print(
+        theme.ok(
+            f"published {len(written)} OCSP response(s) in {store.ocsp_dir} (valid {store.ocsp_validity_days} days)"
+        )
+    )
+    for path in written:
+        print(theme.dim(str(path)))
+    print(theme.dim("every CRL publish (revoke, create, crl) now refreshes them; ocsp disable stops"))
+
+
 def _cmd_encrypt_key(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     store = _require_store(store)
     opts = _parse_flags(args, command="encrypt-key")
@@ -1191,6 +1245,17 @@ def _parse_crl_days(raw: str, flag: str) -> int:
         raise ValueError(f"Expected a whole number of days for {flag}, got {raw!r}") from exc
     if not 1 <= days <= MAX_STORE_CRL_VALIDITY_DAYS:
         raise ValueError(f"Expected {flag} between 1 and {MAX_STORE_CRL_VALIDITY_DAYS}, got {days}")
+    return days
+
+
+def _parse_ocsp_days(raw: str) -> int:
+    """Parse ``ocsp --days``, bounded to 1..``MAX_OCSP_VALIDITY_DAYS``."""
+    try:
+        days = int(raw.strip())
+    except ValueError as exc:
+        raise ValueError(f"Expected a whole number of days for --days, got {raw!r}") from exc
+    if not 1 <= days <= MAX_OCSP_VALIDITY_DAYS:
+        raise ValueError(f"Expected --days between 1 and {MAX_OCSP_VALIDITY_DAYS}, got {days}")
     return days
 
 
