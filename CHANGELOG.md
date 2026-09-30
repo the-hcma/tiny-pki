@@ -2,6 +2,21 @@
 
 All notable changes to tiny-pki are recorded here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/). Until 1.0, a minor release may change the API; such changes are called out under **Changed**.
 
+## [0.2.0](https://github.com/the-hcma/tiny-pki/compare/v0.1.0...v0.2.0) (2026-09-30)
+
+
+### Features
+
+* encrypt CA keys at rest ([#152](https://github.com/the-hcma/tiny-pki/issues/152)) ([dae28b6](https://github.com/the-hcma/tiny-pki/commit/dae28b6e6649353a496d121a220813cb144b0dbd))
+* sign client CSRs so device keys stay on the device ([#155](https://github.com/the-hcma/tiny-pki/issues/155)) ([89446ee](https://github.com/the-hcma/tiny-pki/commit/89446ee73acbaa2ea03daab12183685871e8abbb))
+
+
+### Documentation
+
+* drop the my-tracks relicensing note from the README license ([#148](https://github.com/the-hcma/tiny-pki/issues/148)) ([33a1152](https://github.com/the-hcma/tiny-pki/commit/33a115233d515582174b08bc868674b73b03aaad))
+* sync agent rule template fixes from repository-helpers ([#151](https://github.com/the-hcma/tiny-pki/issues/151)) ([9b0cce8](https://github.com/the-hcma/tiny-pki/commit/9b0cce8ca0be4eefee82b6b1f1caee4c421867ff))
+* sync unwrapped agent rule templates from repository-helpers ([#149](https://github.com/the-hcma/tiny-pki/issues/149)) ([344cec3](https://github.com/the-hcma/tiny-pki/commit/344cec31376da6440b338d7a0b58a0171c4f003d))
+
 ## [0.1.0] - 2026-09-27
 
 The first release on PyPI. It supports Python 3.12 and newer, and needs `cryptography` 50.0.1 or newer; the `cli` extra adds `prompt-toolkit`.
