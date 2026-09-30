@@ -16,7 +16,14 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from tiny_pki._csr import PublicKey, load_csr, requested_extension_names, require_signable_public_key
+from tiny_pki._csr import (
+    PublicKey,
+    load_csr,
+    requested_extension_names,
+    requested_sans,
+    require_signable_public_key,
+    unsupported_requested_sans,
+)
 from tiny_pki._keys import PrivateKey, generate_private_key, load_ca_private_key, require_key_params
 from tiny_pki.constants import (
     APPLE_MAX_SERVER_VALIDITY_DAYS,
@@ -40,6 +47,7 @@ from tiny_pki.names import (
     common_name_as_san,
     normalize_dns_name,
     normalize_san_entries,
+    normalize_san_entry,
     normalize_subject_attribute,
 )
 
@@ -235,7 +243,7 @@ def sign_client_csr(
     ca_key = load_ca_private_key(ca_cert, ca_key_pem)
     org = _leaf_organization(ca_cert, organization_name)
     _enforce_name_constraints(ca_cert, common_name=common_name, sans=[])
-    pending_warnings = _ignored_csr_request_warnings(csr, common_name)
+    pending_warnings = _ignored_csr_request_warnings(csr, common_name, profile="client")
     not_before, not_after = _leaf_validity_window(
         ca_cert, validity_days, kind="client", allow_long_validity=allow_long_validity, warn=pending_warnings
     )
@@ -291,20 +299,15 @@ def generate_server_certificate(
         _require_plain_common_name(common_name)
     rsa_key_size = require_key_params(key_type, key_size, default_size=DEFAULT_LEAF_KEY_SIZE)
     _require_validity_days(validity_days)
-    sans = normalize_san_entries(san_entries)
     pending_warnings: list[str] = []
     ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
-    cn_san = common_name_as_san(common_name)
-    if include_common_name_in_sans and cn_san is not None and cn_san not in sans:
-        if _name_type_unconstrained(ca_cert, cn_san):
-            pending_warnings.append(
-                f"Did not add common_name {common_name!r} to the SANs: the CA has no permitted subtree for it"
-            )
-        else:
-            sans.append(cn_san)
-            pending_warnings.append(
-                f"Added common_name {common_name!r} to the SANs as {cn_san!r} (TLS clients ignore the CN)"
-            )
+    sans = _server_sans(
+        ca_cert,
+        common_name,
+        san_entries,
+        include_common_name_in_sans=include_common_name_in_sans,
+        warn=pending_warnings,
+    )
 
     ca_key = load_ca_private_key(ca_cert, ca_key_pem)
     org = _leaf_organization(ca_cert, organization_name)
@@ -313,57 +316,119 @@ def generate_server_certificate(
         ca_cert, validity_days, kind="server", allow_long_validity=allow_long_validity, warn=pending_warnings
     )
     server_key = generate_private_key(rsa_key_size)
-
-    subject = x509.Name(
-        [
-            x509.NameAttribute(NameOID.COMMON_NAME, common_name),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, org),
-        ]
-    )
-    san_objects: list[x509.GeneralName] = []
-    for entry in sans:
-        try:
-            san_objects.append(x509.IPAddress(ipaddress.ip_address(entry)))
-        except ValueError:
-            san_objects.append(x509.DNSName(entry))
-
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(ca_cert.subject)
-        .public_key(server_key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(not_before)
-        .not_valid_after(not_after)
-        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .add_extension(
-            x509.KeyUsage(
-                digital_signature=True,
-                key_encipherment=isinstance(server_key, rsa.RSAPrivateKey),
-                content_commitment=False,
-                data_encipherment=False,
-                key_agreement=False,
-                key_cert_sign=False,
-                crl_sign=False,
-                encipher_only=False,
-                decipher_only=False,
-            ),
-            critical=True,
-        )
-        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
-        .add_extension(x509.SubjectAlternativeName(san_objects), critical=False)
-        .add_extension(
-            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
-            critical=False,
-        )
-        .add_extension(
-            x509.SubjectKeyIdentifier.from_public_key(server_key.public_key()),
-            critical=False,
-        )
-        .sign(ca_key, hashes.SHA256())
+    cert = _server_certificate(
+        ca_cert,
+        ca_key,
+        server_key.public_key(),
+        common_name=common_name,
+        organization_name=org,
+        sans=sans,
+        not_before=not_before,
+        not_after=not_after,
     )
     _emit_warnings(pending_warnings)
     return _pem_pair(cert, server_key)
+
+
+def sign_server_csr(
+    ca_cert_pem: bytes,
+    ca_key_pem: bytes,
+    csr_pem: bytes,
+    common_name: str,
+    san_entries: list[str],
+    *,
+    organization_name: str | None = None,
+    validity_days: int = DEFAULT_SERVER_VALIDITY_DAYS,
+    allow_long_validity: bool = False,
+    include_common_name_in_sans: bool = True,
+    include_csr_sans: bool = False,
+    allow_dn_special_chars: bool = False,
+) -> bytes:
+    """Sign a server's certificate signing request as a server (SERVER_AUTH) certificate.
+
+    The private key stays on the server that generated the CSR; only its public
+    key is taken from ``csr_pem`` (PEM or DER). Everything else comes from the CA
+    side, exactly as in :func:`generate_server_certificate`: ``common_name``, the
+    SANs, the organization, the validity window, and the extensions.
+
+    The SANs are ``san_entries`` plus the CN (``include_common_name_in_sans``, as
+    for :func:`generate_server_certificate`). The DNS names and IP addresses the
+    CSR requests are added only with ``include_csr_sans=True``; otherwise they
+    are ignored with a warning, so a CSR cannot extend the names a certificate
+    covers without the operator's say-so. Requested SANs of other types (URI,
+    email, otherName, ...) are always ignored with a warning, since server
+    certificates carry only DNS and IP SANs. Every other requested extension, such
+    as ``BasicConstraints(ca=True)`` or a client EKU, is ignored.
+
+    The CSR must pass the same policy as :func:`sign_client_csr`.
+
+    Returns:
+        The certificate in PEM format.
+
+    Raises:
+        TinyPkiError: If the CSR is malformed or fails that policy, a SAN (including
+            an accepted CSR SAN) is invalid or outside the CA's name constraints, or
+            for any reason :func:`generate_server_certificate` would refuse the name
+            or validity.
+
+    Warns:
+        TinyPkiWarning: When the CSR's subject CN differs from ``common_name``, it
+            requests SANs that are not included, or it requests other extensions;
+            all are ignored. The CN-in-SAN and validity warnings of
+            :func:`generate_server_certificate` apply too. Warnings are emitted only
+            after the certificate is issued, never for a rejection.
+    """
+    common_name = normalize_subject_attribute(common_name, "common_name", max_length=MAX_COMMON_NAME_LENGTH)
+    if not allow_dn_special_chars:
+        _require_plain_common_name(common_name)
+    _require_validity_days(validity_days)
+    csr = load_csr(csr_pem)
+    public_key = require_signable_public_key(csr)
+
+    ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
+    csr_sans = requested_sans(csr)
+    pending_warnings = _ignored_csr_request_warnings(
+        csr, common_name, profile="server", handled=frozenset({"SubjectAlternativeName"})
+    )
+    sans = _server_sans(
+        ca_cert,
+        common_name,
+        [*san_entries, *csr_sans] if include_csr_sans else san_entries,
+        include_common_name_in_sans=include_common_name_in_sans,
+        warn=pending_warnings,
+    )
+    if not include_csr_sans:
+        ignored = [san for san in csr_sans if _normalized_or_raw(san) not in sans]
+        if ignored:
+            pending_warnings.append(
+                f"Ignored the SANs the CSR requests ({', '.join(ignored)}); the certificate covers "
+                f"{', '.join(sans)}. Include them explicitly or with include_csr_sans=True"
+            )
+    unsupported = unsupported_requested_sans(csr)
+    if unsupported:
+        pending_warnings.append(
+            f"Ignored the CSR's requested SANs that are not DNS names or IP addresses ({', '.join(unsupported)}); "
+            "server certificates carry only DNS and IP SANs"
+        )
+
+    ca_key = load_ca_private_key(ca_cert, ca_key_pem)
+    org = _leaf_organization(ca_cert, organization_name)
+    _enforce_name_constraints(ca_cert, common_name=common_name, sans=sans)
+    not_before, not_after = _leaf_validity_window(
+        ca_cert, validity_days, kind="server", allow_long_validity=allow_long_validity, warn=pending_warnings
+    )
+    cert = _server_certificate(
+        ca_cert,
+        ca_key,
+        public_key,
+        common_name=common_name,
+        organization_name=org,
+        sans=sans,
+        not_before=not_before,
+        not_after=not_after,
+    )
+    _emit_warnings(pending_warnings)
+    return cert.public_bytes(serialization.Encoding.PEM)
 
 
 def max_leaf_validity_days(
@@ -509,8 +574,17 @@ def _emit_warnings(messages: list[str]) -> None:
         warnings.warn(message, TinyPkiWarning, stacklevel=3)
 
 
-def _ignored_csr_request_warnings(csr: x509.CertificateSigningRequest, common_name: str) -> list[str]:
-    """Describe what a CSR asked for that signing ignores: a different CN, and any requested extensions."""
+def _ignored_csr_request_warnings(
+    csr: x509.CertificateSigningRequest,
+    common_name: str,
+    *,
+    profile: Literal["client", "server"],
+    handled: frozenset[str] = frozenset(),
+) -> list[str]:
+    """Describe what a CSR asked for that signing ignores: a different CN, and requested extensions.
+
+    ``handled`` names extensions the caller reports on itself (the server path's SANs).
+    """
     messages: list[str] = []
     requested_cns = [str(attr.value) for attr in csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)]
     if requested_cns and requested_cns != [common_name]:
@@ -518,12 +592,19 @@ def _ignored_csr_request_warnings(csr: x509.CertificateSigningRequest, common_na
             f"Ignored the CSR's common name {', '.join(repr(cn) for cn in requested_cns)}; "
             f"the certificate is issued to {common_name!r}"
         )
-    requested = requested_extension_names(csr)
+    requested = [name for name in requested_extension_names(csr) if name not in handled]
     if requested:
         messages.append(
-            f"Ignored the extensions the CSR requests ({', '.join(requested)}); the CA sets the client profile"
+            f"Ignored the extensions the CSR requests ({', '.join(requested)}); the CA sets the {profile} profile"
         )
     return messages
+
+
+def _normalized_or_raw(san: str) -> str:
+    try:
+        return normalize_san_entry(san)
+    except TinyPkiError:
+        return san
 
 
 def _require_plain_common_name(common_name: str) -> None:
@@ -709,6 +790,87 @@ def _permitted_subtree(entry: str) -> x509.GeneralName:
 def _require_validity_days(validity_days: int) -> None:
     if not 0 < validity_days <= MAX_VALIDITY_DAYS:
         raise TinyPkiError(f"Expected validity_days between 1 and {MAX_VALIDITY_DAYS}, got {validity_days}")
+
+
+def _server_certificate(
+    ca_cert: x509.Certificate,
+    ca_key: PrivateKey,
+    public_key: PublicKey,
+    *,
+    common_name: str,
+    organization_name: str,
+    sans: list[str],
+    not_before: datetime,
+    not_after: datetime,
+) -> x509.Certificate:
+    """Build and sign the server leaf profile shared by generated and CSR-issued certificates."""
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, organization_name),
+        ]
+    )
+    san_objects: list[x509.GeneralName] = []
+    for entry in sans:
+        try:
+            san_objects.append(x509.IPAddress(ipaddress.ip_address(entry)))
+        except ValueError:
+            san_objects.append(x509.DNSName(entry))
+    return (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(ca_cert.subject)
+        .public_key(public_key)
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_encipherment=isinstance(public_key, rsa.RSAPublicKey),
+                content_commitment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
+        .add_extension(x509.SubjectAlternativeName(san_objects), critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(public_key),
+            critical=False,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+
+
+def _server_sans(
+    ca_cert: x509.Certificate,
+    common_name: str,
+    san_entries: list[str],
+    *,
+    include_common_name_in_sans: bool,
+    warn: list[str],
+) -> list[str]:
+    """Normalize ``san_entries`` and add a host-like CN to them, as the server profile does."""
+    sans = normalize_san_entries(san_entries)
+    cn_san = common_name_as_san(common_name)
+    if include_common_name_in_sans and cn_san is not None and cn_san not in sans:
+        if _name_type_unconstrained(ca_cert, cn_san):
+            warn.append(f"Did not add common_name {common_name!r} to the SANs: the CA has no permitted subtree for it")
+        else:
+            sans.append(cn_san)
+            warn.append(f"Added common_name {common_name!r} to the SANs as {cn_san!r} (TLS clients ignore the CN)")
+    return sans
 
 
 def _validity_window(validity_days: int) -> tuple[datetime, datetime]:

@@ -15,7 +15,7 @@ What it covers:
 - Name Constraints, so a stolen CA key cannot impersonate public sites.
 - CRLs with monotonic numbers, and a key-free `public/` directory to hand to a sandboxed TLS server.
 - PKCS#12 bundles for phones and browsers, with a legacy mode for old keychains.
-- Signing a device's CSR (`sign client NAME --csr PATH`), so laptop, TPM and YubiKey keys never leave the device.
+- Signing a CSR (`sign client|server NAME --csr PATH`), so laptop, TPM, YubiKey and server keys never leave the machine that made them.
 - `check`, an expiry and revocation monitor with Nagios-style exit codes and JSON output.
 - Rotation without downtime (`create client --keep-previous`), dry runs for destructive commands, and a store that is safe under concurrent writers.
 - Tab completion for bash, zsh, fish and the REPL.

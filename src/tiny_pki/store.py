@@ -13,7 +13,7 @@ Layout (one CA per store root)::
       ca/ca.crt  ca/ca.key  ca/crl.pem  ca/crlnumber  ca/crldays  ca/index.json
       public/ca.crt  public/crl.pem
       clients/{cn}-{serial}.{crt,key}   (no .key for a certificate signed from a CSR)
-      servers/{cn}-{serial}.{crt,key}
+      servers/{cn}-{serial}.{crt,key}   (likewise)
       bundles/{cn}-{serial}.p12
 
 Legacy flat layouts (``ca.crt`` / ``certs/`` at the store root) are migrated
@@ -21,9 +21,9 @@ automatically on first ``ensure_layout``.
 
 Methods that change the index (``add_certificate``, ``mark_revoked``,
 ``delete_certificate`` and the CLI-shaped ``issue_client`` / ``issue_server`` /
-``sign_client_csr`` / ``revoke`` / ``delete``) republish ``ca/crl.pem`` with the store's CA key, so the
-CRL never lags ``index.json``. :func:`check_store` is the store health check
-behind ``tiny-pki check``.
+``sign_client_csr`` / ``sign_server_csr`` / ``revoke`` / ``delete``) republish
+``ca/crl.pem`` with the store's CA key, so the CRL never lags ``index.json``.
+:func:`check_store` is the store health check behind ``tiny-pki check``.
 
 Every method that modifies the store holds an exclusive ``fcntl.flock`` on
 ``ca/.lock`` (see :meth:`CertificateStore.lock`), so concurrent processes cannot
@@ -63,7 +63,12 @@ from tiny_pki.constants import (
 )
 from tiny_pki.errors import TinyPkiError
 from tiny_pki.inspect import get_certificate_expiry, get_certificate_fingerprint, get_certificate_serial_number
-from tiny_pki.issue import generate_client_certificate, generate_server_certificate, sign_client_csr
+from tiny_pki.issue import (
+    generate_client_certificate,
+    generate_server_certificate,
+    sign_client_csr,
+    sign_server_csr,
+)
 from tiny_pki.revoke import generate_crl
 from tiny_pki.secrets import (
     decrypt_private_key_scrypt,
@@ -658,6 +663,46 @@ class CertificateStore:
             allow_dn_special_chars=allow_dn_special_chars,
         )
         return self._record(common_name, "client", cert_pem, None, keep_previous=keep_previous, key_secret=key_secret)
+
+    @_locked
+    def sign_server_csr(
+        self,
+        common_name: str,
+        csr_pem: bytes,
+        san_entries: list[str],
+        *,
+        organization_name: str | None = None,
+        validity_days: int = DEFAULT_SERVER_VALIDITY_DAYS,
+        allow_long_validity: bool = False,
+        include_common_name_in_sans: bool = True,
+        include_csr_sans: bool = False,
+        allow_dn_special_chars: bool = False,
+        key_secret: str | None = None,
+    ) -> IssuedCertificate:
+        """Sign a server's CSR as a server certificate and record it, as ``tiny-pki sign server``.
+
+        Arguments match :func:`tiny_pki.sign_server_csr`. The entry has no
+        ``key_path``: the private key stays on the server. Replacement and CRL
+        republishing behave as in :meth:`issue_server`.
+        """
+        ca_material = self._require_ca_signing_key(key_secret)
+        if ca_material is None:
+            raise FileNotFoundError(f"Expected CA files under {self.ca_dir}")
+        ca_cert, ca_key = ca_material
+        cert_pem = sign_server_csr(
+            ca_cert,
+            ca_key,
+            csr_pem,
+            common_name,
+            san_entries,
+            organization_name=organization_name,
+            validity_days=validity_days,
+            allow_long_validity=allow_long_validity,
+            include_common_name_in_sans=include_common_name_in_sans,
+            include_csr_sans=include_csr_sans,
+            allow_dn_special_chars=allow_dn_special_chars,
+        )
+        return self._record(common_name, "server", cert_pem, None, key_secret=key_secret)
 
     def revoke(self, identity: str, *, key_secret: str | None = None) -> IssuedCertificate:
         """Revoke a certificate, as ``tiny-pki revoke``; see :meth:`mark_revoked`."""

@@ -44,12 +44,12 @@ from tiny_pki import (
     get_certificate_subject,
     inspect_csr,
 )
-from tiny_pki._csr import is_csr_data
+from tiny_pki._csr import is_csr_data, load_csr, requested_sans
 from tiny_pki._fsutil import write_file_atomic
 from tiny_pki.check import CertificateStatus, Status, check_certificate, check_crl, worst_status
 from tiny_pki.cli.commands import COMMAND_FLAGS
 from tiny_pki.cli.theme import Theme
-from tiny_pki.names import common_name_as_san, normalize_san_entries
+from tiny_pki.names import common_name_as_san, normalize_san_entries, normalize_san_entry
 from tiny_pki.store import CHECK_KINDS, CertificateStore, CheckKind, IssuedCertificate, check_store
 
 CHECK_EXIT_CRITICAL = 2
@@ -122,6 +122,41 @@ def _confirm_cn_in_sans(name: str, sans: list[str], flags: dict[str, str]) -> bo
     except (EOFError, KeyboardInterrupt) as exc:
         raise ValueError("Expected an answer to the CN-in-SAN prompt; pass --yes or --no-cn-san") from exc
     return answer.strip().lower() in {"", "y", "yes"}
+
+
+def _confirm_csr_sans(
+    csr: x509.CertificateSigningRequest, name: str, sans: list[str], *, include_cn: bool, flags: dict[str, str]
+) -> bool:
+    """Decide whether the SANs a server CSR requests, beyond ``--san`` and the CN, are included.
+
+    ``--accept-csr-sans`` includes them; otherwise the operator is asked, and a
+    non-interactive stdin declines (the library then warns that they were ignored).
+    """
+    covered = set(normalize_san_entries(sans))
+    cn_san = common_name_as_san(name)
+    if cn_san is not None and include_cn:
+        covered.add(cn_san)
+    extra = [san for san in requested_sans(csr) if _normalized_san(san) not in covered]
+    if not extra:
+        return False
+    if "accept-csr-sans" in flags:
+        return True
+    if not sys.stdin.isatty():
+        return False
+    try:
+        answer = input(f"The CSR also requests SANs {', '.join(extra)}. Include them? [y/N] ")
+    except (EOFError, KeyboardInterrupt) as exc:
+        raise ValueError(
+            "Expected an answer to the CSR SAN prompt; pass --accept-csr-sans or list them with --san"
+        ) from exc
+    return answer.strip().lower() in {"y", "yes"}
+
+
+def _normalized_san(san: str) -> str:
+    try:
+        return normalize_san_entry(san)
+    except ValueError:
+        return san
 
 
 def _require_store(store: CertificateStore | None) -> CertificateStore:
@@ -288,41 +323,72 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
 def _cmd_sign(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     store = _require_store(store)
     if not args:
-        raise ValueError("Expected sign client <name> --csr PATH")
+        raise ValueError("Expected sign client|server <name> --csr PATH")
     kind = args[0]
-    if kind != "client":
-        raise ValueError(f"Expected sign client, got {kind!r}; only client certificates can be signed from a CSR")
+    if kind not in {"client", "server"}:
+        raise ValueError(f"Expected sign client|server, got {kind!r}")
     opts = _parse_flags(args[1:], command="sign")
-    name = _require_one_positional(opts, "sign client <name> --csr PATH")
-    csr_flag = opts["flags"].get("csr")
+    flags = opts["flags"]
+    name = _require_one_positional(opts, f"sign {kind} <name> --csr PATH")
+    server_only = {"accept-csr-sans", "no-cn-san", "yes"} & flags.keys()
+    if kind == "client" and (opts["multi"].get("san") or server_only):
+        raise ValueError("--san / --accept-csr-sans / --no-cn-san / --yes are only supported for server certificates")
+    if kind == "server" and "keep-previous" in flags:
+        raise ValueError("--keep-previous is only supported for client certificates")
+    if "no-cn-san" in flags and not opts["multi"].get("san"):
+        raise ValueError("Expected --san with --no-cn-san; without --san the CN is the only SAN")
+    csr_flag = flags.get("csr")
     if not csr_flag:
-        raise ValueError("Expected --csr PATH with the device's certificate signing request")
+        raise ValueError("Expected --csr PATH with the certificate signing request")
     csr_path = Path(csr_flag)
     try:
         csr_pem = csr_path.read_bytes()
     except OSError as exc:
         raise ValueError(f"Expected a readable --csr file, got {csr_path} ({exc.strerror})") from exc
-    days = _parse_days(
-        opts["flags"].get("days", str(DEFAULT_CLIENT_VALIDITY_DAYS)), default=DEFAULT_CLIENT_VALIDITY_DAYS
-    )
-    key_secret = _key_secret(opts["flags"], store=store, theme=theme)
+    default_days = DEFAULT_CLIENT_VALIDITY_DAYS if kind == "client" else DEFAULT_SERVER_VALIDITY_DAYS
+    days = _parse_days(flags.get("days", str(default_days)), default=default_days)
+    org = flags.get("org")
+    allow_long_validity = "allow-long-validity" in flags
+    allow_dn_special_chars = "allow-dn-special-chars" in flags
+    sans: list[str] = []
+    include_cn = include_csr_sans = False
+    if kind == "server":
+        sans = [s for s in opts["multi"].get("san", []) if s] or [name]
+        include_cn = _confirm_cn_in_sans(name, sans, flags)
+        include_csr_sans = _confirm_csr_sans(load_csr(csr_pem), name, sans, include_cn=include_cn, flags=flags)
+    key_secret = _key_secret(flags, store=store, theme=theme)
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", TinyPkiWarning)
-        entry = store.sign_client_csr(
-            name,
-            csr_pem,
-            organization_name=opts["flags"].get("org"),
-            validity_days=days,
-            allow_long_validity="allow-long-validity" in opts["flags"],
-            allow_dn_special_chars="allow-dn-special-chars" in opts["flags"],
-            keep_previous="keep-previous" in opts["flags"],
-            key_secret=key_secret,
-        )
+        if kind == "client":
+            entry = store.sign_client_csr(
+                name,
+                csr_pem,
+                organization_name=org,
+                validity_days=days,
+                allow_long_validity=allow_long_validity,
+                allow_dn_special_chars=allow_dn_special_chars,
+                keep_previous="keep-previous" in flags,
+                key_secret=key_secret,
+            )
+        else:
+            entry = store.sign_server_csr(
+                name,
+                csr_pem,
+                sans,
+                organization_name=org,
+                validity_days=days,
+                allow_long_validity=allow_long_validity,
+                include_common_name_in_sans=include_cn,
+                include_csr_sans=include_csr_sans,
+                allow_dn_special_chars=allow_dn_special_chars,
+                key_secret=key_secret,
+            )
     for warning in caught:
         print(theme.warn(f"warning: {warning.message}"), file=sys.stderr)
 
-    print(theme.ok(f"issued client {entry.common_name} from {csr_path} (the private key stays on the device)"))
+    holder = "device" if kind == "client" else "server"
+    print(theme.ok(f"issued {kind} {entry.common_name} from {csr_path} (the private key stays on the {holder})"))
     print(theme.dim(f"serial {entry.serial_number}  fp {entry.fingerprint}"))
     out_flag = opts["flags"].get("out")
     if out_flag:
@@ -593,14 +659,15 @@ def _cmd_export(args: list[str], *, store: CertificateStore | None, theme: Theme
         raise ValueError(f"Expected export pem|p12, got {fmt!r}")
     cert_pem = store.read_certificate_pem(entry)
     if not entry.key_path:
+        holder = "device" if entry.kind == "client" else "server"
         if fmt == "p12":
             raise ValueError(
                 f"Expected a private key for {entry.common_name!r} to build a PKCS#12 bundle, but it was signed "
-                "from a CSR and its key stays on the device; use export pem for the certificate"
+                f"from a CSR and its key stays on the {holder}; use export pem for the certificate"
             )
         out = Path(opts["flags"].get("out", f"{_safe_export_name(entry.common_name)}.pem"))
         write_file_atomic(out, cert_pem, mode=0o644)
-        print(theme.ok(f"wrote {out} (certificate only: the private key stays on the device)"))
+        print(theme.ok(f"wrote {out} (certificate only: the private key stays on the {holder})"))
         return
     key_pem = store.read_key_pem(entry)
     ca_cert = store.read_ca_certificate()

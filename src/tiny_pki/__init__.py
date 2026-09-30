@@ -58,6 +58,7 @@ from tiny_pki.issue import (
     generate_server_certificate,
     max_leaf_validity_days,
     sign_client_csr,
+    sign_server_csr,
 )
 from tiny_pki.revoke import generate_crl
 from tiny_pki.version import package_version
@@ -112,5 +113,6 @@ __all__ = [
     "is_certificate_self_signed",
     "max_leaf_validity_days",
     "sign_client_csr",
+    "sign_server_csr",
     "worst_status",
 ]
