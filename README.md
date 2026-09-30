@@ -15,6 +15,7 @@ What it covers:
 - Name Constraints, so a stolen CA key cannot impersonate public sites.
 - CRLs with monotonic numbers, and a key-free `public/` directory to hand to a sandboxed TLS server.
 - PKCS#12 bundles for phones and browsers, with a legacy mode for old keychains.
+- Signing a device's CSR (`sign client NAME --csr PATH`), so laptop, TPM and YubiKey keys never leave the device.
 - `check`, an expiry and revocation monitor with Nagios-style exit codes and JSON output.
 - Rotation without downtime (`create client --keep-previous`), dry runs for destructive commands, and a store that is safe under concurrent writers.
 - Tab completion for bash, zsh, fish and the REPL.
@@ -77,6 +78,7 @@ tiny-pki init --cn "Home CA" --permit home --permit 192.168.0.0/16
 tiny-pki create server api.home --san api.home --san 192.168.1.10
 tiny-pki create client alice
 tiny-pki export p12 alice           # prompts for the bundle password
+tiny-pki sign client bob-laptop --csr bob-laptop.csr --out bob-laptop.crt   # key stays on the laptop
 tiny-pki list clients
 tiny-pki revoke alice --dry-run     # preview; writes nothing
 tiny-pki revoke alice               # republishes public/crl.pem
@@ -91,7 +93,7 @@ To encrypt the CA key during initialization, provide a protected file containing
 
 | Page | Contents |
 | --- | --- |
-| [docs/cli.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/cli.md) | Every command and flag, plus rotation, nginx and CRL-timer workflows |
+| [docs/cli.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/cli.md) | Every command and flag, plus CSR enrollment, rotation, nginx and CRL-timer workflows |
 | [docs/api.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/api.md) | Library functions, constants, errors and warnings |
 | [docs/store.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/store.md) | Store layout, `public/`, locking, `index.json`, and the store API |
 | [docs/monitoring.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/monitoring.md) | `check` output, JSON schema, exit codes, cron and systemd recipes |

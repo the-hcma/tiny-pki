@@ -11,8 +11,8 @@ tiny-pki [--store DIR] [--color auto|always|never] [--edit-mode vim|emacs] [COMM
 - [Global options](#global-options)
 - [Identities](#identities)
 - [Exit status](#exit-status)
-- Commands: [init](#init), [create](#create), [list](#list), [show](#show), [inspect](#inspect), [export](#export), [revoke](#revoke), [delete](#delete), [crl](#crl), [encrypt-key](#encrypt-key), [decrypt-key](#decrypt-key), [check](#check), [completion](#completion), [REPL commands](#repl-commands)
-- Workflows: [rotating a client certificate](#rotating-a-client-certificate), [a lost device or compromised key](#a-lost-device-or-a-compromised-key), [serving mTLS from nginx](#serving-mtls-from-nginx), [renewing the CRL on a timer](#renewing-the-crl-on-a-timer)
+- Commands: [init](#init), [create](#create), [sign](#sign), [list](#list), [show](#show), [inspect](#inspect), [export](#export), [revoke](#revoke), [delete](#delete), [crl](#crl), [encrypt-key](#encrypt-key), [decrypt-key](#decrypt-key), [check](#check), [completion](#completion), [REPL commands](#repl-commands)
+- Workflows: [enrolling a device from a CSR](#enrolling-a-device-from-a-csr), [rotating a client certificate](#rotating-a-client-certificate), [a lost device or compromised key](#a-lost-device-or-a-compromised-key), [serving mTLS from nginx](#serving-mtls-from-nginx), [renewing the CRL on a timer](#renewing-the-crl-on-a-timer)
 
 ## Global options
 
@@ -90,6 +90,30 @@ tiny-pki --store ./stores/ca create client phone --key-type ec-p256
 tiny-pki --store ./stores/ca create server api.home --san api.home --san 192.168.1.10
 ```
 
+### sign
+
+```text
+tiny-pki --store DIR sign client NAME --csr PATH [options]
+```
+
+Issues a client certificate for a certificate signing request (CSR) that a device generated, so its private key never leaves the device: a laptop keychain, a TPM, or a YubiKey. The store records the certificate with no key file. Only the CSR's public key is used. The CN is always `NAME`, and every extension comes from the same client profile `create client` uses; a different CN or any extensions the CSR requests are ignored with a warning. The CSR (PEM, including Windows `certreq`'s `NEW CERTIFICATE REQUEST` header, or DER) must have a valid signature using SHA-256 or stronger, and an RSA 2048/3072/4096 key with public exponent 65537 or an ECDSA P-256 key. Re-signing a name that has a live certificate revokes the old one, as for `create`. See [enrolling a device from a CSR](#enrolling-a-device-from-a-csr).
+
+| Flag | Meaning |
+| --- | --- |
+| `--csr PATH` | The device's certificate signing request (required). |
+| `--days N` | Validity in days (default 397, capped at 825). |
+| `--allow-long-validity` | Allow a validity beyond the 825-day cap. |
+| `--org NAME` | Organization (O); defaults to the CA's. |
+| `--allow-dn-special-chars` | Allow `,` `+` `=` `"` `<` `>` `;` or a leading `#` in the name, as for `create`. |
+| `--keep-previous` | Keep the previous certificate live, for [rotation](#rotating-a-client-certificate). |
+| `--key-secret-file PATH` | Read the CA-key secret from the first line of a file when the CA key is encrypted. |
+| `--out PATH` | Also write the issued certificate (mode `0644`) to this file for the device. |
+
+```bash
+tiny-pki --store ./stores/ca inspect laptop.csr        # compare the public key fingerprint with the device
+tiny-pki --store ./stores/ca sign client alice-laptop --csr laptop.csr --out alice-laptop.crt
+```
+
 ### list
 
 ```text
@@ -119,6 +143,8 @@ tiny-pki [--store DIR] inspect NAME|PATH
 
 Prints a certificate's details. A path to a PEM file needs no store; for a store identity, `inspect` also checks the certificate against the store's CA and CRL.
 
+For a CSR file, `inspect` prints the requested subject and SANs, the key type and size, the signature hash, any requested extensions (all ignored by `sign`), the SHA-256 fingerprint of the public key, and whether `sign` would accept it, listing each reason when it would not.
+
 ### export
 
 ```text
@@ -126,6 +152,8 @@ tiny-pki --store DIR export pem|p12 NAME [options]
 ```
 
 `pem` writes the certificate and private key to one file (default `NAME.pem` in the current directory). `p12` writes a password-protected PKCS#12 bundle with the certificate, key and CA, for phones and browsers (default `bundles/NAME-SERIAL.p12` in the store). Files are written with mode `0600`, and a destination that is a symlink is refused.
+
+For a certificate issued by [`sign`](#sign), the store has no private key: `pem` writes the certificate alone (mode `0644`), and `p12` is refused.
 
 | Flag | Meaning |
 | --- | --- |
@@ -272,6 +300,43 @@ tiny-pki completion fish --install   # ~/.config/fish/completions/tiny-pki.fish
 | `exit`, `quit` | Leave the REPL (Ctrl-D also works). |
 
 ## Workflows
+
+### Enrolling a device from a CSR
+
+Devices that can generate their own key and CSR, such as laptops, desktops and hardware tokens, keep the key to themselves; only the CSR and the issued certificate travel, and neither is secret. Phones and tablets usually cannot produce a CSR for browser client authentication, so they keep using `create client` and `export p12`.
+
+1. On the device, generate a key and a CSR (EC P-256 or RSA 3072). With OpenSSL:
+
+   ```bash
+   openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+     -keyout alice-laptop.key -subj "/CN=alice-laptop" -out alice-laptop.csr
+   ```
+
+   On a YubiKey, the key is generated on the token and never leaves it:
+
+   ```bash
+   ykman piv keys generate --algorithm ECCP256 9a pubkey.pem
+   ykman piv certificates request --subject "CN=alice-laptop" 9a pubkey.pem alice-laptop.csr
+   ```
+
+   macOS Keychain Access (Certificate Assistant, "Request a Certificate From a Certificate Authority", saved to disk) and Windows `certreq -new` with a non-exportable TPM key also produce CSRs.
+
+2. Copy the CSR to the CA host and compare its public key fingerprint with the device owner over another channel (read it aloud, for example), so a substituted CSR is caught. `inspect` prints it as colon-separated upper-case hex; on the device, the same SHA-256 in lower-case hex is:
+
+   ```bash
+   openssl req -in alice-laptop.csr -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256
+   ```
+
+3. Sign it. The CN comes from the command line, never from the CSR, so a device cannot pick a name that an nginx `map` or allow-list trusts:
+
+   ```bash
+   tiny-pki --store ./stores/ca inspect alice-laptop.csr
+   tiny-pki --store ./stores/ca sign client alice-laptop --csr alice-laptop.csr --out alice-laptop.crt
+   ```
+
+4. Copy `alice-laptop.crt` (and `public/ca.crt` if the device should trust the CA) back and install it next to the key: `ykman piv certificates import 9a alice-laptop.crt`, a double-click into the macOS keychain, `certreq -accept` on Windows, or the browser's certificate store alongside the OpenSSL key.
+
+Renew with a fresh CSR and `sign ... --keep-previous`, then revoke the old serial as in [rotating a client certificate](#rotating-a-client-certificate). `revoke`, `list`, `check` and the CRL work as for any other certificate.
 
 ### Rotating a client certificate
 

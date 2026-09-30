@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 
 from cryptography import x509
-from cryptography.exceptions import InvalidSignature
+from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes
 from cryptography.x509.oid import NameOID
+
+from tiny_pki._csr import csr_problems, describe_public_key, load_csr, public_key_fingerprint, requested_extension_names
 
 _OID_TO_LABEL: dict[x509.ObjectIdentifier, str] = {
     NameOID.COMMON_NAME: "CN",
@@ -17,6 +20,57 @@ _OID_TO_LABEL: dict[x509.ObjectIdentifier, str] = {
     NameOID.ORGANIZATIONAL_UNIT_NAME: "OU",
     NameOID.STATE_OR_PROVINCE_NAME: "ST",
 }
+
+
+@dataclass(frozen=True)
+class CsrSummary:
+    """What a certificate signing request asks for, and whether tiny-pki would sign it.
+
+    ``public_key_fingerprint`` is the SHA-256 of the DER SubjectPublicKeyInfo,
+    the value to compare with the device owner out of band. ``problems`` lists
+    every reason :func:`tiny_pki.sign_client_csr` would refuse the CSR; it is
+    empty when the CSR can be signed.
+    """
+
+    subject: str
+    common_name: str | None
+    sans: tuple[str, ...]
+    key_type: str
+    key_size: int | None
+    signature_hash: str | None
+    public_key_fingerprint: str
+    requested_extensions: tuple[str, ...]
+    problems: tuple[str, ...]
+
+
+def inspect_csr(csr_pem: bytes) -> CsrSummary:
+    """Summarize a PEM or DER certificate signing request without signing it.
+
+    Raises:
+        TinyPkiError: If ``csr_pem`` is not a CSR.
+    """
+    csr = load_csr(csr_pem)
+    cn_attrs = csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    try:
+        key_type, key_size = describe_public_key(csr.public_key())
+        fingerprint = public_key_fingerprint(csr)
+    except (UnsupportedAlgorithm, ValueError):
+        key_type, key_size, fingerprint = "unsupported", None, ""
+    try:
+        algorithm = csr.signature_hash_algorithm
+    except UnsupportedAlgorithm:
+        algorithm = None
+    return CsrSummary(
+        subject=csr.subject.rfc4514_string(),
+        common_name=str(cn_attrs[0].value) if cn_attrs else None,
+        sans=tuple(_requested_sans(csr)),
+        key_type=key_type,
+        key_size=key_size,
+        signature_hash=algorithm.name if algorithm is not None else None,
+        public_key_fingerprint=fingerprint,
+        requested_extensions=tuple(requested_extension_names(csr)),
+        problems=tuple(csr_problems(csr)),
+    )
 
 
 def get_certificate_expiry(cert_pem: bytes) -> datetime:
@@ -97,3 +151,13 @@ def is_certificate_self_signed(cert_pem: bytes) -> bool:
     except (InvalidSignature, TypeError, ValueError):
         return False
     return True
+
+
+def _requested_sans(csr: x509.CertificateSigningRequest) -> list[str]:
+    try:
+        san_ext = csr.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+    except (x509.ExtensionNotFound, ValueError):
+        return []
+    names = [str(name) for name in san_ext.value.get_values_for_type(x509.DNSName)]
+    names.extend(str(addr) for addr in san_ext.value.get_values_for_type(x509.IPAddress))
+    return names

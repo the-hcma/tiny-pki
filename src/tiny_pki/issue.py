@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
+from tiny_pki._csr import PublicKey, load_csr, requested_extension_names, require_signable_public_key
 from tiny_pki._keys import PrivateKey, generate_private_key, load_ca_private_key, require_key_params
 from tiny_pki.constants import (
     APPLE_MAX_SERVER_VALIDITY_DAYS,
@@ -173,49 +174,82 @@ def generate_client_certificate(
         ca_cert, validity_days, kind="client", allow_long_validity=allow_long_validity, warn=pending_warnings
     )
     client_key = generate_private_key(rsa_key_size)
-
-    subject = x509.Name(
-        [
-            x509.NameAttribute(NameOID.COMMON_NAME, common_name),
-            x509.NameAttribute(NameOID.ORGANIZATION_NAME, org),
-        ]
-    )
-    cert = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .issuer_name(ca_cert.subject)
-        .public_key(client_key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(not_before)
-        .not_valid_after(not_after)
-        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
-        .add_extension(
-            x509.KeyUsage(
-                digital_signature=True,
-                key_encipherment=isinstance(client_key, rsa.RSAPrivateKey),
-                content_commitment=False,
-                data_encipherment=False,
-                key_agreement=False,
-                key_cert_sign=False,
-                crl_sign=False,
-                encipher_only=False,
-                decipher_only=False,
-            ),
-            critical=True,
-        )
-        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
-        .add_extension(
-            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
-            critical=False,
-        )
-        .add_extension(
-            x509.SubjectKeyIdentifier.from_public_key(client_key.public_key()),
-            critical=False,
-        )
-        .sign(ca_key, hashes.SHA256())
+    cert = _client_certificate(
+        ca_cert,
+        ca_key,
+        client_key.public_key(),
+        common_name=common_name,
+        organization_name=org,
+        not_before=not_before,
+        not_after=not_after,
     )
     _emit_warnings(pending_warnings)
     return _pem_pair(cert, client_key)
+
+
+def sign_client_csr(
+    ca_cert_pem: bytes,
+    ca_key_pem: bytes,
+    csr_pem: bytes,
+    common_name: str,
+    *,
+    organization_name: str | None = None,
+    validity_days: int = DEFAULT_CLIENT_VALIDITY_DAYS,
+    allow_long_validity: bool = False,
+    allow_dn_special_chars: bool = False,
+) -> bytes:
+    """Sign a device's certificate signing request as a client (CLIENT_AUTH) certificate.
+
+    The private key stays wherever the CSR was generated; only its public key is
+    taken from ``csr_pem`` (PEM or DER). Everything else comes from the CA side,
+    exactly as in :func:`generate_client_certificate`: ``common_name`` (never the
+    CSR's subject), the organization, the validity window, and the extensions.
+    Extensions the CSR requests, such as ``BasicConstraints(ca=True)`` or extra
+    extended key usages, are ignored, so a CSR cannot obtain a CA or server
+    certificate.
+
+    The CSR must carry a valid self-signature using SHA-256, SHA-384, or SHA-512,
+    and an RSA key of an ``ALLOWED_KEY_SIZES`` size or an ECDSA P-256 key.
+
+    Returns:
+        The certificate in PEM format.
+
+    Raises:
+        TinyPkiError: If the CSR is malformed or fails that policy, or for any
+            reason :func:`generate_client_certificate` would refuse the name or
+            validity.
+
+    Warns:
+        TinyPkiWarning: When the CSR's subject CN differs from ``common_name``, or
+            the CSR requests extensions; both are ignored. Warnings are emitted only
+            after the certificate is issued, never for a rejection.
+    """
+    common_name = normalize_subject_attribute(common_name, "common_name", max_length=MAX_COMMON_NAME_LENGTH)
+    if not allow_dn_special_chars:
+        _require_plain_common_name(common_name)
+    _require_validity_days(validity_days)
+    csr = load_csr(csr_pem)
+    public_key = require_signable_public_key(csr)
+
+    ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
+    ca_key = load_ca_private_key(ca_cert, ca_key_pem)
+    org = _leaf_organization(ca_cert, organization_name)
+    _enforce_name_constraints(ca_cert, common_name=common_name, sans=[])
+    pending_warnings = _ignored_csr_request_warnings(csr, common_name)
+    not_before, not_after = _leaf_validity_window(
+        ca_cert, validity_days, kind="client", allow_long_validity=allow_long_validity, warn=pending_warnings
+    )
+    cert = _client_certificate(
+        ca_cert,
+        ca_key,
+        public_key,
+        common_name=common_name,
+        organization_name=org,
+        not_before=not_before,
+        not_after=not_after,
+    )
+    _emit_warnings(pending_warnings)
+    return cert.public_bytes(serialization.Encoding.PEM)
 
 
 def generate_server_certificate(
@@ -393,6 +427,59 @@ def _address_in(
     )
 
 
+def _client_certificate(
+    ca_cert: x509.Certificate,
+    ca_key: PrivateKey,
+    public_key: PublicKey,
+    *,
+    common_name: str,
+    organization_name: str,
+    not_before: datetime,
+    not_after: datetime,
+) -> x509.Certificate:
+    """Build and sign the client leaf profile shared by generated and CSR-issued certificates."""
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, organization_name),
+        ]
+    )
+    return (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(ca_cert.subject)
+        .public_key(public_key)
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
+        .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_encipherment=isinstance(public_key, rsa.RSAPublicKey),
+                content_commitment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                key_cert_sign=False,
+                crl_sign=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(public_key),
+            critical=False,
+        )
+        .sign(ca_key, hashes.SHA256())
+    )
+
+
 def _cn_dns_id(common_name: str) -> str | None:
     """Return the CN as OpenSSL's name-constraint check sees it, or ``None`` if it skips it.
 
@@ -420,6 +507,23 @@ def _emit_warnings(messages: list[str]) -> None:
     """Emit held-back ``TinyPkiWarning``s, attributed to the public API's caller."""
     for message in messages:
         warnings.warn(message, TinyPkiWarning, stacklevel=3)
+
+
+def _ignored_csr_request_warnings(csr: x509.CertificateSigningRequest, common_name: str) -> list[str]:
+    """Describe what a CSR asked for that signing ignores: a different CN, and any requested extensions."""
+    messages: list[str] = []
+    requested_cns = [str(attr.value) for attr in csr.subject.get_attributes_for_oid(NameOID.COMMON_NAME)]
+    if requested_cns and requested_cns != [common_name]:
+        messages.append(
+            f"Ignored the CSR's common name {', '.join(repr(cn) for cn in requested_cns)}; "
+            f"the certificate is issued to {common_name!r}"
+        )
+    requested = requested_extension_names(csr)
+    if requested:
+        messages.append(
+            f"Ignored the extensions the CSR requests ({', '.join(requested)}); the CA sets the client profile"
+        )
+    return messages
 
 
 def _require_plain_common_name(common_name: str) -> None:
