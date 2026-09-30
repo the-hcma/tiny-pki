@@ -10,7 +10,14 @@ from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes
 from cryptography.x509.oid import NameOID
 
-from tiny_pki._csr import csr_problems, describe_public_key, load_csr, public_key_fingerprint, requested_extension_names
+from tiny_pki._csr import (
+    csr_problems,
+    describe_public_key,
+    load_csr,
+    public_key_fingerprint,
+    requested_extension_names,
+    requested_sans,
+)
 
 _OID_TO_LABEL: dict[x509.ObjectIdentifier, str] = {
     NameOID.COMMON_NAME: "CN",
@@ -63,7 +70,7 @@ def inspect_csr(csr_pem: bytes) -> CsrSummary:
     return CsrSummary(
         subject=csr.subject.rfc4514_string(),
         common_name=str(cn_attrs[0].value) if cn_attrs else None,
-        sans=tuple(_requested_sans(csr)),
+        sans=tuple(requested_sans(csr)),
         key_type=key_type,
         key_size=key_size,
         signature_hash=algorithm.name if algorithm is not None else None,
@@ -151,13 +158,3 @@ def is_certificate_self_signed(cert_pem: bytes) -> bool:
     except (InvalidSignature, TypeError, ValueError):
         return False
     return True
-
-
-def _requested_sans(csr: x509.CertificateSigningRequest) -> list[str]:
-    try:
-        san_ext = csr.extensions.get_extension_for_class(x509.SubjectAlternativeName)
-    except (x509.ExtensionNotFound, ValueError):
-        return []
-    names = [str(name) for name in san_ext.value.get_values_for_type(x509.DNSName)]
-    names.extend(str(addr) for addr in san_ext.value.get_values_for_type(x509.IPAddress))
-    return names

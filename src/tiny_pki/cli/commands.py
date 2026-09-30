@@ -108,14 +108,18 @@ COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
     "revoke": (_KEY_SECRET_FILE, _DRY_RUN),
     "show": (),
     "sign": (
+        Flag("accept-csr-sans", "server only: also include the SANs the CSR requests, without asking"),
         Flag("allow-dn-special-chars", 'allow , + = " < > ; or a leading # in the CN'),
-        Flag("allow-long-validity", "allow validity beyond the 825 day client cap"),
-        Flag("csr", "the device's certificate signing request (PEM or DER)", value="PATH", path=True),
-        Flag("days", "validity in days (default 397)", value="N", allow_empty=True),
-        Flag("keep-previous", "keep the previous certificate live for rotation"),
+        Flag("allow-long-validity", "allow validity beyond the 200 / 825 day caps"),
+        Flag("csr", "the certificate signing request (PEM or DER)", value="PATH", path=True),
+        _DAYS,
+        Flag("keep-previous", "client only: keep the previous certificate live for rotation"),
         _KEY_SECRET_FILE,
+        Flag("no-cn-san", "server only: do not add the CN to the SANs"),
         _ORG,
         Flag("out", "also write the issued certificate to this file", value="PATH", path=True),
+        Flag("san", "server only: DNS name or IP address (repeatable)", value="NAME", repeatable=True),
+        Flag("yes", "server only: add the CN to the SANs without asking"),
     ),
 }
 COMMAND_FLAGS["renew-crl"] = COMMAND_FLAGS["crl"]
@@ -142,7 +146,7 @@ COMMAND_USAGE: dict[str, str] = {
     "renew-crl": "renew-crl",
     "revoke": "revoke NAME|0xSERIAL",
     "show": "show ca|certs|crl|NAME",
-    "sign": "sign client NAME --csr PATH",
+    "sign": "sign client|server NAME --csr PATH",
 }
 
 COMMAND_HELP: tuple[tuple[str, str], ...] = (
@@ -168,7 +172,7 @@ COMMAND_HELP: tuple[tuple[str, str], ...] = (
     ("renew-crl", "Alias for crl."),
     ("revoke", "Revoke an identity and regenerate the CRL; --dry-run previews."),
     ("show", "Show ca|certs|crl|<identity> (aliases list categories)."),
-    ("sign", "Issue a client certificate for a device's CSR; the private key stays on the device."),
+    ("sign", "Issue a client or server certificate for a CSR; the private key stays where it was made."),
 )
 
 COMMANDS: tuple[str, ...] = tuple(sorted({name for name, _ in COMMAND_HELP}))
@@ -181,7 +185,7 @@ POSITIONAL_CHOICES: dict[str, tuple[str, ...]] = {
     "help": COMMANDS,
     "list": ("ca", "certs", "clients", "revoked", "servers"),
     "show": ("ca", "certs", "clients", "crl", "revoked", "servers"),
-    "sign": ("client",),
+    "sign": ("client", "server"),
 }
 
 PKI_COMMANDS: frozenset[str] = frozenset(

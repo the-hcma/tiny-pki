@@ -93,25 +93,32 @@ tiny-pki --store ./stores/ca create server api.home --san api.home --san 192.168
 ### sign
 
 ```text
-tiny-pki --store DIR sign client NAME --csr PATH [options]
+tiny-pki --store DIR sign client|server NAME --csr PATH [options]
 ```
 
-Issues a client certificate for a certificate signing request (CSR) that a device generated, so its private key never leaves the device: a laptop keychain, a TPM, or a YubiKey. The store records the certificate with no key file. Only the CSR's public key is used. The CN is always `NAME`, and every extension comes from the same client profile `create client` uses; a different CN or any extensions the CSR requests are ignored with a warning. The CSR (PEM, including Windows `certreq`'s `NEW CERTIFICATE REQUEST` header, or DER) must have a valid signature using SHA-256 or stronger, and an RSA 2048/3072/4096 key with public exponent 65537 or an ECDSA P-256 key. Re-signing a name that has a live certificate revokes the old one, as for `create`. See [enrolling a device from a CSR](#enrolling-a-device-from-a-csr).
+Issues a certificate for a certificate signing request (CSR) generated where the key lives, so the private key never reaches the CA host: a laptop keychain, a TPM, or a YubiKey for `client`, or the server itself (nginx, Mosquitto, an internal service) for `server`. The store records the certificate with no key file. Only the CSR's public key is used. The CN is always `NAME`, and every extension comes from the same profile `create client` or `create server` uses; a different CN or any extensions the CSR requests are ignored with a warning. The CSR (PEM, including Windows `certreq`'s `NEW CERTIFICATE REQUEST` header, or DER) must have a valid signature using SHA-256 or stronger, and an RSA 2048/3072/4096 key with public exponent 65537 or an ECDSA P-256 key. Re-signing a name that has a live certificate revokes the old one, as for `create`. See [enrolling a device from a CSR](#enrolling-a-device-from-a-csr).
+
+A server certificate's SANs come from `--san` and the CN, exactly as for `create server` (including the CN-in-SAN prompt). The DNS names and IP addresses the CSR requests are never taken silently: when some are not already covered, `sign server` asks whether to include them, defaulting to no. `--accept-csr-sans` includes them without asking, and a non-interactive stdin leaves them out with a warning. Included CSR SANs are normalized and checked against the CA's name constraints like any other. Requested SANs of other types (URI, email, otherName, ...) are always left out with a warning.
 
 | Flag | Meaning |
 | --- | --- |
-| `--csr PATH` | The device's certificate signing request (required). |
-| `--days N` | Validity in days (default 397, capped at 825). |
-| `--allow-long-validity` | Allow a validity beyond the 825-day cap. |
+| `--csr PATH` | The certificate signing request (required). |
+| `--days N` | Validity in days (default 397 for clients, 90 for servers; capped at 825 and 200). |
+| `--allow-long-validity` | Allow a validity beyond the cap, as for `create`. |
 | `--org NAME` | Organization (O); defaults to the CA's. |
 | `--allow-dn-special-chars` | Allow `,` `+` `=` `"` `<` `>` `;` or a leading `#` in the name, as for `create`. |
-| `--keep-previous` | Keep the previous certificate live, for [rotation](#rotating-a-client-certificate). |
+| `--keep-previous` | Clients only: keep the previous certificate live, for [rotation](#rotating-a-client-certificate). |
+| `--san NAME` | Servers only: a DNS name or IP address. Repeat it for each; without it the CN is the only SAN. |
+| `--accept-csr-sans` | Servers only: also include the SANs the CSR requests, without asking. |
+| `--yes` | Servers only: add a host-like CN that is missing from `--san` without asking. |
+| `--no-cn-san` | Servers only: never add the CN to the SANs (needs `--san`). |
 | `--key-secret-file PATH` | Read the CA-key secret from the first line of a file when the CA key is encrypted. |
-| `--out PATH` | Also write the issued certificate (mode `0644`) to this file for the device. |
+| `--out PATH` | Also write the issued certificate (mode `0644`) to this file for the device or server. |
 
 ```bash
 tiny-pki --store ./stores/ca inspect laptop.csr        # compare the public key fingerprint with the device
 tiny-pki --store ./stores/ca sign client alice-laptop --csr laptop.csr --out alice-laptop.crt
+tiny-pki --store ./stores/ca sign server api.home --csr api.csr --san api.home --san 192.168.1.10 --out api.crt
 ```
 
 ### list
@@ -337,6 +344,8 @@ Devices that can generate their own key and CSR, such as laptops, desktops and h
 4. Copy `alice-laptop.crt` (and `public/ca.crt` if the device should trust the CA) back and install it next to the key: `ykman piv certificates import 9a alice-laptop.crt`, a double-click into the macOS keychain, `certreq -accept` on Windows, or the browser's certificate store alongside the OpenSSL key.
 
 Renew with a fresh CSR and `sign ... --keep-previous`, then revoke the old serial as in [rotating a client certificate](#rotating-a-client-certificate). `revoke`, `list`, `check` and the CRL work as for any other certificate.
+
+A server enrolls the same way with `sign server`: generate the key and CSR on the server (`openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout api.key -out api.csr -subj "/CN=api.home"`), sign it with the SANs the server answers to (`sign server api.home --csr api.csr --san api.home --out api.crt`), and point `ssl_certificate` at the returned certificate and `ssl_certificate_key` at the key that never left the server. Re-signing a server revokes its previous certificate at once, as `create server` does, and clients that check the CRL reject the old one from then on, so install the new certificate promptly.
 
 ### Rotating a client certificate
 

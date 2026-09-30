@@ -62,7 +62,7 @@ A JSON list; each entry:
 | `common_name` | CN of the leaf |
 | `kind` | `"client"` or `"server"` |
 | `serial_number` | lower-case hex |
-| `cert_path`, `key_path` | `clients/<file>` or `servers/<file>` (`.crt` / `.key`), relative to the store root; empty for tombstones, and `key_path` is empty for a certificate issued by `sign` from a CSR, whose key stays on the device. Anything else is refused on read |
+| `cert_path`, `key_path` | `clients/<file>` or `servers/<file>` (`.crt` / `.key`), relative to the store root; empty for tombstones, and `key_path` is empty for a certificate issued by `sign` from a CSR, whose key stays on the device or server. Anything else is refused on read |
 | `not_valid_after` | ISO-8601 UTC |
 | `fingerprint` | SHA-256, colon-separated hex |
 | `revoked_at` | ISO-8601 UTC, or `null` while active |
@@ -70,7 +70,7 @@ A JSON list; each entry:
 Lifecycle:
 
 - **create** — appends an entry. Re-issuing a live CN auto-revokes the previous serial (it stays in the CRL). `create client <cn> --keep-previous` (`issue_client(..., keep_previous=True)`) leaves the previous serial live for routine rotation; `list` and `check` mark it superseded until you revoke it by serial.
-- **sign** — the same as **create**, for a certificate signed from a device's CSR: no key file is written and `key_path` stays empty.
+- **sign** — the same as **create**, for a certificate signed from a CSR (`sign client` or `sign server`): no key file is written and `key_path` stays empty.
 - **revoke** — sets `revoked_at` and regenerates `ca/crl.pem` and `public/crl.pem`.
 - **delete** — only after revoke, or with `--force`, which revokes an active certificate first. The entry becomes a *tombstone*: files removed, paths cleared, serial kept so the CRL still lists it.
 
@@ -108,6 +108,7 @@ store = CertificateStore("/srv/pki/home-ca")
 store.issue_client("alice")                         # create client alice
 store.issue_server("api.home", ["api.home"])        # create server api.home --san api.home
 store.sign_client_csr("laptop", csr_pem)            # sign client laptop --csr laptop.csr
+store.sign_server_csr("api.home", csr_pem, ["api.home"])  # sign server api.home --csr api.csr --san api.home
 store.revoke("alice")                               # revoke alice
 store.delete("alice")                               # delete alice (force=True for a live one)
 store.publish_crl()                                 # crl
@@ -118,6 +119,7 @@ rows = check_store(store, within=None, include_revoked=False)  # check (store)
 | --- | --- | --- |
 | `issue_client(cn, ...)` / `issue_server(cn, sans, ...)` | `create` | Keyword arguments match `generate_client_certificate` / `generate_server_certificate`; `TinyPkiWarning`s propagate. A live certificate with the same CN is revoked and listed in the republished CRL. |
 | `sign_client_csr(cn, csr_pem, ...)` | `sign client` | Keyword arguments match `sign_client_csr`, plus `keep_previous`. The entry has no `key_path`; replacement and CRL republishing work as for `issue_client`. |
+| `sign_server_csr(cn, csr_pem, sans, ...)` | `sign server` | Keyword arguments match `sign_server_csr`. The entry has no `key_path`; replacement and CRL republishing work as for `issue_server`. |
 | `revoke(identity)` | `revoke` | Same as `mark_revoked`. |
 | `delete(identity, force=False)` | `delete` | Same as `delete_certificate`. |
 | `publish_crl(validity_days=None)` | `crl [--days N]` | Signs the index's revoked set for the stored lifetime; returns the CRL PEM. `validity_days` also updates the stored lifetime once the CRL is written. |
@@ -126,6 +128,6 @@ rows = check_store(store, within=None, include_revoked=False)  # check (store)
 
 The lower-level `add_certificate`, `mark_revoked` and `delete_certificate` also republish `ca/crl.pem` whenever the store has a CA, so no call sequence leaves the CRL behind the index. They validate the CA signing key before updating the index; on encrypted stores they therefore need `key_secret=`, while plaintext stores need no secret.
 
-For an encrypted CA key, pass `key_secret=` to `read_ca`, `write_ca`, `add_certificate`, `issue_client`, `issue_server`, `sign_client_csr`, `publish_crl`, `mark_revoked`, `revoke`, `delete_certificate`, and `delete` as applicable. These methods continue to work without a secret for plaintext stores. `read_ca_certificate()` reads only the public certificate and remains usable without a secret; `check_store()` also needs no key secret.
+For an encrypted CA key, pass `key_secret=` to `read_ca`, `write_ca`, `add_certificate`, `issue_client`, `issue_server`, `sign_client_csr`, `sign_server_csr`, `publish_crl`, `mark_revoked`, `revoke`, `delete_certificate`, and `delete` as applicable. These methods continue to work without a secret for plaintext stores. `read_ca_certificate()` reads only the public certificate and remains usable without a secret; `check_store()` also needs no key secret.
 
 `encrypt_ca_key(secret)` and `decrypt_ca_key(secret)` migrate `ca/ca.key` in place under the store lock. Ciphertext records the Scrypt work parameters alongside a random per-key salt before the Fernet token. Both use atomic mode-0600 replacement; a wrong decryption secret leaves the original ciphertext untouched.

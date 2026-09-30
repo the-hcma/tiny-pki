@@ -295,10 +295,17 @@ def test_cli_refuses_bad_sign_invocations(tmp_path: Path, capsys: CaptureFixture
     out, _ = _run(store_path, "inspect", str(weak_path), capsys=capsys)
     assert_that(out, contains_string("refused"))
     assert_that(out, contains_string("RSA key is 1024 bits"))
+    good_path = tmp_path / "good.csr"
+    good_path.write_bytes(_csr())
     cases = [
         (("sign", "client", "alice", "--csr", str(weak_path)), "RSA key is 1024 bits"),
+        (("sign", "server", "api.home", "--csr", str(weak_path)), "RSA key is 1024 bits"),
         (("sign", "client", "alice"), "Expected --csr PATH"),
-        (("sign", "server", "api.home", "--csr", str(weak_path)), "only client certificates"),
+        (("sign", "ca", "alice", "--csr", str(good_path)), "Expected sign client|server"),
+        (("sign", "client", "alice", "--csr", str(good_path), "--san", "a.home"), "only supported for server"),
+        (("sign", "client", "alice", "--csr", str(good_path), "--accept-csr-sans"), "only supported for server"),
+        (("sign", "server", "api.home", "--csr", str(good_path), "--keep-previous"), "only supported for client"),
+        (("sign", "server", "api.home", "--csr", str(good_path), "--no-cn-san"), "Expected --san with --no-cn-san"),
         (("sign", "client", "alice", "--csr", str(tmp_path / "missing.csr")), "readable --csr file"),
     ]
     for words, message in cases:
@@ -310,7 +317,7 @@ def test_cli_refuses_bad_sign_invocations(tmp_path: Path, capsys: CaptureFixture
 def test_cli_help_describes_sign(capsys: CaptureFixture[str]) -> None:
     main(["--color", "never", "help", "sign"])
     out = capsys.readouterr().out
-    assert_that(out, contains_string("usage: sign client NAME --csr PATH"))
+    assert_that(out, contains_string("usage: sign client|server NAME --csr PATH"))
     assert_that(out, contains_string("--csr PATH"))
 
 

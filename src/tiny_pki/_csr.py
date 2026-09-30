@@ -93,6 +93,38 @@ def requested_extension_names(csr: x509.CertificateSigningRequest) -> list[str]:
     return names
 
 
+def requested_sans(csr: x509.CertificateSigningRequest) -> list[str]:
+    """DNS names and IP addresses in the CSR's requested SubjectAlternativeName, as written (not normalized)."""
+    try:
+        san_ext = csr.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+    except (x509.ExtensionNotFound, ValueError):
+        return []
+    names = [str(name) for name in san_ext.value.get_values_for_type(x509.DNSName)]
+    names.extend(str(addr) for addr in san_ext.value.get_values_for_type(x509.IPAddress))
+    return names
+
+
+def unsupported_requested_sans(csr: x509.CertificateSigningRequest) -> list[str]:
+    """The CSR's requested SANs that are neither DNS names nor IP addresses, as ``type:value`` descriptions."""
+    try:
+        san_ext = csr.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+    except (x509.ExtensionNotFound, ValueError):
+        return []
+    descriptions: list[str] = []
+    for name in san_ext.value:
+        if isinstance(name, x509.OtherName):
+            descriptions.append(f"otherName:{name.type_id.dotted_string}")
+        elif isinstance(name, x509.RegisteredID):
+            descriptions.append(f"RID:{name.value.dotted_string}")
+        elif isinstance(name, x509.DirectoryName):
+            descriptions.append(f"dirName:{name.value.rfc4514_string()}")
+        elif isinstance(name, x509.RFC822Name):
+            descriptions.append(f"email:{name.value}")
+        elif isinstance(name, x509.UniformResourceIdentifier):
+            descriptions.append(f"URI:{name.value}")
+    return descriptions
+
+
 def require_signable_public_key(csr: x509.CertificateSigningRequest) -> PublicKey:
     """Return the CSR's public key once :func:`csr_problems` finds nothing.
 
