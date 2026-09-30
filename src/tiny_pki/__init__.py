@@ -24,6 +24,7 @@ from tiny_pki.constants import (
     DEFAULT_CA_VALIDITY_DAYS,
     DEFAULT_CLIENT_VALIDITY_DAYS,
     DEFAULT_CRL_VALIDITY_DAYS,
+    DEFAULT_INTERMEDIATE_VALIDITY_DAYS,
     DEFAULT_KEY_TYPE,
     DEFAULT_LEAF_KEY_SIZE,
     DEFAULT_OCSP_VALIDITY_DAYS,
@@ -57,9 +58,11 @@ from tiny_pki.inspect import (
 from tiny_pki.issue import (
     generate_ca_certificate,
     generate_client_certificate,
+    generate_intermediate_ca_certificate,
     generate_server_certificate,
     max_leaf_validity_days,
     sign_client_csr,
+    sign_intermediate_csr,
     sign_server_csr,
 )
 from tiny_pki.ocsp import generate_ocsp_response, generate_ocsp_response_for_certificate
@@ -79,6 +82,7 @@ __all__ = [
     "DEFAULT_CA_VALIDITY_DAYS",
     "DEFAULT_CLIENT_VALIDITY_DAYS",
     "DEFAULT_CRL_VALIDITY_DAYS",
+    "DEFAULT_INTERMEDIATE_VALIDITY_DAYS",
     "DEFAULT_KEY_TYPE",
     "DEFAULT_LEAF_KEY_SIZE",
     "DEFAULT_OCSP_VALIDITY_DAYS",
@@ -105,6 +109,7 @@ __all__ = [
     "generate_ca_certificate",
     "generate_client_certificate",
     "generate_crl",
+    "generate_intermediate_ca_certificate",
     "generate_ocsp_response",
     "generate_ocsp_response_for_certificate",
     "generate_pkcs12",
@@ -120,6 +125,7 @@ __all__ = [
     "is_certificate_self_signed",
     "max_leaf_validity_days",
     "sign_client_csr",
+    "sign_intermediate_csr",
     "sign_server_csr",
     "worst_status",
 ]

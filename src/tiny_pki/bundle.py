@@ -22,6 +22,10 @@ def generate_pkcs12(
 ) -> bytes:
     """Bundle cert + key + CA chain into a password-protected PKCS#12 archive.
 
+    ``ca_cert_pem`` holds the issuing CA, optionally followed by the certificates
+    above it (an intermediate, then its root), as concatenated PEM; every one is
+    included.
+
     By default the bundle uses ``cryptography``'s best available encryption
     (AES-256-CBC with PBKDF2-HMAC-SHA256 and an HMAC-SHA256 MAC). ``legacy=True``
     uses PBES1 3DES with a SHA-1 MAC instead, for older Android / Apple keychains
@@ -38,7 +42,7 @@ def generate_pkcs12(
 
     cert = x509.load_pem_x509_certificate(cert_pem)
     key = load_private_key(key_pem)
-    ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
+    ca_certs = x509.load_pem_x509_certificates(ca_cert_pem)
 
     encryption: serialization.KeySerializationEncryption
     if legacy:
@@ -54,6 +58,6 @@ def generate_pkcs12(
         name=friendly_name.encode(),
         key=key,
         cert=cert,
-        cas=[ca_cert],
+        cas=ca_certs,
         encryption_algorithm=encryption,
     )

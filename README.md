@@ -12,6 +12,7 @@ It comes in two layers; use either:
 What it covers:
 
 - CA, client and server certificates with RSA (the default) or ECDSA P-256 keys, mixed freely under one CA.
+- Intermediate CAs (`init --path-length 1`, then `init --intermediate-of` or `sign intermediate`), so the root can stay offline.
 - Name Constraints, so a stolen CA key cannot impersonate public sites.
 - CRLs with monotonic numbers, OCSP responses for stapling (`tiny-pki ocsp`), and a key-free `public/` directory to hand to a sandboxed TLS server.
 - PKCS#12 bundles for phones and browsers, with a legacy mode for old keychains.

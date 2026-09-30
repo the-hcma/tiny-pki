@@ -12,7 +12,7 @@ tiny-pki [--store DIR] [--color auto|always|never] [--edit-mode vim|emacs] [COMM
 - [Identities](#identities)
 - [Exit status](#exit-status)
 - Commands: [init](#init), [create](#create), [sign](#sign), [list](#list), [show](#show), [inspect](#inspect), [export](#export), [revoke](#revoke), [delete](#delete), [crl](#crl), [ocsp](#ocsp), [encrypt-key](#encrypt-key), [decrypt-key](#decrypt-key), [check](#check), [completion](#completion), [REPL commands](#repl-commands)
-- Workflows: [enrolling a device from a CSR](#enrolling-a-device-from-a-csr), [rotating a client certificate](#rotating-a-client-certificate), [a lost device or compromised key](#a-lost-device-or-a-compromised-key), [serving mTLS from nginx](#serving-mtls-from-nginx), [stapling OCSP from nginx](#stapling-ocsp-from-nginx), [renewing the CRL on a timer](#renewing-the-crl-on-a-timer)
+- Workflows: [enrolling a device from a CSR](#enrolling-a-device-from-a-csr), [rotating a client certificate](#rotating-a-client-certificate), [a lost device or compromised key](#a-lost-device-or-a-compromised-key), [serving mTLS from nginx](#serving-mtls-from-nginx), [stapling OCSP from nginx](#stapling-ocsp-from-nginx), [renewing the CRL on a timer](#renewing-the-crl-on-a-timer), [running an intermediate CA](#running-an-intermediate-ca)
 
 ## Global options
 
@@ -44,20 +44,27 @@ tiny-pki --store DIR init [options]
 
 Creates the CA certificate and key under `ca/`, publishes an empty CRL, and fills `public/` with key-free copies for TLS servers. Refuses a store that already has a CA.
 
+By default the CA signs leaves only. `--path-length 1` creates a root that may also sign intermediate CAs, and `--intermediate-of DIR` creates this store's CA as an intermediate signed by the root in `DIR`: the root records the certificate (with no key) under `intermediates/`, and this store gets the key, the chain (`ca/chain.pem`), the root's CRL and its own first CRL. An intermediate inherits the root's name constraints, `--permit` narrows them, and it signs leaves only. See [running an intermediate CA](#running-an-intermediate-ca).
+
 | Flag | Meaning |
 | --- | --- |
-| `--cn NAME` | CA common name (default `Private CA`). |
-| `--org NAME` | Organization (O); leaves inherit it (default `tiny-pki`). |
-| `--days N` | CA validity in days (default 3650). Leaves may not outlive the CA. |
+| `--cn NAME` | CA common name (default `Private CA`, or `Intermediate CA` with `--intermediate-of`). |
+| `--org NAME` | Organization (O); leaves inherit it (default `tiny-pki`, or the issuer's with `--intermediate-of`). |
+| `--days N` | CA validity in days (default 3650, or 1825 for an intermediate, which may not outlive its issuer). Leaves may not outlive the CA. |
+| `--path-length 0\|1` | `1` lets the CA sign intermediate CAs; `0` (the default) limits it to leaves. It cannot be changed later. Refused with `--intermediate-of`. |
+| `--intermediate-of DIR` | Create an intermediate CA signed by the CA in the store at `DIR`, which must have been created with `--path-length 1`. |
+| `--issuer-key-secret-file PATH` | With `--intermediate-of`: read the issuer's CA-key secret from the first line of this file when its key is encrypted (otherwise it is prompted for). |
 | `--key-type rsa\|ec-p256` | Key algorithm (default `rsa`). See [security.md](security.md#key-types-sizes-and-validity). |
 | `--key-size 2048\|3072\|4096` | RSA key size (default 4096). Refused with `--key-type ec-p256`. |
-| `--permit NAME` | Add a Name Constraint: a DNS suffix (`home` covers `home` and every name under it) or an IP network (`192.168.0.0/16`). Repeat it for each; constrain both DNS and IP (see [security.md](security.md#limit-what-the-ca-can-vouch-for)). Constraints cannot be changed later. |
+| `--permit NAME` | Add a Name Constraint: a DNS suffix (`home` covers `home` and every name under it) or an IP network (`192.168.0.0/16`). Repeat it for each; constrain both DNS and IP (see [security.md](security.md#limit-what-the-ca-can-vouch-for)). Constraints cannot be changed later. For an intermediate, each must lie within the issuer's. |
 | `--crl-days N` | CRL lifetime in days, 1–365 (default 30), saved in the store and used by every later publish. |
 | `--encrypt-key` | Encrypt `ca/ca.key` at rest when creating the CA; the secret is read from `--key-secret-file`, a configured credential file, or an interactive prompt. |
 | `--key-secret-file PATH` | Read the high-entropy CA-key secret from the first line of this file; use only with `--encrypt-key` for `init`. |
 
 ```bash
 tiny-pki --store ./stores/ca init --cn "Home CA" --permit home --permit 192.168.0.0/16
+tiny-pki --store ./stores/root init --cn "Home Root" --path-length 1 --permit home --encrypt-key
+tiny-pki --store ./stores/issuing init --intermediate-of ./stores/root --cn "Home Issuing"
 ```
 
 ### create
@@ -93,20 +100,23 @@ tiny-pki --store ./stores/ca create server api.home --san api.home --san 192.168
 ### sign
 
 ```text
-tiny-pki --store DIR sign client|server NAME --csr PATH [options]
+tiny-pki --store DIR sign client|server|intermediate NAME --csr PATH [options]
 ```
 
 Issues a certificate for a certificate signing request (CSR) generated where the key lives, so the private key never reaches the CA host: a laptop keychain, a TPM, or a YubiKey for `client`, or the server itself (nginx, Mosquitto, an internal service) for `server`. The store records the certificate with no key file. Only the CSR's public key is used. The CN is always `NAME`, and every extension comes from the same profile `create client` or `create server` uses; a different CN or any extensions the CSR requests are ignored with a warning. The CSR (PEM, including Windows `certreq`'s `NEW CERTIFICATE REQUEST` header, or DER) must have a valid signature using SHA-256 or stronger, and an RSA 2048/3072/4096 key with public exponent 65537 or an ECDSA P-256 key. Re-signing a name that has a live certificate revokes the old one, as for `create`. See [enrolling a device from a CSR](#enrolling-a-device-from-a-csr).
+
+`sign intermediate` issues an intermediate CA certificate for a CA whose key lives elsewhere, such as OpenBao (`pki/intermediate/generate/internal`), from a store created with `--path-length 1`. It has the same profile as `init --intermediate-of`: `BasicConstraints` CA with path length 0, `keyCertSign` and `cRLSign`, the store's name constraints (narrowed by `--permit`), and a lifetime within the store CA's (default 1825 days). The CSR's own `BasicConstraints` and other extensions are ignored with a warning. Give the intermediate this store's `public/ca.crt` (its chain) and keep its CRL reachable, since relying parties that check revocation check it too. A renewed intermediate does not revoke the previous one, whose leaves still chain to it; revoke that by serial once they are replaced.
 
 A server certificate's SANs come from `--san` and the CN, exactly as for `create server` (including the CN-in-SAN prompt). The DNS names and IP addresses the CSR requests are never taken silently: when some are not already covered, `sign server` asks whether to include them, defaulting to no. `--accept-csr-sans` includes them without asking, and a non-interactive stdin leaves them out with a warning. Included CSR SANs are normalized and checked against the CA's name constraints like any other. Requested SANs of other types (URI, email, otherName, ...) are always left out with a warning.
 
 | Flag | Meaning |
 | --- | --- |
 | `--csr PATH` | The certificate signing request (required). |
-| `--days N` | Validity in days (default 397 for clients, 90 for servers; capped at 825 and 200). |
-| `--allow-long-validity` | Allow a validity beyond the cap, as for `create`. |
+| `--days N` | Validity in days (default 397 for clients, 90 for servers, 1825 for intermediates; leaves are capped at 825 and 200). |
+| `--allow-long-validity` | Leaves only: allow a validity beyond the cap, as for `create`. |
 | `--org NAME` | Organization (O); defaults to the CA's. |
-| `--allow-dn-special-chars` | Allow `,` `+` `=` `"` `<` `>` `;` or a leading `#` in the name, as for `create`. |
+| `--allow-dn-special-chars` | Leaves only: allow `,` `+` `=` `"` `<` `>` `;` or a leading `#` in the name, as for `create`. |
+| `--permit NAME` | Intermediates only: narrow the name constraints to this DNS suffix or IP network, within the store CA's. Repeat it for each. |
 | `--keep-previous` | Clients only: keep the previous certificate live, for [rotation](#rotating-a-client-certificate). |
 | `--san NAME` | Servers only: a DNS name or IP address. Repeat it for each; without it the CN is the only SAN. |
 | `--accept-csr-sans` | Servers only: also include the SANs the CSR requests, without asking. |
@@ -119,15 +129,16 @@ A server certificate's SANs come from `--san` and the CN, exactly as for `create
 tiny-pki --store ./stores/ca inspect laptop.csr        # compare the public key fingerprint with the device
 tiny-pki --store ./stores/ca sign client alice-laptop --csr laptop.csr --out alice-laptop.crt
 tiny-pki --store ./stores/ca sign server api.home --csr api.csr --san api.home --san 192.168.1.10 --out api.crt
+tiny-pki --store ./stores/root sign intermediate "OpenBao Issuing" --csr bao.csr --permit svc.home --out bao.crt
 ```
 
 ### list
 
 ```text
-tiny-pki --store DIR list [ca|certs|clients|servers|revoked] [--json]
+tiny-pki --store DIR list [ca|certs|clients|servers|intermediates|revoked] [--json]
 ```
 
-With no argument, prints a summary: the CA name and how many clients, servers and revoked certificates the store holds. `clients` and `servers` list live certificates, `revoked` lists revoked ones (including deleted tombstones), `certs` lists everything that still has files, and `ca` shows the CA, its CRL lifetime and the paths TLS servers need. A live certificate that a newer one for the same name replaces is marked "superseded by".
+With no argument, prints a summary: the CA name and how many clients, servers, intermediate CAs and revoked certificates the store holds. `clients`, `servers` and `intermediates` list live certificates, `revoked` lists revoked ones (including deleted tombstones), `certs` lists everything that still has files, and `ca` shows the CA, the chain above it (for an intermediate), its CRL lifetime and the paths TLS servers need. A live certificate that a newer one for the same name replaces is marked "superseded by".
 
 | Flag | Meaning |
 | --- | --- |
@@ -136,7 +147,7 @@ With no argument, prints a summary: the CA name and how many clients, servers an
 ### show
 
 ```text
-tiny-pki --store DIR show ca|certs|clients|servers|revoked [--json]
+tiny-pki --store DIR show ca|certs|clients|servers|intermediates|revoked [--json]
 tiny-pki --store DIR show crl|NAME
 ```
 
@@ -158,9 +169,9 @@ For a CSR file, `inspect` prints the requested subject and SANs, the key type an
 tiny-pki --store DIR export pem|p12 NAME [options]
 ```
 
-`pem` writes the certificate and private key to one file (default `NAME.pem` in the current directory). `p12` writes a password-protected PKCS#12 bundle with the certificate, key and CA, for phones and browsers (default `bundles/NAME-SERIAL.p12` in the store). Files are written with mode `0600`, and a destination that is a symlink is refused.
+`pem` writes the certificate and private key to one file (default `NAME.pem` in the current directory). `p12` writes a password-protected PKCS#12 bundle with the certificate, key and CA (plus the chain above it, for an intermediate CA), for phones and browsers (default `bundles/NAME-SERIAL.p12` in the store). Files are written with mode `0600`, and a destination that is a symlink is refused.
 
-For a certificate issued by [`sign`](#sign), the store has no private key: `pem` writes the certificate alone (mode `0644`), and `p12` is refused.
+For a certificate issued by [`sign`](#sign), and for an intermediate CA, the store has no private key: `pem` writes the certificate alone (mode `0644`), and `p12` is refused.
 
 | Flag | Meaning |
 | --- | --- |
@@ -200,14 +211,15 @@ Removes a revoked certificate's files. The index keeps a tombstone with the seri
 ### crl
 
 ```text
-tiny-pki --store DIR crl [--days N] [--key-secret-file PATH]
+tiny-pki --store DIR crl [--days N] [--chain-crl PATH] [--key-secret-file PATH]
 ```
 
-Signs a fresh CRL from the index and writes it to `ca/crl.pem` and `public/crl.pem`. `renew-crl` is an alias. Run it on a timer well inside the CRL lifetime: once the CRL expires, nginx rejects every client (see [renewing the CRL on a timer](#renewing-the-crl-on-a-timer)).
+Signs a fresh CRL from the index and writes it to `ca/crl.pem` and `public/crl.pem` (which, for an intermediate CA, also holds the CRLs of the CAs above it). `renew-crl` is an alias. Run it on a timer well inside the CRL lifetime: once the CRL expires, nginx rejects every client (see [renewing the CRL on a timer](#renewing-the-crl-on-a-timer)).
 
 | Flag | Meaning |
 | --- | --- |
 | `--days N` | Change the stored CRL lifetime (1–365 days) and use it for this and every later publish. |
+| `--chain-crl PATH` | Intermediate CA only: first import the new CRL(s) of the CAs above it (PEM or DER; the issuer store's `public/crl.pem` works). Each must be signed by a CA in the chain and may not be older than the one it replaces. |
 | `--key-secret-file PATH` | Read the CA-key secret from the first line of a file when the CA key is encrypted. |
 
 Once `ocsp` has published stapling responses, `crl` refreshes them too.
@@ -281,7 +293,7 @@ tiny-pki --store DIR check [options]
 tiny-pki check PATH... [options]
 ```
 
-Flags expired, expiring, not-yet-valid, revoked and untrusted certificates and CRLs, soonest expiry first, and exits with a monitoring-plugin code. Without a path it checks the store's CA, CRL and every live leaf. With paths it checks files instead and needs no store: PEM or DER certificates, chain files, CRLs, PKCS#12 bundles, and directories (one level deep). [monitoring.md](monitoring.md) has the output format, JSON schema and cron / systemd recipes.
+Flags expired, expiring, not-yet-valid, revoked and untrusted certificates and CRLs, soonest expiry first, and exits with a monitoring-plugin code. Without a path it checks the store's CA, CRL and every live leaf; for an intermediate CA, also each certificate above it (`issuer NAME`) and its imported CRL (`issuer crl NAME`, `untrusted` when missing), and for a root, the intermediate CAs it signed (kind `ca`). With paths it checks files instead and needs no store: PEM or DER certificates, chain files, CRLs, PKCS#12 bundles, and directories (one level deep). [monitoring.md](monitoring.md) has the output format, JSON schema and cron / systemd recipes.
 
 | Flag | Meaning |
 | --- | --- |
@@ -446,3 +458,37 @@ WantedBy=timers.target
 ```
 
 Enable it with `systemctl enable --now tiny-pki-crl.timer`. With [OCSP stapling](#stapling-ocsp-from-nginx) on, use `OnCalendar=daily`: the same run refreshes the stapled responses, which are valid for 7 days. Pair it with a `check` timer ([monitoring.md](monitoring.md#systemd-timer)), which reports the CRL as expiring if the publish stops working.
+
+### Running an intermediate CA
+
+A root that signs only intermediates can stay offline: its key is needed only to sign or renew an intermediate and to re-sign its CRL. The intermediate store does the day-to-day issuing and revoking.
+
+```bash
+# On the offline host (or an encrypted store you only unlock for this):
+tiny-pki --store /media/usb/root init --cn "Home Root" --path-length 1 --permit home --permit 192.168.0.0/16 \
+  --encrypt-key --crl-days 180
+tiny-pki --store /srv/pki/issuing init --intermediate-of /media/usb/root --cn "Home Issuing"
+# From then on, issue and revoke from the intermediate:
+tiny-pki --store /srv/pki/issuing create server api.home --san api.home
+```
+
+When the intermediate cannot reach the root's store, create its key and CSR where it runs, sign the CSR on the root with `sign intermediate`, and install the result with `CertificateStore.write_ca(cert, key, chain_pem=root_cert)` ([store.md](store.md#using-the-store-from-python)). Then publish its first CRL together with the root's: `tiny-pki --store /srv/pki/issuing crl --chain-crl root-crl.pem`.
+
+Point nginx at the intermediate store's `public/` directory. Clients need the whole chain, and nginx checks the CRL of every CA in it once `ssl_crl` is set, which is why `public/crl.pem` carries the root's CRL as well:
+
+```nginx
+ssl_certificate         /etc/nginx/tls/api.home-fullchain.pem;   # servers/api.home-*.crt + public/ca.crt
+ssl_client_certificate  /srv/pki/issuing/public/ca-chain.pem;    # the intermediate and the root
+ssl_verify_depth        2;
+ssl_verify_client       on;
+ssl_crl                 /srv/pki/issuing/public/crl.pem;         # the intermediate's CRL and the root's
+```
+
+The root's CRL expires like any other, and nginx then rejects every client, so re-sign it on the root well inside its lifetime (`crl --days 180` suits an offline root) and import it on the intermediate host, which republishes `public/crl.pem`:
+
+```bash
+tiny-pki --store /media/usb/root crl
+tiny-pki --store /srv/pki/issuing crl --chain-crl /media/usb/root/public/crl.pem
+```
+
+`check` on the intermediate store reports the root's CRL as `issuer crl Home Root`, so the [check timer](monitoring.md#systemd-timer) warns before it runs out. To retire a compromised intermediate, revoke it on the root (`revoke "Home Issuing"`), then import the root's new CRL wherever the chain is served.

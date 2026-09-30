@@ -44,6 +44,12 @@ _KEY_SIZE = Flag(
     choices=("2048", "3072", "4096"),
 )
 _KEY_TYPE = Flag("key-type", "key algorithm (default rsa)", value="TYPE", choices=KEY_TYPES, allow_empty=True)
+_SIGN_DAYS = Flag(
+    "days",
+    "validity in days (default 397 for clients, 90 for servers, 1825 for intermediates)",
+    value="N",
+    allow_empty=True,
+)
 _ORG = Flag("org", "organization (O) in the subject", value="NAME", allow_empty=True)
 _DRY_RUN = Flag("dry-run", "show what would change and write nothing")
 _JSON = Flag("json", "machine-readable JSON output")
@@ -83,7 +89,16 @@ COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
         Flag("san", "server only: DNS name or IP address (repeatable)", value="NAME", repeatable=True),
         Flag("yes", "server only: add the CN to the SANs without asking"),
     ),
-    "crl": (_KEY_SECRET_FILE, Flag("days", "change the stored CRL lifetime (1-365)", value="N")),
+    "crl": (
+        Flag(
+            "chain-crl",
+            "intermediate CA only: import its issuer's new CRL (PEM or DER) first",
+            value="PATH",
+            path=True,
+        ),
+        Flag("days", "change the stored CRL lifetime (1-365)", value="N"),
+        _KEY_SECRET_FILE,
+    ),
     "decrypt-key": (_KEY_SECRET_FILE,),
     "delete": (_KEY_SECRET_FILE, Flag("force", "revoke an active certificate first"), _DRY_RUN),
     "encrypt-key": (_KEY_SECRET_FILE,),
@@ -95,12 +110,27 @@ COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
     "init": (
         Flag("cn", 'CA common name (default "Private CA")', value="NAME", allow_empty=True),
         Flag("crl-days", "CRL lifetime in days (1-365, default 30)", value="N"),
-        Flag("days", "CA validity in days (default 3650)", value="N", allow_empty=True),
+        Flag("days", "CA validity in days (default 3650; 1825 for an intermediate)", value="N", allow_empty=True),
         Flag("encrypt-key", "encrypt the CA private key at rest"),
+        Flag(
+            "intermediate-of",
+            "create an intermediate CA signed by the CA in this store (created with --path-length 1)",
+            value="DIR",
+            path=True,
+        ),
+        Flag(
+            "issuer-key-secret-file",
+            "with --intermediate-of: read the issuer's CA-key secret from this file",
+            value="PATH",
+            path=True,
+        ),
         _KEY_SECRET_FILE,
         _KEY_SIZE,
         _KEY_TYPE,
         _ORG,
+        Flag(
+            "path-length", "1 lets the CA sign intermediate CAs (default 0: leaves only)", value="N", choices=("0", "1")
+        ),
         Flag("permit", "name constraint: DNS suffix or IP network (repeatable)", value="NAME", repeatable=True),
     ),
     "inspect": (),
@@ -117,12 +147,18 @@ COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
         Flag("allow-dn-special-chars", 'allow , + = " < > ; or a leading # in the CN'),
         Flag("allow-long-validity", "allow validity beyond the 200 / 825 day caps"),
         Flag("csr", "the certificate signing request (PEM or DER)", value="PATH", path=True),
-        _DAYS,
+        _SIGN_DAYS,
         Flag("keep-previous", "client only: keep the previous certificate live for rotation"),
         _KEY_SECRET_FILE,
         Flag("no-cn-san", "server only: do not add the CN to the SANs"),
         _ORG,
         Flag("out", "also write the issued certificate to this file", value="PATH", path=True),
+        Flag(
+            "permit",
+            "intermediate only: narrow the name constraints to this DNS suffix or IP network (repeatable)",
+            value="NAME",
+            repeatable=True,
+        ),
         Flag("san", "server only: DNS name or IP address (repeatable)", value="NAME", repeatable=True),
         Flag("yes", "server only: add the CN to the SANs without asking"),
     ),
@@ -147,12 +183,12 @@ COMMAND_USAGE: dict[str, str] = {
     "help": "help [COMMAND]",
     "init": "init",
     "inspect": "inspect NAME|PATH",
-    "list": "list [ca|certs|clients|servers|revoked]",
+    "list": "list [ca|certs|clients|servers|intermediates|revoked]",
     "ocsp": "ocsp [publish|disable|url [URL]]",
     "renew-crl": "renew-crl",
     "revoke": "revoke NAME|0xSERIAL",
     "show": "show ca|certs|crl|NAME",
-    "sign": "sign client|server NAME --csr PATH",
+    "sign": "sign client|server|intermediate NAME --csr PATH",
 }
 
 COMMAND_HELP: tuple[tuple[str, str], ...] = (
@@ -163,7 +199,11 @@ COMMAND_HELP: tuple[tuple[str, str], ...] = (
     ("clear", "Clear the terminal screen."),
     ("completion", "Print or install bash/zsh/fish tab-completion scripts."),
     ("create", "Issue a client or server certificate."),
-    ("crl", "Regenerate the CRL from revoked entries; --days N changes the stored CRL lifetime."),
+    (
+        "crl",
+        "Regenerate the CRL from revoked entries; --days N changes the stored CRL lifetime, "
+        "--chain-crl imports an issuer's CRL.",
+    ),
     ("decrypt-key", "Decrypt the CA private key in place."),
     ("delete", "Remove a revoked certificate's files; --force revokes an active one first; --dry-run previews."),
     ("edit-mode", "Switch Emacs vs Vim keys: edit-mode emacs | vim."),
@@ -171,15 +211,18 @@ COMMAND_HELP: tuple[tuple[str, str], ...] = (
     ("exit", "Leave the REPL."),
     ("export", "Export pem|p12 for an identity."),
     ("help", "Show this list, or help <command> for its usage and flags."),
-    ("init", "Create a new CA in --store."),
+    ("init", "Create a new CA in --store, or an intermediate CA of another store (--intermediate-of)."),
     ("inspect", "Inspect a store identity, a certificate file, or a CSR file."),
-    ("list", "List ca|clients|servers|revoked|certs (optional --json)."),
+    ("list", "List ca|clients|servers|intermediates|revoked|certs (optional --json)."),
     ("ocsp", "Publish OCSP responses for stapling, stop publishing them, or set the OCSP URL for new certificates."),
     ("quit", "Leave the REPL (same as exit)."),
     ("renew-crl", "Alias for crl."),
     ("revoke", "Revoke an identity and regenerate the CRL; --dry-run previews."),
     ("show", "Show ca|certs|crl|<identity> (aliases list categories)."),
-    ("sign", "Issue a client or server certificate for a CSR; the private key stays where it was made."),
+    (
+        "sign",
+        "Issue a client, server or intermediate CA certificate for a CSR; the private key stays where it was made.",
+    ),
 )
 
 COMMANDS: tuple[str, ...] = tuple(sorted({name for name, _ in COMMAND_HELP}))
@@ -190,10 +233,10 @@ POSITIONAL_CHOICES: dict[str, tuple[str, ...]] = {
     "edit-mode": ("emacs", "vim"),
     "export": ("p12", "pem"),
     "help": COMMANDS,
-    "list": ("ca", "certs", "clients", "revoked", "servers"),
+    "list": ("ca", "certs", "clients", "intermediates", "revoked", "servers"),
     "ocsp": ("disable", "publish", "url"),
-    "show": ("ca", "certs", "clients", "crl", "revoked", "servers"),
-    "sign": ("client", "server"),
+    "show": ("ca", "certs", "clients", "crl", "intermediates", "revoked", "servers"),
+    "sign": ("client", "intermediate", "server"),
 }
 
 PKI_COMMANDS: frozenset[str] = frozenset(
