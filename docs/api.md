@@ -245,6 +245,49 @@ HKDF does no stretching, so the secret must already be high-entropy — e.g. Dja
 
 `encrypt_private_key_scrypt` records the Scrypt parameters (`n=2^17`, `r=8`, `p=1`), generates a random 16-byte salt, and derives the Fernet key. Its matching decrypt helper validates the recorded profile before deriving the key. This slows offline guessing when a secret is weaker than intended, but does not remove the need for a long, random secret; the CLI store uses this format for encrypted CA keys.
 
+## Optional: `tiny_pki.tls`
+
+Builds `ssl.SSLContext` objects for mutual TLS from the PEM bytes the library returns, so callers that keep certificates in a database don't write keys to disk themselves. `import tiny_pki` does not import it:
+
+```python
+from tiny_pki.tls import client_context, server_context
+```
+
+| Function | Returns |
+| --- | --- |
+| `server_context(cert_pem, key_pem, ca_cert_pem, *, crl_pem=None, client_cert="required", crl_check=None, max_tls_version=None)` | `ssl.SSLContext` (`PROTOCOL_TLS_SERVER`) presenting `cert_pem` and verifying client certificates against `ca_cert_pem` |
+| `client_context(cert_pem, key_pem, ca_cert_pem, *, server_hostname_check=True, max_tls_version=None)` | `ssl.SSLContext` (`PROTOCOL_TLS_CLIENT`) presenting `cert_pem` and verifying the server against `ca_cert_pem` |
+
+- `cert_pem` is the leaf, optionally followed by intermediate CA certificates; `key_pem` must be an unencrypted RSA or ECDSA P-256 key matching it. `ca_cert_pem` holds one or more trusted CA certificates. System CAs are never loaded, so only your CA is trusted.
+- `client_cert` is `"required"` (the default), `"optional"` or `"none"`. With `crl_pem` (one or more PEM CRLs, such as a store's `public/crl.pem`), revoked client certificates are refused. `crl_check` then defaults to `"leaf"`; `"chain"` also checks intermediate CAs and needs a CRL from every CA in the chain. `crl_check="leaf"` or `"chain"` without `crl_pem`, `crl_check="none"` with it, or `crl_pem` with `client_cert="none"` raise `TinyPkiError` rather than silently skip the check. Load a fresh context after each CRL publish.
+- The minimum version is TLS 1.2; `max_tls_version` (`ssl.TLSVersion.TLSv1_2` or later) caps it. Clients check the server's SANs against the `server_hostname` they connect with unless `server_hostname_check=False`; the certificate is verified either way.
+- The CA certificates load from memory (`cadata`). `load_cert_chain` only reads files, and `cadata` silently ignores CRLs, so the certificate, key and CRL are written to a temporary directory (mode `0700`, files `0600`) that is removed before the call returns or raises.
+- Malformed PEMs, encrypted or mismatched keys and chains OpenSSL refuses raise `TinyPkiError` without echoing the input.
+
+An amqtt listener takes the context as `ssl_context` (added in [Yakifo/amqtt#396](https://github.com/Yakifo/amqtt/pull/396); it replaces the listener's other TLS options). amqtt requires a `default` listener; its `bind` of `None` keeps it from also opening a plaintext port beside the mTLS one:
+
+```python
+from amqtt.broker import Broker
+from tiny_pki.tls import server_context
+
+broker = Broker(
+    {
+        "listeners": {
+            "default": {"type": "tcp", "bind": None},
+            "mtls": {
+                "type": "tcp",
+                "bind": "0.0.0.0:8883",
+                "ssl": True,
+                "ssl_context": server_context(server_pem, server_key, ca_pem, crl_pem=crl_pem),
+            },
+        },
+    }
+)
+await broker.start()
+```
+
+For the client side, pass `client_context(client_pem, client_key, ca_pem)` wherever the client library accepts an `ssl.SSLContext`, for example `asyncio.open_connection(host, 8883, ssl=ctx, server_hostname=host)`.
+
 ## Optional: `tiny_pki.store`
 
 `CertificateStore(root)` is the filesystem store the CLI uses. Its `issue_client` / `issue_server` / `revoke` / `delete` / `publish_crl` / `publish_ocsp` methods and `check_store(store, ...)` do what the matching CLI verbs do and keep `crl.pem` in step with `index.json`. Library callers that keep certificates in their own database don't need it; it is documented in [`store.md`](store.md#using-the-store-from-python).
