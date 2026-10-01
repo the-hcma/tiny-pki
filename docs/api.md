@@ -9,13 +9,13 @@ The library needs only `cryptography` (`pip install tiny-pki`); none of the modu
 | Function | Returns |
 | --- | --- |
 | `generate_ca_certificate(common_name="Private CA", *, organization_name="tiny-pki", validity_days=3650, key_size=None, key_type="rsa", permitted_subtrees=None)` | `(ca_cert_pem, ca_key_pem)` — self-signed, `BasicConstraints(ca=True, path_length=0)` (signs leaves only), `keyCertSign` + `cRLSign`; optional critical Name Constraints |
-| `generate_client_certificate(ca_cert_pem, ca_key_pem, common_name, *, organization_name=None, validity_days=397, key_size=None, key_type="rsa", allow_long_validity=False, allow_dn_special_chars=False)` | `(cert_pem, key_pem)` — `CLIENT_AUTH` EKU; CN is the identity |
-| `generate_server_certificate(ca_cert_pem, ca_key_pem, common_name, san_entries, *, organization_name=None, validity_days=90, key_size=None, key_type="rsa", allow_long_validity=False, include_common_name_in_sans=True, allow_dn_special_chars=False)` | `(cert_pem, key_pem)` — `SERVER_AUTH` EKU; `san_entries` are DNS names or IP literals (at least one) |
-| `sign_client_csr(ca_cert_pem, ca_key_pem, csr_pem, common_name, *, organization_name=None, validity_days=397, allow_long_validity=False, allow_dn_special_chars=False)` | `cert_pem` — the same client profile as `generate_client_certificate`, for the public key in a device's CSR; see [Signing a CSR](#signing-a-csr) |
-| `sign_server_csr(ca_cert_pem, ca_key_pem, csr_pem, common_name, san_entries, *, organization_name=None, validity_days=90, allow_long_validity=False, include_common_name_in_sans=True, include_csr_sans=False, allow_dn_special_chars=False)` | `cert_pem` — the same server profile as `generate_server_certificate`, for the public key in a server's CSR; see [Signing a CSR](#signing-a-csr) |
+| `generate_client_certificate(ca_cert_pem, ca_key_pem, common_name, *, organization_name=None, validity_days=397, key_size=None, key_type="rsa", allow_long_validity=False, allow_dn_special_chars=False, ocsp_url=None)` | `(cert_pem, key_pem)` — `CLIENT_AUTH` EKU; CN is the identity |
+| `generate_server_certificate(ca_cert_pem, ca_key_pem, common_name, san_entries, *, organization_name=None, validity_days=90, key_size=None, key_type="rsa", allow_long_validity=False, include_common_name_in_sans=True, allow_dn_special_chars=False, ocsp_url=None)` | `(cert_pem, key_pem)` — `SERVER_AUTH` EKU; `san_entries` are DNS names or IP literals (at least one) |
+| `sign_client_csr(ca_cert_pem, ca_key_pem, csr_pem, common_name, *, organization_name=None, validity_days=397, allow_long_validity=False, allow_dn_special_chars=False, ocsp_url=None)` | `cert_pem` — the same client profile as `generate_client_certificate`, for the public key in a device's CSR; see [Signing a CSR](#signing-a-csr) |
+| `sign_server_csr(ca_cert_pem, ca_key_pem, csr_pem, common_name, san_entries, *, organization_name=None, validity_days=90, allow_long_validity=False, include_common_name_in_sans=True, include_csr_sans=False, allow_dn_special_chars=False, ocsp_url=None)` | `cert_pem` — the same server profile as `generate_server_certificate`, for the public key in a server's CSR; see [Signing a CSR](#signing-a-csr) |
 | `max_leaf_validity_days(ca_cert_pem, *, kind="server", allow_long_validity=False)` | `int` — the largest `validity_days` issuing a `kind` leaf under this CA accepts right now (CA `notAfter` with the `CLOCK_SKEW_BACKDATE` backdate, and the per-kind cap unless `allow_long_validity`); `0` once the CA cannot sign any leaf. Use it to clamp or grey out `VALIDITY_PRESETS` in UIs |
 
-`organization_name=None` on leaves inherits the CA's `O`. `validity_days` must be between 1 and `MAX_VALIDITY_DAYS` (36500).
+`organization_name=None` on leaves inherits the CA's `O`. `ocsp_url` (an `http://` or `https://` URL) adds an Authority Information Access extension naming that OCSP responder; see [OCSP](#ocsp). `validity_days` must be between 1 and `MAX_VALIDITY_DAYS` (36500).
 
 Key types (`KEY_TYPES`):
 
@@ -96,6 +96,17 @@ Name rules (`tiny_pki.names`):
 
 `revoked_entries` is a `list[tuple[int, datetime]]` of `(serial_number, revoked_at)`. The CRL's `nextUpdate` is `validity_days` from now — relying parties (nginx, OpenSSL) reject an expired CRL, so regenerate on a schedule shorter than that window. Pass the **full** revoked set every time; the CRL is not incremental.
 
+## OCSP
+
+tiny-pki runs no responder. These functions sign OCSP responses (RFC 6960) with the CA key from the same `revoked_entries` that `generate_crl` takes, and return DER bytes.
+
+| Function | Returns |
+| --- | --- |
+| `generate_ocsp_response(ca_cert_pem, ca_key_pem, request_der, *, issued_serials, revoked_entries, validity_days=7)` | the response to one DER OCSP request: `revoked` (with its time) for a serial in `revoked_entries`, `good` for one in `issued_serials`, `unknown` for anything else. A request for another CA gets an unsigned `unauthorized` response and an unparsable one `malformedRequest`; a request nonce is echoed |
+| `generate_ocsp_response_for_certificate(ca_cert_pem, ca_key_pem, cert_pem, *, revoked_entries, validity_days=7)` | a pre-signed response for one certificate issued by this CA, for a TLS server to staple (nginx `ssl_stapling_file`); `good` or `revoked`. A certificate from another CA raises `tiny_pki.ocsp.ForeignCertificateError`, a `TinyPkiError` subclass |
+
+`validity_days` (1 to `MAX_OCSP_VALIDITY_DAYS`, 30) sets `nextUpdate`; `thisUpdate` is backdated by `CLOCK_SKEW_BACKDATE`. Responses are signed directly by the CA key (the responder ID is the CA's key hash), so answering requests online means keeping the CA key online, as renewing the CRL already does. To serve requests, call `generate_ocsp_response` (or `CertificateStore.respond_ocsp`) from your own HTTP endpoint and issue leaves with `ocsp_url` pointing at it.
+
 ## Bundle
 
 | Function | Returns |
@@ -153,12 +164,14 @@ Expiry and validity checks for alerting (`tiny_pki.check`, re-exported from `tin
 | `DEFAULT_CRL_VALIDITY_DAYS` | `30`: `generate_crl` default and a store's CRL lifetime until set |
 | `DEFAULT_KEY_TYPE` | `"rsa"` |
 | `DEFAULT_LEAF_KEY_SIZE` | `3072` |
+| `DEFAULT_OCSP_VALIDITY_DAYS` | `7`: OCSP response lifetime for `generate_ocsp_response*` and a store's stapling responses until set |
 | `DEFAULT_ORGANIZATION_NAME` | `"tiny-pki"` |
 | `DEFAULT_SERVER_VALIDITY_DAYS` | `90` |
 | `KEY_TYPES` | `("rsa", "ec-p256")`; the `KeyType` literal type names the same values |
 | `MAX_CA_WARNING_DAYS` | `180` |
 | `MAX_CLIENT_VALIDITY_DAYS` | `825` |
 | `MAX_LEAF_WARNING_DAYS` | `30` |
+| `MAX_OCSP_VALIDITY_DAYS` | `30`: upper bound for an OCSP response lifetime (`ocsp --days`) |
 | `MAX_SERVER_VALIDITY_DAYS` | `200` |
 | `MAX_STORE_CRL_VALIDITY_DAYS` | `365`: upper bound for `init --crl-days` / `crl --days` / `CertificateStore.set_crl_validity_days` |
 | `MAX_VALIDITY_DAYS` | `36500`: hard ceiling for any `validity_days` (CA, leaf, CRL), even with `allow_long_validity` |
@@ -206,4 +219,4 @@ HKDF does no stretching, so the secret must already be high-entropy — e.g. Dja
 
 ## Optional: `tiny_pki.store`
 
-`CertificateStore(root)` is the filesystem store the CLI uses. Its `issue_client` / `issue_server` / `revoke` / `delete` / `publish_crl` methods and `check_store(store, ...)` do what the matching CLI verbs do and keep `crl.pem` in step with `index.json`. Library callers that keep certificates in their own database don't need it; it is documented in [`store.md`](store.md#using-the-store-from-python).
+`CertificateStore(root)` is the filesystem store the CLI uses. Its `issue_client` / `issue_server` / `revoke` / `delete` / `publish_crl` / `publish_ocsp` methods and `check_store(store, ...)` do what the matching CLI verbs do and keep `crl.pem` in step with `index.json`. Library callers that keep certificates in their own database don't need it; it is documented in [`store.md`](store.md#using-the-store-from-python).

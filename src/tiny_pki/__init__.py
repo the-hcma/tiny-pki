@@ -26,12 +26,14 @@ from tiny_pki.constants import (
     DEFAULT_CRL_VALIDITY_DAYS,
     DEFAULT_KEY_TYPE,
     DEFAULT_LEAF_KEY_SIZE,
+    DEFAULT_OCSP_VALIDITY_DAYS,
     DEFAULT_ORGANIZATION_NAME,
     DEFAULT_SERVER_VALIDITY_DAYS,
     KEY_TYPES,
     MAX_CA_WARNING_DAYS,
     MAX_CLIENT_VALIDITY_DAYS,
     MAX_LEAF_WARNING_DAYS,
+    MAX_OCSP_VALIDITY_DAYS,
     MAX_SERVER_VALIDITY_DAYS,
     MAX_STORE_CRL_VALIDITY_DAYS,
     MAX_VALIDITY_DAYS,
@@ -60,6 +62,7 @@ from tiny_pki.issue import (
     sign_client_csr,
     sign_server_csr,
 )
+from tiny_pki.ocsp import generate_ocsp_response, generate_ocsp_response_for_certificate
 from tiny_pki.revoke import generate_crl
 from tiny_pki.version import package_version
 
@@ -78,6 +81,7 @@ __all__ = [
     "DEFAULT_CRL_VALIDITY_DAYS",
     "DEFAULT_KEY_TYPE",
     "DEFAULT_LEAF_KEY_SIZE",
+    "DEFAULT_OCSP_VALIDITY_DAYS",
     "DEFAULT_ORGANIZATION_NAME",
     "DEFAULT_SERVER_VALIDITY_DAYS",
     "KEY_TYPES",
@@ -85,6 +89,7 @@ __all__ = [
     "MAX_CA_WARNING_DAYS",
     "MAX_CLIENT_VALIDITY_DAYS",
     "MAX_LEAF_WARNING_DAYS",
+    "MAX_OCSP_VALIDITY_DAYS",
     "MAX_SERVER_VALIDITY_DAYS",
     "MAX_STORE_CRL_VALIDITY_DAYS",
     "MAX_VALIDITY_DAYS",
@@ -100,6 +105,8 @@ __all__ = [
     "generate_ca_certificate",
     "generate_client_certificate",
     "generate_crl",
+    "generate_ocsp_response",
+    "generate_ocsp_response_for_certificate",
     "generate_pkcs12",
     "generate_server_certificate",
     "get_certificate_expiry",

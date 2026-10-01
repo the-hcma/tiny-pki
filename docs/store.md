@@ -10,11 +10,14 @@ $TINY_PKI_STORE/
     crl.pem       # current CRL (rewritten on revoke / delete / crl)
     crlnumber     # last published CRL number (keeps it monotonic across clock steps)
     crldays       # CRL lifetime in days for every publish (init --crl-days / crl --days; 30 if absent)
+    ocspdays      # OCSP stapling response lifetime; present only while ocsp publishing is on
+    ocspurl       # OCSP responder URL written into new leaves (ocsp url URL); absent until set
     index.json    # source of truth for issued certificates
     .lock         # flock target that serializes writers (empty, mode 0600)
   public/         # key-free copies for TLS servers (0755; files 0644)
     ca.crt
     crl.pem
+    ocsp/{cn}.der # pre-signed OCSP responses for stapling (after `ocsp`)
   clients/{cn}-{serial}.{crt,key}
   servers/{cn}-{serial}.{crt,key}
   bundles/{cn}-{serial}.p12
@@ -24,7 +27,7 @@ Private keys, PKCS#12 bundles, and `index.json` are created with mode `0600` fro
 
 ## `public/` for TLS servers
 
-A relying party needs only the CA certificate and the current CRL, but `ca/` also holds `ca.key`. The store therefore mirrors `ca.crt` and `crl.pem` into a separate, key-free `public/` directory (mode `0755`, files `0644`) on every write that changes them, by atomic rename within that directory. Every write also resets an existing `public/` you own to those modes, so a restrictive or world-writable one is corrected; a non-directory `public` is refused. `ca/ca.crt` and `ca/crl.pem` remain for compatibility. A store created before `public/` existed gets it on its next write (for example `tiny-pki crl`); a legacy flat layout gets it when it is migrated.
+A relying party needs only the CA certificate and the current CRL (and, with OCSP stapling, `public/ocsp/`), but `ca/` also holds `ca.key`. The store therefore mirrors `ca.crt` and `crl.pem` into a separate, key-free `public/` directory (mode `0755`, files `0644`) on every write that changes them, by atomic rename within that directory. Every write also resets an existing `public/` you own to those modes, so a restrictive or world-writable one is corrected; a non-directory `public` is refused. `ca/ca.crt` and `ca/crl.pem` remain for compatibility. A store created before `public/` existed gets it on its next write (for example `tiny-pki crl`); a legacy flat layout gets it when it is migrated.
 
 Point TLS servers at `public/`, and grant or bind-mount the **directory**, not the individual files. A single-file bind mount keeps pointing at the old inode after the atomic rename, so the server would keep reading a stale CRL; a directory mount sees each new file.
 
@@ -47,9 +50,9 @@ and use `/etc/nginx/pki/ca.crt` / `/etc/nginx/pki/crl.pem` in the config. The TL
 
 ## Concurrency
 
-Every operation that modifies the store (`init`, `create`, `revoke`, `delete`, `crl`, `export p12` without `--out`, and the matching `CertificateStore` methods) holds an exclusive `flock` on `ca/.lock` for the whole read-modify-write of `index.json`, `crlnumber` and `crl.pem`. A CRL publish reads the revoked set, picks the CRL number and writes `crl.pem` under one lock, so a systemd timer running `crl` while an operator runs `revoke` can never leave a newest CRL that is missing a serial `index.json` records as revoked, and two concurrent `create` / `revoke` / `delete` runs never lose an index update. A second writer waits for the first to finish.
+Every operation that modifies the store (`init`, `create`, `sign`, `revoke`, `delete`, `crl`, `ocsp`, `export p12` without `--out`, and the matching `CertificateStore` methods) holds an exclusive `flock` on `ca/.lock` for the whole read-modify-write of `index.json`, `crlnumber` and `crl.pem`. A CRL publish reads the revoked set, picks the CRL number and writes `crl.pem` under one lock, so a systemd timer running `crl` while an operator runs `revoke` can never leave a newest CRL that is missing a serial `index.json` records as revoked, and two concurrent `create` / `revoke` / `delete` runs never lose an index update. A second writer waits for the first to finish.
 
-Reads (`list`, `show`, `check`, `inspect`, `export pem`) take no lock; atomic renames mean they see either the old or the new file. The one exception is the first read of a [legacy flat layout](#legacy-flat-layout), which migrates the store in place and so takes the lock like any other write. On platforms without `fcntl.flock` (Windows), operations that modify the store, including that migration, raise `TinyPkiError` instead of running unlocked.
+Reads (`list`, `show`, `check`, `inspect`, `export pem`) take no lock; atomic renames mean they see either the old or the new file. `respond_ocsp` is the exception among reads: it holds the lock so each OCSP answer comes from one consistent snapshot of the index. The one exception is the first read of a [legacy flat layout](#legacy-flat-layout), which migrates the store in place and so takes the lock like any other write. On platforms without `fcntl.flock` (Windows), operations that modify the store, including that migration, raise `TinyPkiError` instead of running unlocked.
 
 Library callers that compose their own read-then-write sequence, such as signing a CRL from `revoked_entries()` and `next_crl_number()` before `write_crl()`, should hold `with store.lock():` around the whole sequence. The lock is re-entrant within a thread.
 
@@ -80,7 +83,7 @@ Paths in the index are validated to stay under the store root; a tampered index 
 
 ## `list --json`
 
-`list clients|servers|revoked|certs --json` prints one object per entry with `cn`, `kind`, `serial`, `fingerprint`, `expires`, `status`, `revoked_at`, absolute `cert_path` / `key_path` (empty for tombstones), `store`, and `superseded_by` (the newer live serial for the same CN after `--keep-previous`, else `null`). `list --json` prints a summary (`ca_cn`, counts, `store`); `list ca --json` prints the CA's `cn`, `fingerprint`, `expires`, absolute `cert_path` / `crl_path` / `index_path`, and `crl_days` (the stored CRL lifetime).
+`list clients|servers|revoked|certs --json` prints one object per entry with `cn`, `kind`, `serial`, `fingerprint`, `expires`, `status`, `revoked_at`, absolute `cert_path` / `key_path` (empty for tombstones), `store`, and `superseded_by` (the newer live serial for the same CN after `--keep-previous`, else `null`). `list --json` prints a summary (`ca_cn`, counts, `store`); `list ca --json` prints the CA's `cn`, `fingerprint`, `expires`, absolute `cert_path` / `crl_path` / `index_path`, `crl_days` (the stored CRL lifetime), `ocsp_days` (the stapling response lifetime, `null` while `ocsp` publishing is off), `ocsp_dir`, and `ocsp_url` (`null` until set).
 
 ## Legacy flat layout
 
@@ -112,6 +115,9 @@ store.sign_server_csr("api.home", csr_pem, ["api.home"])  # sign server api.home
 store.revoke("alice")                               # revoke alice
 store.delete("alice")                               # delete alice (force=True for a live one)
 store.publish_crl()                                 # crl
+store.publish_ocsp()                                # ocsp
+store.set_ocsp_url("http://ocsp.home/")             # ocsp url http://ocsp.home/
+response_der = store.respond_ocsp(request_der)      # (no CLI: for your own OCSP endpoint)
 rows = check_store(store, within=None, include_revoked=False)  # check (store)
 ```
 
@@ -124,10 +130,14 @@ rows = check_store(store, within=None, include_revoked=False)  # check (store)
 | `delete(identity, force=False)` | `delete` | Same as `delete_certificate`. |
 | `publish_crl(validity_days=None)` | `crl [--days N]` | Signs the index's revoked set for the stored lifetime; returns the CRL PEM. `validity_days` also updates the stored lifetime once the CRL is written. |
 | `set_crl_validity_days(days)` / `crl_validity_days` | `init --crl-days`, `crl --days` | Set or read the CRL lifetime (1–365 days, default 30) that every publish uses. |
+| `publish_ocsp(validity_days=None)` / `ocsp_validity_days` | `ocsp [--days N]` | Writes `public/ocsp/<cn>.der` for every server certificate on disk and returns the paths. It turns stapling on: from then on issuing, revoking or deleting a server certificate refreshes the responses of its CN, and every `publish_crl` refreshes all of them, under the same lock. `<cn>.der` belongs to the newest live certificate of that CN, or the newest one once none is live; CNs that map to the same file name get only `<cn>-<serial>.der`. `ocsp_validity_days` is `None` while it is off. |
+| `disable_ocsp()` | `ocsp disable` | Removes the responses, `public/ocsp/` (unless something else was put in it) and the stored lifetime. |
+| `set_ocsp_url(url)` / `ocsp_url` | `ocsp url [URL \| --clear]` | Set (or clear with `None`) the OCSP responder URL that every later leaf carries in Authority Information Access. |
+| `respond_ocsp(request_der)` | none | Answers a DER OCSP request from one locked snapshot of the index (`good`, `revoked`, or `unknown` for serials the store never issued), for a responder you run yourself. Each call takes the store lock and, for an encrypted CA, decrypts the key with Scrypt, so under real traffic serve the pre-signed `public/ocsp/` files, or call `read_ca` once and answer with `generate_ocsp_response` from an index snapshot you refresh. |
 | `check_store(store, *, within, by, kinds, include_revoked)` | `check` | `(name, CertificateStatus)` rows with the same statuses and reasons as `check --json`. `index.json` is authoritative: a CRL missing a serial it records as revoked is `untrusted`. |
 
 The lower-level `add_certificate`, `mark_revoked` and `delete_certificate` also republish `ca/crl.pem` whenever the store has a CA, so no call sequence leaves the CRL behind the index. They validate the CA signing key before updating the index; on encrypted stores they therefore need `key_secret=`, while plaintext stores need no secret.
 
-For an encrypted CA key, pass `key_secret=` to `read_ca`, `write_ca`, `add_certificate`, `issue_client`, `issue_server`, `sign_client_csr`, `sign_server_csr`, `publish_crl`, `mark_revoked`, `revoke`, `delete_certificate`, and `delete` as applicable. These methods continue to work without a secret for plaintext stores. `read_ca_certificate()` reads only the public certificate and remains usable without a secret; `check_store()` also needs no key secret.
+For an encrypted CA key, pass `key_secret=` to `read_ca`, `write_ca`, `add_certificate`, `issue_client`, `issue_server`, `sign_client_csr`, `sign_server_csr`, `publish_crl`, `publish_ocsp`, `respond_ocsp`, `mark_revoked`, `revoke`, `delete_certificate`, and `delete` as applicable. These methods continue to work without a secret for plaintext stores. `read_ca_certificate()` reads only the public certificate and remains usable without a secret; `check_store()` also needs no key secret.
 
 `encrypt_ca_key(secret)` and `decrypt_ca_key(secret)` migrate `ca/ca.key` in place under the store lock. Ciphertext records the Scrypt work parameters alongside a random per-key salt before the Fernet token. Both use atomic mode-0600 replacement; a wrong decryption secret leaves the original ciphertext untouched.

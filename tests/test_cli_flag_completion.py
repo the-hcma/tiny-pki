@@ -55,6 +55,8 @@ def _bash_complete(tmp_path: Path, *words: str) -> list[str]:
         (("delete", "--"), ["--force", "--dry-run", "--key-secret-file"]),
         (("check", "--kind", ""), ["ca", "client", "crl", "server"]),
         (("list", "--"), ["--json"]),
+        (("ocsp", ""), ["disable", "publish", "url"]),
+        (("ocsp", "publish", "--"), ["--clear", "--days", "--key-secret-file"]),
         (("completion", ""), ["bash", "fish", "zsh"]),
         (("create", "client", "alice", "--da"), ["--days"]),
         (("list", ""), ["ca", "certs", "clients", "revoked", "servers"]),

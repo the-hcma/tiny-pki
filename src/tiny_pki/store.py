@@ -11,7 +11,8 @@ Layout (one CA per store root)::
 
     $STORE/
       ca/ca.crt  ca/ca.key  ca/crl.pem  ca/crlnumber  ca/crldays  ca/index.json
-      public/ca.crt  public/crl.pem
+      ca/ocspdays  ca/ocspurl           (only once OCSP stapling / an OCSP URL is set up)
+      public/ca.crt  public/crl.pem  public/ocsp/{cn}.der
       clients/{cn}-{serial}.{crt,key}   (no .key for a certificate signed from a CSR)
       servers/{cn}-{serial}.{crt,key}   (likewise)
       bundles/{cn}-{serial}.p12
@@ -22,7 +23,9 @@ automatically on first ``ensure_layout``.
 Methods that change the index (``add_certificate``, ``mark_revoked``,
 ``delete_certificate`` and the CLI-shaped ``issue_client`` / ``issue_server`` /
 ``sign_client_csr`` / ``sign_server_csr`` / ``revoke`` / ``delete``) republish
-``ca/crl.pem`` with the store's CA key, so the CRL never lags ``index.json``.
+``ca/crl.pem`` with the store's CA key, so the CRL never lags ``index.json``; once
+:meth:`CertificateStore.publish_ocsp` has run, every CRL publish also refreshes
+the stapled OCSP responses in ``public/ocsp/``.
 :func:`check_store` is the store health check behind ``tiny-pki check``.
 
 Every method that modifies the store holds an exclusive ``fcntl.flock`` on
@@ -57,7 +60,9 @@ from tiny_pki.constants import (
     DEFAULT_CLIENT_VALIDITY_DAYS,
     DEFAULT_CRL_VALIDITY_DAYS,
     DEFAULT_KEY_TYPE,
+    DEFAULT_OCSP_VALIDITY_DAYS,
     DEFAULT_SERVER_VALIDITY_DAYS,
+    MAX_OCSP_VALIDITY_DAYS,
     MAX_STORE_CRL_VALIDITY_DAYS,
     KeyType,
 )
@@ -69,6 +74,8 @@ from tiny_pki.issue import (
     sign_client_csr,
     sign_server_csr,
 )
+from tiny_pki.names import normalize_http_url
+from tiny_pki.ocsp import ForeignCertificateError, generate_ocsp_response, generate_ocsp_response_for_certificate
 from tiny_pki.revoke import generate_crl
 from tiny_pki.secrets import (
     decrypt_private_key_scrypt,
@@ -160,6 +167,30 @@ class CertificateStore:
     @property
     def lock_path(self) -> Path:
         return self.root / "ca" / ".lock"
+
+    @property
+    def ocsp_dir(self) -> Path:
+        """Key-free directory of pre-signed OCSP responses for stapling (``public/ocsp``)."""
+        return self.root / "public" / "ocsp"
+
+    @property
+    def ocsp_url(self) -> str | None:
+        """OCSP responder URL written into newly issued leaves (Authority Information Access); ``None`` until set."""
+        path = self._validated_write_path("ca/ocspurl")
+        if not path.is_file():
+            return None
+        return normalize_http_url(path.read_text(encoding="utf-8"), f"the OCSP URL in {path}")
+
+    @property
+    def ocsp_validity_days(self) -> int | None:
+        """Lifetime of the pre-signed OCSP responses, or ``None`` while the store does not publish them."""
+        path = self._validated_write_path("ca/ocspdays")
+        if not path.is_file():
+            return None
+        text = path.read_text(encoding="utf-8").strip()
+        if not text.isdigit():
+            raise ValueError(f"Expected a decimal number of days in {path}")
+        return _require_ocsp_validity_days(int(text))
 
     @property
     def public_dir(self) -> Path:
@@ -265,7 +296,7 @@ class CertificateStore:
         self._write_index(entries)
         for rel in unlink_paths:
             (self.root / rel).unlink(missing_ok=True)
-        self._republish_crl(key_secret=key_secret)
+        self._republish_crl(entry, key_secret=key_secret)
         return entry
 
     @_locked
@@ -311,7 +342,7 @@ class CertificateStore:
             (self.root / entry.cert_path).unlink(missing_ok=True)
         if entry.key_path:
             (self.root / entry.key_path).unlink(missing_ok=True)
-        self._republish_crl(key_secret=key_secret)
+        self._republish_crl(entry, key_secret=key_secret)
         return tombstone
 
     def delete(self, identity: str, *, force: bool = False, key_secret: str | None = None) -> IssuedCertificate:
@@ -507,7 +538,7 @@ class CertificateStore:
         if found is None:
             raise KeyError(f"Expected issued certificate matching {identity!r}")
         self._write_index(updated)
-        self._republish_crl(key_secret=key_secret)
+        self._republish_crl(found, key_secret=key_secret)
         return found
 
     @_locked
@@ -519,26 +550,115 @@ class CertificateStore:
         signs for that many days and, once the CRL is written, becomes the stored
         lifetime (see :meth:`set_crl_validity_days`); otherwise
         :attr:`crl_validity_days` is used. A failed publish leaves it unchanged.
+        When OCSP stapling is on (see :meth:`publish_ocsp`), every response in
+        ``public/ocsp/`` is refreshed under the same lock.
 
         Returns:
             The published CRL in PEM format.
         """
-        days = self.crl_validity_days if validity_days is None else _require_crl_validity_days(validity_days)
+        crl, ca_cert, ca_key = self._sign_and_write_crl(validity_days, key_secret)
+        ocsp_days = self.ocsp_validity_days
+        if ocsp_days is not None:
+            self._write_ocsp_responses(ca_cert, ca_key, ocsp_days)
+        return crl
+
+    @_locked
+    def publish_ocsp(self, *, validity_days: int | None = None, key_secret: str | None = None) -> list[Path]:
+        """Pre-sign an OCSP response for every server certificate under ``public/ocsp/``, for stapling.
+
+        Each server certificate still on disk gets ``public/ocsp/<cn>.der`` (the
+        name stays the same when the certificate is renewed; two CNs that map to
+        the same file name get ``<cn>-<serial>.der`` instead). A revoked one gets
+        a ``revoked`` response, so a server still presenting it staples its
+        revocation; responses for deleted or replaced certificates are removed.
+        The bare ``<cn>.der`` belongs to the newest live certificate of that CN,
+        or to the newest one once none is live. The first call turns publishing on:
+        from then on issuing, revoking or deleting a server certificate refreshes
+        the responses of its CN, and every :meth:`publish_crl` (the ``crl``
+        command) refreshes all of them, so run the CRL timer well inside their lifetime.
+        ``validity_days`` (1..``MAX_OCSP_VALIDITY_DAYS``) becomes the stored
+        lifetime; otherwise the stored one, or ``DEFAULT_OCSP_VALIDITY_DAYS``, is used.
+
+        Returns:
+            The response files written.
+        """
+        stored = self.ocsp_validity_days
+        if validity_days is not None:
+            days = _require_ocsp_validity_days(validity_days)
+        else:
+            days = stored if stored is not None else DEFAULT_OCSP_VALIDITY_DAYS
         ca_material = self._require_ca_signing_key(key_secret)
         if ca_material is None:
             raise FileNotFoundError(f"Expected CA files under {self.ca_dir}")
-        ca_cert, ca_key = ca_material
-        crl = generate_crl(
-            ca_cert,
-            ca_key,
-            self.revoked_entries(),
-            validity_days=days,
-            crl_number=self.next_crl_number(),
+        written = self._write_ocsp_responses(*ca_material, days)
+        _write_plain(self._validated_write_path("ca/ocspdays"), f"{days}\n".encode())
+        return written
+
+    @_locked
+    def disable_ocsp(self) -> None:
+        """Stop publishing OCSP responses: remove the responses, ``public/ocsp/`` and the stored lifetime.
+
+        Files other than ``*.der`` in ``public/ocsp/`` are left alone, and so is
+        the directory while it still holds any.
+        """
+        directory = self._validated_write_path("public/ocsp")
+        if directory.is_dir():
+            for path in directory.iterdir():
+                if path.suffix == ".der":
+                    path.unlink()
+            if not any(directory.iterdir()):
+                directory.rmdir()
+        self._validated_write_path("ca/ocspdays").unlink(missing_ok=True)
+
+    @_locked
+    def set_ocsp_url(self, url: str | None) -> None:
+        """Persist the OCSP responder URL written into every later leaf, or clear it with ``None``.
+
+        Certificates already issued keep whatever they were issued with.
+
+        Raises:
+            TinyPkiError: ``url`` is not an ``http://`` or ``https://`` URL with a host.
+        """
+        path = self._validated_write_path("ca/ocspurl")
+        if url is None:
+            path.unlink(missing_ok=True)
+            return
+        text = normalize_http_url(url, "the OCSP URL")
+        self.ca_dir.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
+        _write_plain(path, f"{text}\n".encode())
+
+    @_locked
+    def respond_ocsp(self, request_der: bytes, *, key_secret: str | None = None) -> bytes:
+        """Answer a DER OCSP request from the index, for a consumer's own responder.
+
+        Serials in ``index.json`` are ``good`` or ``revoked`` (tombstones
+        included); any other serial is ``unknown``. The answer comes from one
+        snapshot of the index taken under the store lock, so it never mixes the
+        state before and after a concurrent revoke or issue. The lifetime is
+        :attr:`ocsp_validity_days`, or ``DEFAULT_OCSP_VALIDITY_DAYS`` while
+        stapling is off. See :func:`tiny_pki.generate_ocsp_response`.
+
+        Each call takes the store lock (so it waits for, and holds up, issuing and
+        revoking) and, for an encrypted CA, decrypts the key with the deliberately
+        slow Scrypt. A responder with real traffic should serve the pre-signed
+        ``public/ocsp/`` files, or read the CA once with :meth:`read_ca` and call
+        :func:`tiny_pki.generate_ocsp_response` with an index snapshot it refreshes.
+        """
+        ca_material = self._require_ca_signing_key(key_secret)
+        if ca_material is None:
+            raise FileNotFoundError(f"Expected CA files under {self.ca_dir}")
+        entries = self._read_index()
+        return generate_ocsp_response(
+            *ca_material,
+            request_der,
+            issued_serials={int(entry.serial_number, 16) for entry in entries},
+            revoked_entries=[
+                (int(entry.serial_number, 16), datetime.fromisoformat(entry.revoked_at))
+                for entry in entries
+                if entry.revoked_at is not None
+            ],
+            validity_days=self.ocsp_validity_days or DEFAULT_OCSP_VALIDITY_DAYS,
         )
-        self.write_crl(crl)
-        if validity_days is not None:
-            self.set_crl_validity_days(validity_days)
-        return crl
 
     @_locked
     def set_crl_validity_days(self, days: int) -> None:
@@ -585,6 +705,7 @@ class CertificateStore:
             key_type=key_type,
             allow_long_validity=allow_long_validity,
             allow_dn_special_chars=allow_dn_special_chars,
+            ocsp_url=self.ocsp_url,
         )
         return self._record(
             common_name, "client", cert_pem, key_pem, keep_previous=keep_previous, key_secret=key_secret
@@ -626,6 +747,7 @@ class CertificateStore:
             allow_long_validity=allow_long_validity,
             include_common_name_in_sans=include_common_name_in_sans,
             allow_dn_special_chars=allow_dn_special_chars,
+            ocsp_url=self.ocsp_url,
         )
         return self._record(common_name, "server", cert_pem, key_pem, key_secret=key_secret)
 
@@ -661,6 +783,7 @@ class CertificateStore:
             validity_days=validity_days,
             allow_long_validity=allow_long_validity,
             allow_dn_special_chars=allow_dn_special_chars,
+            ocsp_url=self.ocsp_url,
         )
         return self._record(common_name, "client", cert_pem, None, keep_previous=keep_previous, key_secret=key_secret)
 
@@ -701,6 +824,7 @@ class CertificateStore:
             include_common_name_in_sans=include_common_name_in_sans,
             include_csr_sans=include_csr_sans,
             allow_dn_special_chars=allow_dn_special_chars,
+            ocsp_url=self.ocsp_url,
         )
         return self._record(common_name, "server", cert_pem, None, key_secret=key_secret)
 
@@ -917,9 +1041,90 @@ class CertificateStore:
             materials[self.lock_path] = material
         return material
 
-    def _republish_crl(self, *, key_secret: str | None = None) -> None:
-        if self.has_ca():
-            self.publish_crl(key_secret=key_secret)
+    def _republish_crl(self, changed: IssuedCertificate, *, key_secret: str | None = None) -> None:
+        """Re-sign the CRL after ``changed`` was issued, revoked or deleted, refreshing only its OCSP responses."""
+        if not self.has_ca():
+            return
+        _, ca_cert, ca_key = self._sign_and_write_crl(None, key_secret)
+        ocsp_days = self.ocsp_validity_days
+        if ocsp_days is not None and changed.kind == "server":
+            self._write_ocsp_responses(ca_cert, ca_key, ocsp_days, only=_safe_filename(changed.common_name))
+
+    def _sign_and_write_crl(self, validity_days: int | None, key_secret: str | None) -> tuple[bytes, bytes, bytes]:
+        """Publish a fresh CRL; return it with the CA material that signed it."""
+        days = self.crl_validity_days if validity_days is None else _require_crl_validity_days(validity_days)
+        ca_material = self._require_ca_signing_key(key_secret)
+        if ca_material is None:
+            raise FileNotFoundError(f"Expected CA files under {self.ca_dir}")
+        ca_cert, ca_key = ca_material
+        crl = generate_crl(
+            ca_cert,
+            ca_key,
+            self.revoked_entries(),
+            validity_days=days,
+            crl_number=self.next_crl_number(),
+        )
+        self.write_crl(crl)
+        if validity_days is not None:
+            self.set_crl_validity_days(validity_days)
+        return crl, ca_cert, ca_key
+
+    def _write_ocsp_responses(
+        self, ca_cert_pem: bytes, ca_key_pem: bytes, days: int, *, only: str | None = None
+    ) -> list[Path]:
+        """Replace ``public/ocsp/*.der`` with fresh responses for the server certificates still on disk.
+
+        ``only`` (a :func:`_safe_filename` of a CN) limits the refresh to the
+        files of that name, leaving every other response as it is.
+        Certificates the current CA did not issue (left over from a CA replaced
+        with ``write_ca(force=True)``) get no response, so they cannot block a
+        CRL publish.
+        """
+        groups: dict[str, list[IssuedCertificate]] = {}
+        for entry in self.list_certificates(kind="server", status="all"):
+            groups.setdefault(_safe_filename(entry.common_name), []).append(entry)
+        if only is not None:
+            groups = {only: groups.get(only, [])}
+        revoked = self.revoked_entries()
+        responses: dict[str, bytes] = {}
+        for safe, group in groups.items():
+            primary = _stable_ocsp_entry(group)
+            for entry in group:
+                filename = f"{safe}.der" if entry is primary else f"{safe}-{entry.serial_number}.der"
+                try:
+                    responses[filename] = generate_ocsp_response_for_certificate(
+                        ca_cert_pem,
+                        ca_key_pem,
+                        self.read_certificate_pem(entry),
+                        revoked_entries=revoked,
+                        validity_days=days,
+                    )
+                except ForeignCertificateError:
+                    continue
+        directory = self._validated_write_path("public/ocsp")
+        if not directory.exists():
+            directory.mkdir(mode=_PUBLIC_DIR_MODE)
+        elif not directory.is_dir():
+            raise ValueError(f"Expected {directory} to be a directory for the OCSP responses")
+        _set_owned_mode(directory, _PUBLIC_DIR_MODE)
+        written: list[Path] = []
+        for filename, response in sorted(responses.items()):
+            path = self._validated_write_path(f"public/ocsp/{filename}")
+            _write_plain(path, response)
+            written.append(path)
+        if only is None:
+            stale = [path for path in directory.iterdir() if path.suffix == ".der"]
+        else:
+            owned = {f"{only}.der"} | {
+                f"{only}-{entry.serial_number}.der"
+                for entry in self._read_index()
+                if entry.kind == "server" and _safe_filename(entry.common_name) == only
+            }
+            stale = [directory / name for name in owned]
+        for path in stale:
+            if path.name not in responses:
+                path.unlink(missing_ok=True)
+        return written
 
     def _recorded_crl_number(self) -> int:
         path = self._validated_write_path("ca/crlnumber")
@@ -1276,6 +1481,17 @@ def _require_crl_validity_days(days: object) -> int:
     return days
 
 
+def _require_ocsp_validity_days(days: object) -> int:
+    """Return ``days`` if it is a plain int in range, as :func:`_require_crl_validity_days` does for CRLs."""
+    if isinstance(days, bool) or not isinstance(days, int):
+        raise TinyPkiError(f"Expected a whole number of days for the OCSP response lifetime, got {days!r}")
+    if not 1 <= days <= MAX_OCSP_VALIDITY_DAYS:
+        raise TinyPkiError(
+            f"Expected an OCSP response lifetime between 1 and {MAX_OCSP_VALIDITY_DAYS} days, got {days}"
+        )
+    return days
+
+
 def _drop_world_write(directory: Path) -> None:
     """Strip other-write from a store directory we own.
 
@@ -1300,6 +1516,18 @@ def _set_owned_mode(directory: Path, mode: int) -> None:
     getuid = getattr(os, "getuid", None)
     if getuid is None or info.st_uid == getuid():
         directory.chmod(mode)
+
+
+def _stable_ocsp_entry(group: list[IssuedCertificate]) -> IssuedCertificate | None:
+    """The entry that owns ``<cn>.der``: the newest live one, or the newest one when none is live.
+
+    ``group`` is in index (issue) order and shares one file name; when it holds
+    more than one CN, no entry owns the bare name, so none answers for another CN.
+    """
+    if not group or len({entry.common_name for entry in group}) > 1:
+        return None
+    live = [entry for entry in group if entry.revoked_at is None]
+    return (live or group)[-1]
 
 
 def _safe_filename(common_name: str) -> str:

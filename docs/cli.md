@@ -11,8 +11,8 @@ tiny-pki [--store DIR] [--color auto|always|never] [--edit-mode vim|emacs] [COMM
 - [Global options](#global-options)
 - [Identities](#identities)
 - [Exit status](#exit-status)
-- Commands: [init](#init), [create](#create), [sign](#sign), [list](#list), [show](#show), [inspect](#inspect), [export](#export), [revoke](#revoke), [delete](#delete), [crl](#crl), [encrypt-key](#encrypt-key), [decrypt-key](#decrypt-key), [check](#check), [completion](#completion), [REPL commands](#repl-commands)
-- Workflows: [enrolling a device from a CSR](#enrolling-a-device-from-a-csr), [rotating a client certificate](#rotating-a-client-certificate), [a lost device or compromised key](#a-lost-device-or-a-compromised-key), [serving mTLS from nginx](#serving-mtls-from-nginx), [renewing the CRL on a timer](#renewing-the-crl-on-a-timer)
+- Commands: [init](#init), [create](#create), [sign](#sign), [list](#list), [show](#show), [inspect](#inspect), [export](#export), [revoke](#revoke), [delete](#delete), [crl](#crl), [ocsp](#ocsp), [encrypt-key](#encrypt-key), [decrypt-key](#decrypt-key), [check](#check), [completion](#completion), [REPL commands](#repl-commands)
+- Workflows: [enrolling a device from a CSR](#enrolling-a-device-from-a-csr), [rotating a client certificate](#rotating-a-client-certificate), [a lost device or compromised key](#a-lost-device-or-a-compromised-key), [serving mTLS from nginx](#serving-mtls-from-nginx), [stapling OCSP from nginx](#stapling-ocsp-from-nginx), [renewing the CRL on a timer](#renewing-the-crl-on-a-timer)
 
 ## Global options
 
@@ -210,6 +210,26 @@ Signs a fresh CRL from the index and writes it to `ca/crl.pem` and `public/crl.p
 | `--days N` | Change the stored CRL lifetime (1–365 days) and use it for this and every later publish. |
 | `--key-secret-file PATH` | Read the CA-key secret from the first line of a file when the CA key is encrypted. |
 
+Once `ocsp` has published stapling responses, `crl` refreshes them too.
+
+### ocsp
+
+```text
+tiny-pki --store DIR ocsp [publish] [--days N] [--key-secret-file PATH]
+tiny-pki --store DIR ocsp disable
+tiny-pki --store DIR ocsp url [URL | --clear]
+```
+
+tiny-pki runs no OCSP responder; this command covers the parts that need none. `ocsp` (or `ocsp publish`) signs an OCSP response for every server certificate and writes it to `public/ocsp/<cn>.der`, for nginx's `ssl_stapling_file` (see [stapling OCSP from nginx](#stapling-ocsp-from-nginx)). The file name stays the same when the certificate is renewed. A revoked server certificate that has not been deleted gets a `revoked` response. From then on `create`, `sign`, `revoke` and `delete` refresh the responses of the server certificate's CN together with the CRL, so a revocation reaches the stapled response at the same moment, and `crl` refreshes all of them. Responses are valid for 7 days by default; keep the CRL timer well inside that. `ocsp disable` stops publishing them and removes the responses and `public/ocsp/` (the directory stays if something else was put in it).
+
+`ocsp url URL` records an `http://` or `https://` OCSP responder URL, which every certificate issued afterwards carries in its Authority Information Access extension; certificates already issued are unchanged. Only set it if something answers at that URL, such as your own endpoint built on `CertificateStore.respond_ocsp` ([store.md](store.md#using-the-store-from-python)). `ocsp url` prints the current URL, and `ocsp url --clear` stops adding one.
+
+| Flag | Meaning |
+| --- | --- |
+| `--days N` | `publish` only: change the stored response lifetime (1–30 days) and use it for this and every later refresh. |
+| `--key-secret-file PATH` | `publish` only: read the CA-key secret from the first line of a file when the CA key is encrypted. |
+| `--clear` | `url` only: stop writing an OCSP URL into new certificates. |
+
 ### encrypt-key
 
 ```text
@@ -382,6 +402,21 @@ ssl_crl                /srv/pki/home-ca/public/crl.pem;
 
 Grant or bind-mount the `public/` directory rather than individual files, so the server sees each new CRL; [store.md](store.md#public-for-tls-servers) has a sandboxed systemd example. Match client identities against the whole `$ssl_client_s_dn` string (see the nginx `map` in [api.md](api.md#issue)).
 
+### Stapling OCSP from nginx
+
+For clients that check a server certificate's revocation through OCSP, publish stapling responses once and point each server block at its file:
+
+```bash
+tiny-pki --store /srv/pki/home-ca ocsp
+```
+
+```nginx
+ssl_stapling        on;
+ssl_stapling_file   /srv/pki/home-ca/public/ocsp/api.home.der;
+```
+
+nginx reads the file at startup and reload, so reload it after each publish, as for the CRL. The [CRL timer](#renewing-the-crl-on-a-timer) refreshes the responses too; run it daily, since they are valid for 7 days (`ocsp --days N` changes that).
+
 ### Renewing the CRL on a timer
 
 nginx rejects every client once the CRL passes its `nextUpdate`, so publish a fresh one well inside the lifetime and reload the server. `/etc/systemd/system/tiny-pki-crl.service`:
@@ -410,4 +445,4 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-Enable it with `systemctl enable --now tiny-pki-crl.timer`. Pair it with a `check` timer ([monitoring.md](monitoring.md#systemd-timer)), which reports the CRL as expiring if the publish stops working.
+Enable it with `systemctl enable --now tiny-pki-crl.timer`. With [OCSP stapling](#stapling-ocsp-from-nginx) on, use `OnCalendar=daily`: the same run refreshes the stapled responses, which are valid for 7 days. Pair it with a `check` timer ([monitoring.md](monitoring.md#systemd-timer)), which reports the CRL as expiring if the publish stops working.

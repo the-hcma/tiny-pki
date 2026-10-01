@@ -105,6 +105,11 @@ COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
     ),
     "inspect": (),
     "list": (_JSON,),
+    "ocsp": (
+        Flag("clear", "url only: stop writing an OCSP URL into new certificates"),
+        Flag("days", "publish only: change the stored response lifetime (1-30)", value="N"),
+        _KEY_SECRET_FILE,
+    ),
     "revoke": (_KEY_SECRET_FILE, _DRY_RUN),
     "show": (),
     "sign": (
@@ -143,6 +148,7 @@ COMMAND_USAGE: dict[str, str] = {
     "init": "init",
     "inspect": "inspect NAME|PATH",
     "list": "list [ca|certs|clients|servers|revoked]",
+    "ocsp": "ocsp [publish|disable|url [URL]]",
     "renew-crl": "renew-crl",
     "revoke": "revoke NAME|0xSERIAL",
     "show": "show ca|certs|crl|NAME",
@@ -168,6 +174,7 @@ COMMAND_HELP: tuple[tuple[str, str], ...] = (
     ("init", "Create a new CA in --store."),
     ("inspect", "Inspect a store identity, a certificate file, or a CSR file."),
     ("list", "List ca|clients|servers|revoked|certs (optional --json)."),
+    ("ocsp", "Publish OCSP responses for stapling, stop publishing them, or set the OCSP URL for new certificates."),
     ("quit", "Leave the REPL (same as exit)."),
     ("renew-crl", "Alias for crl."),
     ("revoke", "Revoke an identity and regenerate the CRL; --dry-run previews."),
@@ -184,6 +191,7 @@ POSITIONAL_CHOICES: dict[str, tuple[str, ...]] = {
     "export": ("p12", "pem"),
     "help": COMMANDS,
     "list": ("ca", "certs", "clients", "revoked", "servers"),
+    "ocsp": ("disable", "publish", "url"),
     "show": ("ca", "certs", "clients", "crl", "revoked", "servers"),
     "sign": ("client", "server"),
 }
@@ -200,6 +208,7 @@ PKI_COMMANDS: frozenset[str] = frozenset(
         "init",
         "inspect",
         "list",
+        "ocsp",
         "renew-crl",
         "revoke",
         "show",
