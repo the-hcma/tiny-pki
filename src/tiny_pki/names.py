@@ -90,6 +90,51 @@ def normalize_http_url(url: str, field_name: str) -> str:
     return text
 
 
+def normalize_uri_san(uri: str) -> str:
+    """Return ``uri`` stripped with a lower-case scheme, requiring an absolute URI fit for a URI SAN.
+
+    The URI needs a scheme and a host, and may not carry user info, a query or a
+    fragment. A ``spiffe://`` URI must also be a valid SPIFFE ID: a lower-case
+    trust domain without a port, and a path of non-empty segments made of
+    letters, digits, ``.``, ``-`` and ``_``, none of them ``.`` or ``..``.
+
+    Raises:
+        TinyPkiError: If ``uri`` breaks any of those rules.
+    """
+    text = uri.strip() if uri else ""
+    expected = "an absolute URI with a scheme and a host, without user info, query or fragment"
+    try:
+        parts = urlsplit(text)
+        host = parts.hostname
+    except ValueError:
+        parts, host = None, None
+    if (
+        parts is None
+        or not host
+        or not _URI_SCHEME.fullmatch(parts.scheme)
+        or "@" in parts.netloc
+        or "?" in text
+        or "#" in text
+        or len(text) > _MAX_URI_LENGTH
+        or not text.isascii()
+        or any(ch.isspace() or not ch.isprintable() for ch in text)
+    ):
+        raise TinyPkiError(f"Expected {expected} (at most {_MAX_URI_LENGTH} characters), got {uri!r}")
+    scheme = parts.scheme.lower()
+    if scheme == "spiffe":
+        segments = parts.path.split("/")[1:]
+        if (
+            not _SPIFFE_TRUST_DOMAIN.fullmatch(parts.netloc)
+            or not parts.path.startswith("/")
+            or not all(_SPIFFE_SEGMENT.fullmatch(segment) and segment not in (".", "..") for segment in segments)
+        ):
+            raise TinyPkiError(
+                "Expected a SPIFFE ID such as spiffe://example.home/device/phone-1 (lower-case trust domain without "
+                f"a port; non-empty path segments of letters, digits, '.', '-' and '_', none '.' or '..'), got {uri!r}"
+            )
+    return scheme + text[len(parts.scheme) :]
+
+
 def normalize_san_entries(entries: list[str]) -> list[str]:
     """Normalize every SAN entry and drop duplicates, preserving first-seen order.
 
@@ -157,6 +202,10 @@ def normalize_subject_attribute(value: str, field_name: str, *, max_length: int)
 
 
 _FORBIDDEN_CATEGORIES = frozenset({"Cc", "Cf", "Co", "Cs", "Zl", "Zp"})
+_MAX_URI_LENGTH = 2048
+_SPIFFE_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
+_SPIFFE_TRUST_DOMAIN = re.compile(r"^[a-z0-9._-]+$")
+_URI_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*$")
 _LDH_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 

@@ -10,6 +10,7 @@ import re
 import warnings
 from datetime import UTC, datetime, timedelta
 from typing import Literal
+from urllib.parse import urlsplit
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -39,6 +40,7 @@ from tiny_pki.constants import (
     MAX_CLIENT_VALIDITY_DAYS,
     MAX_SERVER_VALIDITY_DAYS,
     MAX_VALIDITY_DAYS,
+    URI_SUBTREE_PREFIX,
     KeyType,
 )
 from tiny_pki.errors import TinyPkiError, TinyPkiWarning
@@ -51,6 +53,7 @@ from tiny_pki.names import (
     normalize_san_entries,
     normalize_san_entry,
     normalize_subject_attribute,
+    normalize_uri_san,
 )
 
 
@@ -72,7 +75,9 @@ def generate_ca_certificate(
     so its key can stay offline while an intermediate issues the leaves.
     ``permitted_subtrees`` optionally restricts it with a critical Name Constraints
     extension: DNS suffixes (``"home"`` permits ``home`` and ``*.home``) and IP
-    networks (``"192.168.0.0/16"``; a bare IP means a single host). RFC 5280
+    networks (``"192.168.0.0/16"``; a bare IP means a single host), plus URI hosts
+    for URI SANs (``"uri:example.home"`` permits URIs whose host is exactly
+    ``example.home``, ``"uri:.example.home"`` any host under it). RFC 5280
     constraints only apply to the name types listed, so include IP ranges too if
     leaves will carry IP SANs.
 
@@ -159,6 +164,7 @@ def generate_client_certificate(
     allow_long_validity: bool = False,
     allow_dn_special_chars: bool = False,
     ocsp_url: str | None = None,
+    uri_san: str | None = None,
 ) -> tuple[bytes, bytes]:
     """Generate a client (CLIENT_AUTH) certificate signed by the given CA.
 
@@ -178,8 +184,16 @@ def generate_client_certificate(
     Access extension pointing relying parties at that OCSP responder; see
     :mod:`tiny_pki.ocsp`. Every leaf-issuing function accepts it.
 
+    ``uri_san`` adds exactly one URI Subject Alternative Name, such as the SPIFFE
+    ID ``spiffe://example.home/device/phone-1`` that SPIFFE-aware relying parties
+    (Envoy, amqtt's ``UserAuthCertPlugin``) authenticate on. The CN stays the
+    identity for CN-based relying parties such as nginx and Mosquitto. See
+    :func:`tiny_pki.names.normalize_uri_san` for the accepted URIs; under a CA
+    with Name Constraints the URI's host must lie within a permitted URI subtree
+    (``permitted_subtrees`` entry ``uri:HOST``).
+
     Raises:
-        TinyPkiError: If a name, key parameter or ``ocsp_url`` is invalid, ``validity_days`` exceeds
+        TinyPkiError: If a name, key parameter, ``ocsp_url`` or ``uri_san`` is invalid, ``validity_days`` exceeds
             ``MAX_CLIENT_VALIDITY_DAYS`` without ``allow_long_validity=True``, or the
             certificate would outlive the CA.
     """
@@ -189,11 +203,12 @@ def generate_client_certificate(
     rsa_key_size = require_key_params(key_type, key_size, default_size=DEFAULT_LEAF_KEY_SIZE)
     _require_validity_days(validity_days)
     ocsp_url = _ocsp_url(ocsp_url)
+    uri_san = None if uri_san is None else normalize_uri_san(uri_san)
 
     ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
     ca_key = load_ca_private_key(ca_cert, ca_key_pem)
     org = _leaf_organization(ca_cert, organization_name)
-    _enforce_name_constraints(ca_cert, common_name=common_name, sans=[])
+    _enforce_name_constraints(ca_cert, common_name=common_name, sans=[], uris=[uri_san] if uri_san else [])
     pending_warnings: list[str] = []
     not_before, not_after = _leaf_validity_window(
         ca_cert, validity_days, kind="client", allow_long_validity=allow_long_validity, warn=pending_warnings
@@ -208,6 +223,7 @@ def generate_client_certificate(
         not_before=not_before,
         not_after=not_after,
         ocsp_url=ocsp_url,
+        uri_san=uri_san,
     )
     _emit_warnings(pending_warnings)
     return _pem_pair(cert, client_key)
@@ -224,13 +240,15 @@ def sign_client_csr(
     allow_long_validity: bool = False,
     allow_dn_special_chars: bool = False,
     ocsp_url: str | None = None,
+    uri_san: str | None = None,
 ) -> bytes:
     """Sign a device's certificate signing request as a client (CLIENT_AUTH) certificate.
 
     The private key stays wherever the CSR was generated; only its public key is
     taken from ``csr_pem`` (PEM or DER). Everything else comes from the CA side,
     exactly as in :func:`generate_client_certificate`: ``common_name`` (never the
-    CSR's subject), the organization, the validity window, and the extensions.
+    CSR's subject), ``uri_san`` (never a SAN the CSR requests), the organization,
+    the validity window, and the extensions.
     Extensions the CSR requests, such as ``BasicConstraints(ca=True)`` or extra
     extended key usages, are ignored, so a CSR cannot obtain a CA or server
     certificate.
@@ -256,13 +274,14 @@ def sign_client_csr(
         _require_plain_common_name(common_name)
     _require_validity_days(validity_days)
     ocsp_url = _ocsp_url(ocsp_url)
+    uri_san = None if uri_san is None else normalize_uri_san(uri_san)
     csr = load_csr(csr_pem)
     public_key = require_signable_public_key(csr)
 
     ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
     ca_key = load_ca_private_key(ca_cert, ca_key_pem)
     org = _leaf_organization(ca_cert, organization_name)
-    _enforce_name_constraints(ca_cert, common_name=common_name, sans=[])
+    _enforce_name_constraints(ca_cert, common_name=common_name, sans=[], uris=[uri_san] if uri_san else [])
     pending_warnings = _ignored_csr_request_warnings(csr, common_name, profile="client")
     not_before, not_after = _leaf_validity_window(
         ca_cert, validity_days, kind="client", allow_long_validity=allow_long_validity, warn=pending_warnings
@@ -276,6 +295,7 @@ def sign_client_csr(
         not_before=not_before,
         not_after=not_after,
         ocsp_url=ocsp_url,
+        uri_san=uri_san,
     )
     _emit_warnings(pending_warnings)
     return cert.public_bytes(serialization.Encoding.PEM)
@@ -686,6 +706,7 @@ def _client_certificate(
     not_before: datetime,
     not_after: datetime,
     ocsp_url: str | None,
+    uri_san: str | None,
 ) -> x509.Certificate:
     """Build and sign the client leaf profile shared by generated and CSR-issued certificates."""
     subject = x509.Name(
@@ -727,6 +748,10 @@ def _client_certificate(
             critical=False,
         )
     )
+    if uri_san is not None:
+        builder = builder.add_extension(
+            x509.SubjectAlternativeName([x509.UniformResourceIdentifier(uri_san)]), critical=False
+        )
     return _with_ocsp_url(builder, ocsp_url).sign(ca_key, hashes.SHA256())
 
 
@@ -743,6 +768,14 @@ def _cn_dns_id(common_name: str) -> str | None:
         return normalize_dns_name(text)
     except ValueError:
         return text if _CN_DNS_ID.fullmatch(text) else None
+
+
+def _uri_host_within(host: str, root: str) -> bool:
+    """Match like OpenSSL's URI constraint: ``.example.home`` covers hosts under it, ``example.home`` only itself."""
+    root = root.lower()
+    if root.startswith("."):
+        return host.endswith(root)
+    return host == root
 
 
 def _dns_within(host: str, root: str) -> bool:
@@ -948,7 +981,9 @@ def _name_type_unconstrained(ca_cert: x509.Certificate, san: str) -> bool:
     return not any(isinstance(g, x509.DNSName) for g in permitted)
 
 
-def _enforce_name_constraints(ca_cert: x509.Certificate, *, common_name: str, sans: list[str]) -> None:
+def _enforce_name_constraints(
+    ca_cert: x509.Certificate, *, common_name: str, sans: list[str], uris: list[str] | None = None
+) -> None:
     """Refuse leaves the CA's Name Constraints would make relying parties reject."""
     try:
         constraints = ca_cert.extensions.get_extension_for_class(x509.NameConstraints).value
@@ -1004,6 +1039,23 @@ def _enforce_name_constraints(ca_cert: x509.Certificate, *, common_name: str, sa
         if any(_address_in(address, network, unmap=True) for network in excluded_networks):
             excluded_text = [str(n) for n in excluded_networks]
             raise TinyPkiError(f"Expected IP address outside the CA's excluded networks {excluded_text}, got {address}")
+    permitted_hosts = [str(g.value) for g in permitted if isinstance(g, x509.UniformResourceIdentifier)]
+    excluded_hosts = [str(g.value) for g in excluded if isinstance(g, x509.UniformResourceIdentifier)]
+    for uri in uris or []:
+        host = (urlsplit(uri).hostname or "").lower()
+        if strict and not permitted_hosts:
+            raise TinyPkiError(
+                f"Expected no URI SANs from a CA without a permitted URI subtree, got {uri!r}"
+                " (recreate the CA with --permit-uri HOST)"
+            )
+        if permitted_hosts and not any(_uri_host_within(host, root) for root in permitted_hosts):
+            raise TinyPkiError(
+                f"Expected a URI whose host is within the CA's permitted URI hosts {permitted_hosts}, got {uri!r}"
+            )
+        if any(_uri_host_within(host, root) for root in excluded_hosts):
+            raise TinyPkiError(
+                f"Expected a URI whose host is outside the CA's excluded URI hosts {excluded_hosts}, got {uri!r}"
+            )
 
 
 def _leaf_organization(ca_cert: x509.Certificate, organization_name: str | None) -> str:
@@ -1070,6 +1122,8 @@ def _permitted_subtree(entry: str) -> x509.GeneralName:
     text = entry.strip()
     if not text:
         raise TinyPkiError("Expected a non-empty permitted subtree")
+    if text.lower().startswith(URI_SUBTREE_PREFIX):
+        return _permitted_uri_subtree(text[len(URI_SUBTREE_PREFIX) :], entry)
     if "://" in text:
         raise TinyPkiError(f"Expected a DNS suffix or IP network, not a URL, got {entry!r}")
     try:
@@ -1087,6 +1141,20 @@ def _permitted_subtree(entry: str) -> x509.GeneralName:
             "every name under it (and the name itself); subdomain-only constraints are not supported"
         )
     return x509.DNSName(normalize_dns_name(text))
+
+
+def _permitted_uri_subtree(host: str, entry: str) -> x509.UniformResourceIdentifier:
+    """A URI subtree: ``HOST`` permits URIs with exactly that host, ``.HOST`` any host under it (RFC 5280)."""
+    text = host.strip()
+    subdomains_only = text.startswith(".")
+    try:
+        name = normalize_dns_name(text.removeprefix("."))
+    except ValueError as exc:
+        raise TinyPkiError(
+            f"Expected {URI_SUBTREE_PREFIX}HOST or {URI_SUBTREE_PREFIX}.HOST with a DNS host (e.g. "
+            f"{URI_SUBTREE_PREFIX}example.home), got {entry!r}"
+        ) from exc
+    return x509.UniformResourceIdentifier(f".{name}" if subdomains_only else name)
 
 
 def _require_validity_days(validity_days: int) -> None:
@@ -1179,6 +1247,9 @@ def _server_sans(
 def _subtree_within(subtree: x509.GeneralName, root: x509.GeneralName) -> bool:
     if isinstance(subtree, x509.DNSName) and isinstance(root, x509.DNSName):
         return _dns_within(subtree.value, root.value)
+    if isinstance(subtree, x509.UniformResourceIdentifier) and isinstance(root, x509.UniformResourceIdentifier):
+        inner, outer = subtree.value.lower(), root.value.lower()
+        return inner == outer or (outer.startswith(".") and inner.endswith(outer))
     if isinstance(subtree, x509.IPAddress) and isinstance(root, x509.IPAddress):
         inner, outer = subtree.value, root.value
         if isinstance(inner, ipaddress.IPv4Network) and isinstance(outer, ipaddress.IPv4Network):

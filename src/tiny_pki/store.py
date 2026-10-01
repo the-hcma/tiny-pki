@@ -81,7 +81,12 @@ from tiny_pki.constants import (
     KeyType,
 )
 from tiny_pki.errors import TinyPkiError
-from tiny_pki.inspect import get_certificate_expiry, get_certificate_fingerprint, get_certificate_serial_number
+from tiny_pki.inspect import (
+    get_certificate_expiry,
+    get_certificate_fingerprint,
+    get_certificate_serial_number,
+    get_certificate_uris,
+)
 from tiny_pki.issue import (
     generate_client_certificate,
     generate_intermediate_ca_certificate,
@@ -121,6 +126,7 @@ class IssuedCertificate:
     not_valid_after: str
     fingerprint: str
     revoked_at: str | None = None
+    uri_san: str | None = None
 
 
 def _locked[**P, R](
@@ -246,6 +252,7 @@ class CertificateStore:
         fingerprint: str,
         keep_previous: bool = False,
         key_secret: str | None = None,
+        uri_san: str | None = None,
     ) -> IssuedCertificate:
         """Write cert/key PEMs and append an index entry.
 
@@ -265,6 +272,8 @@ class CertificateStore:
         no key (the key belongs in the intermediate's own store), a renewal never
         revokes the previous certificate (its leaves still chain to it; revoke it
         by serial once they are replaced), and its CN cannot be shared with a leaf.
+
+        ``uri_san`` is recorded as the entry's URI SAN; it is not read from ``cert_pem``.
         """
         self.ensure_layout()
         if kind not in _CERT_DIRS:
@@ -309,6 +318,7 @@ class CertificateStore:
             key_path=key_rel,
             not_valid_after=not_valid_after.astimezone(UTC).isoformat(),
             fingerprint=fingerprint,
+            uri_san=uri_san,
         )
         # Replace a prior live entry for the same CN: revoke it (tombstone for CRL)
         # and unlink its on-disk material after the index is committed. Same serial
@@ -331,18 +341,7 @@ class CertificateStore:
                     unlink_paths.append(existing.cert_path)
                 if existing.key_path:
                     unlink_paths.append(existing.key_path)
-                entries.append(
-                    IssuedCertificate(
-                        common_name=existing.common_name,
-                        kind=existing.kind,
-                        serial_number=existing.serial_number,
-                        cert_path="",
-                        key_path="",
-                        not_valid_after=existing.not_valid_after,
-                        fingerprint=existing.fingerprint,
-                        revoked_at=when,
-                    )
-                )
+                entries.append(replace(existing, cert_path="", key_path="", revoked_at=when))
             else:
                 entries.append(existing)
         entries.append(entry)
@@ -376,15 +375,8 @@ class CertificateStore:
             )
         self._require_ca_signing_key(key_secret)
 
-        tombstone = IssuedCertificate(
-            common_name=entry.common_name,
-            kind=entry.kind,
-            serial_number=entry.serial_number,
-            cert_path="",
-            key_path="",
-            not_valid_after=entry.not_valid_after,
-            fingerprint=entry.fingerprint,
-            revoked_at=entry.revoked_at or datetime.now(UTC).isoformat(),
+        tombstone = replace(
+            entry, cert_path="", key_path="", revoked_at=entry.revoked_at or datetime.now(UTC).isoformat()
         )
         remaining = [
             tombstone if (e.common_name == entry.common_name and e.serial_number == entry.serial_number) else e
@@ -575,16 +567,7 @@ class CertificateStore:
                     found = entry
                     updated.append(entry)
                 else:
-                    found = IssuedCertificate(
-                        common_name=entry.common_name,
-                        kind=entry.kind,
-                        serial_number=entry.serial_number,
-                        cert_path=entry.cert_path,
-                        key_path=entry.key_path,
-                        not_valid_after=entry.not_valid_after,
-                        fingerprint=entry.fingerprint,
-                        revoked_at=when.isoformat(),
-                    )
+                    found = replace(entry, revoked_at=when.isoformat())
                     updated.append(found)
             else:
                 updated.append(entry)
@@ -737,12 +720,14 @@ class CertificateStore:
         allow_dn_special_chars: bool = False,
         keep_previous: bool = False,
         key_secret: str | None = None,
+        uri_san: str | None = None,
     ) -> IssuedCertificate:
         """Issue and record a client certificate, as ``tiny-pki create client``.
 
         Arguments match :func:`tiny_pki.generate_client_certificate`. A live
         certificate with the same CN is revoked and ``ca/crl.pem`` republished,
-        unless ``keep_previous=True`` (see :meth:`add_certificate`).
+        unless ``keep_previous=True`` (see :meth:`add_certificate`). The entry
+        records ``uri_san``.
         """
         ca_material = self._require_ca_signing_key(key_secret)
         if ca_material is None:
@@ -759,6 +744,7 @@ class CertificateStore:
             allow_long_validity=allow_long_validity,
             allow_dn_special_chars=allow_dn_special_chars,
             ocsp_url=self.ocsp_url,
+            uri_san=uri_san,
         )
         return self._record(
             common_name, "client", cert_pem, key_pem, keep_previous=keep_previous, key_secret=key_secret
@@ -816,6 +802,7 @@ class CertificateStore:
         allow_dn_special_chars: bool = False,
         keep_previous: bool = False,
         key_secret: str | None = None,
+        uri_san: str | None = None,
     ) -> IssuedCertificate:
         """Sign a device's CSR as a client certificate and record it, as ``tiny-pki sign client``.
 
@@ -837,6 +824,7 @@ class CertificateStore:
             allow_long_validity=allow_long_validity,
             allow_dn_special_chars=allow_dn_special_chars,
             ocsp_url=self.ocsp_url,
+            uri_san=uri_san,
         )
         return self._record(common_name, "client", cert_pem, None, keep_previous=keep_previous, key_secret=key_secret)
 
@@ -1305,6 +1293,7 @@ class CertificateStore:
             fingerprint=get_certificate_fingerprint(cert_pem),
             keep_previous=keep_previous,
             key_secret=key_secret,
+            uri_san=next(iter(get_certificate_uris(cert_pem)), None),
         )
 
     def _require_ca_signing_key(self, key_secret: str | None) -> tuple[bytes, bytes] | None:
@@ -1484,16 +1473,7 @@ class CertificateStore:
                         dest_key.parent.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
                         if not dest_key.exists():
                             shutil.move(str(old_key), str(dest_key))
-                    entry = IssuedCertificate(
-                        common_name=entry.common_name,
-                        kind=entry.kind,
-                        serial_number=entry.serial_number,
-                        cert_path=new_cert if cert_rel else "",
-                        key_path=new_key if key_rel else "",
-                        not_valid_after=entry.not_valid_after,
-                        fingerprint=entry.fingerprint,
-                        revoked_at=entry.revoked_at,
-                    )
+                    entry = replace(entry, cert_path=new_cert if cert_rel else "", key_path=new_key if key_rel else "")
                 self._check_index_paths(entry)
                 migrated.append(entry)
             self._write_index(migrated)
@@ -1617,7 +1597,7 @@ class CertificateStore:
 
     def _write_index(self, entries: list[IssuedCertificate]) -> None:
         self.ca_dir.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
-        payload = [asdict(e) for e in entries]
+        payload = [{k: v for k, v in asdict(e).items() if k != "uri_san" or v is not None} for e in entries]
         _write_secret(
             self._validated_write_path("ca/index.json"),
             (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8"),
@@ -1791,6 +1771,7 @@ def _entry_from_dict(item: Any) -> IssuedCertificate:
         raise ValueError(f"Expected kind 'client', 'intermediate' or 'server', got {kind!r}")
     typed_kind = cast(CertKind, kind)
     revoked_raw = data.get("revoked_at")
+    uri_raw = data.get("uri_san")
     return IssuedCertificate(
         common_name=str(data["common_name"]),
         kind=typed_kind,
@@ -1800,6 +1781,7 @@ def _entry_from_dict(item: Any) -> IssuedCertificate:
         not_valid_after=str(data["not_valid_after"]),
         fingerprint=str(data["fingerprint"]),
         revoked_at=None if revoked_raw is None else str(revoked_raw),
+        uri_san=None if uri_raw is None else str(uri_raw),
     )
 
 

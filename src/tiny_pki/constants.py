@@ -42,6 +42,9 @@ MAX_VALIDITY_DAYS = 36500
 
 MIN_PKCS12_PASSWORD_LENGTH = 16
 
+# A permitted_subtrees entry with this prefix is a URI Name Constraint on the host ("uri:example.home").
+URI_SUBTREE_PREFIX = "uri:"
+
 VALIDITY_PRESETS: list[tuple[int, str]] = [
     (90, "90 days"),
     (180, "180 days"),

@@ -74,6 +74,7 @@ A JSON list; each entry:
 | `cert_path`, `key_path` | `clients/<file>`, `servers/<file>` or `intermediates/<file>` (`.crt` / `.key`) matching `kind`, relative to the store root; empty for tombstones. `key_path` is empty for a certificate issued by `sign` from a CSR, whose key stays on the device or server, and always empty for an intermediate. Anything else is refused on read |
 | `not_valid_after` | ISO-8601 UTC |
 | `fingerprint` | SHA-256, colon-separated hex |
+| `uri_san` | the client certificate's URI SAN; omitted when it has none |
 | `revoked_at` | ISO-8601 UTC, or `null` while active |
 
 Lifecycle:
@@ -90,7 +91,7 @@ Paths in the index are validated to stay under the store root; a tampered index 
 
 ## `list --json`
 
-`list clients|servers|intermediates|revoked|certs --json` prints one object per entry with `cn`, `kind`, `serial`, `fingerprint`, `expires`, `status`, `revoked_at`, absolute `cert_path` / `key_path` (empty for tombstones), `store`, and `superseded_by` (the newer live serial for the same CN after `--keep-previous`, else `null`). `list --json` prints a summary (`ca_cn`, the `clients` / `servers` / `intermediates` / `revoked` counts, `store`); `list ca --json` prints the CA's `cn`, `fingerprint`, `expires`, `chain` (the CNs above an intermediate CA, issuer first; empty for a root) and `chain_path` (`null` for a root), absolute `cert_path` / `crl_path` / `index_path`, `crl_days` (the stored CRL lifetime), `ocsp_days` (the stapling response lifetime, `null` while `ocsp` publishing is off), `ocsp_dir`, and `ocsp_url` (`null` until set).
+`list clients|servers|intermediates|revoked|certs --json` prints one object per entry with `cn`, `kind`, `serial`, `fingerprint`, `expires`, `status`, `revoked_at`, `uri_san` (`null` without one), absolute `cert_path` / `key_path` (empty for tombstones), `store`, and `superseded_by` (the newer live serial for the same CN after `--keep-previous`, else `null`). `list --json` prints a summary (`ca_cn`, the `clients` / `servers` / `intermediates` / `revoked` counts, `store`); `list ca --json` prints the CA's `cn`, `fingerprint`, `expires`, `chain` (the CNs above an intermediate CA, issuer first; empty for a root) and `chain_path` (`null` for a root), absolute `cert_path` / `crl_path` / `index_path`, `crl_days` (the stored CRL lifetime), `ocsp_days` (the stapling response lifetime, `null` while `ocsp` publishing is off), `ocsp_dir`, and `ocsp_url` (`null` until set).
 
 ## Legacy flat layout
 
@@ -137,7 +138,7 @@ rows = check_store(store, within=None, include_revoked=False)  # check (store)
 | Method | CLI | Notes |
 | --- | --- | --- |
 | `issue_client(cn, ...)` / `issue_server(cn, sans, ...)` | `create` | Keyword arguments match `generate_client_certificate` / `generate_server_certificate`; `TinyPkiWarning`s propagate. A live certificate with the same CN is revoked and listed in the republished CRL. |
-| `sign_client_csr(cn, csr_pem, ...)` | `sign client` | Keyword arguments match `sign_client_csr`, plus `keep_previous`. The entry has no `key_path`; replacement and CRL republishing work as for `issue_client`. |
+| `sign_client_csr(cn, csr_pem, ...)` | `sign client` | Keyword arguments match `sign_client_csr` (including `uri_san`), plus `keep_previous`. The entry has no `key_path`; replacement and CRL republishing work as for `issue_client`. |
 | `sign_server_csr(cn, csr_pem, sans, ...)` | `sign server` | Keyword arguments match `sign_server_csr`. The entry has no `key_path`; replacement and CRL republishing work as for `issue_server`. |
 | `revoke(identity)` | `revoke` | Same as `mark_revoked`. |
 | `delete(identity, force=False)` | `delete` | Same as `delete_certificate`. |

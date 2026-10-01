@@ -44,6 +44,7 @@ from tiny_pki import (
     get_certificate_sans,
     get_certificate_serial_number,
     get_certificate_subject,
+    get_certificate_uris,
     inspect_csr,
 )
 from tiny_pki._csr import is_csr_data, load_csr, requested_sans
@@ -51,6 +52,7 @@ from tiny_pki._fsutil import write_file_atomic
 from tiny_pki.check import CertificateStatus, Status, check_certificate, check_crl, worst_status
 from tiny_pki.cli.commands import COMMAND_FLAGS
 from tiny_pki.cli.theme import Theme
+from tiny_pki.constants import URI_SUBTREE_PREFIX
 from tiny_pki.names import common_name_as_san, normalize_san_entries, normalize_san_entry
 from tiny_pki.store import CHECK_KINDS, CertificateStore, CheckKind, IssuedCertificate, check_store
 
@@ -219,7 +221,7 @@ def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) 
         validity_days=days,
         key_size=key_size,
         key_type=key_type,
-        permitted_subtrees=opts["multi"].get("permit"),
+        permitted_subtrees=_permitted_subtrees(opts),
         path_length=path_length,
     )
     store.write_ca(cert_pem, key_pem, key_secret=key_secret)
@@ -230,6 +232,14 @@ def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) 
         print(theme.dim("it may sign intermediate CAs: init --intermediate-of or sign intermediate"))
     if encrypted_key and "key-secret-file" in opts["flags"]:
         _offer_to_remove_key_secret_file(Path(opts["flags"]["key-secret-file"]), theme)
+
+
+def _permitted_subtrees(opts: _ParsedFlags) -> list[str] | None:
+    subtrees = [
+        *opts["multi"].get("permit", []),
+        *(URI_SUBTREE_PREFIX + h for h in opts["multi"].get("permit-uri", [])),
+    ]
+    return subtrees or None
 
 
 def _init_intermediate(
@@ -254,7 +264,7 @@ def _init_intermediate(
         validity_days=days,
         key_size=key_size,
         key_type=key_type,
-        permitted_subtrees=opts["multi"].get("permit"),
+        permitted_subtrees=_permitted_subtrees(opts),
         key_secret=key_secret,
         issuer_key_secret=issuer_key_secret,
         crl_validity_days=crl_days,
@@ -345,8 +355,8 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
         raise ValueError("Unexpected extra arguments")
     if kind == "client" and (opts["multi"].get("san") or {"no-cn-san", "yes"} & opts["flags"].keys()):
         raise ValueError("--san / --no-cn-san / --yes are only supported for server certificates")
-    if kind == "server" and "keep-previous" in opts["flags"]:
-        raise ValueError("--keep-previous is only supported for client certificates")
+    if kind == "server" and {"keep-previous", "uri-san"} & opts["flags"].keys():
+        raise ValueError("--keep-previous / --uri-san are only supported for client certificates")
     if "no-cn-san" in opts["flags"] and not opts["multi"].get("san"):
         raise ValueError("Expected --san with --no-cn-san; without --san the CN is the only SAN")
     key_secret = _key_secret(opts["flags"], store=store, theme=theme)
@@ -370,6 +380,7 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
                 allow_dn_special_chars=allow_dn_special_chars,
                 keep_previous="keep-previous" in opts["flags"],
                 key_secret=key_secret,
+                uri_san=opts["flags"].get("uri-san"),
             )
         else:
             sans = [s for s in opts["multi"].get("san", []) if s] or [name]
@@ -411,8 +422,10 @@ def _cmd_sign(args: list[str], *, store: CertificateStore | None, theme: Theme) 
             "--san / --accept-csr-sans / --no-cn-san / --yes / --keep-previous / --allow-long-validity / "
             "--allow-dn-special-chars do not apply to intermediate CAs"
         )
-    if kind != "intermediate" and opts["multi"].get("permit"):
-        raise ValueError("--permit is only supported for intermediate CAs")
+    if kind != "intermediate" and (opts["multi"].get("permit") or opts["multi"].get("permit-uri")):
+        raise ValueError("--permit / --permit-uri are only supported for intermediate CAs")
+    if kind != "client" and "uri-san" in flags:
+        raise ValueError("--uri-san is only supported for client certificates")
     if kind == "client" and (opts["multi"].get("san") or server_only):
         raise ValueError("--san / --accept-csr-sans / --no-cn-san / --yes are only supported for server certificates")
     if kind == "server" and "keep-previous" in flags:
@@ -452,6 +465,7 @@ def _cmd_sign(args: list[str], *, store: CertificateStore | None, theme: Theme) 
                 allow_dn_special_chars=allow_dn_special_chars,
                 keep_previous="keep-previous" in flags,
                 key_secret=key_secret,
+                uri_san=flags.get("uri-san"),
             )
         elif kind == "intermediate":
             entry = store.sign_intermediate_csr(
@@ -459,7 +473,7 @@ def _cmd_sign(args: list[str], *, store: CertificateStore | None, theme: Theme) 
                 csr_pem,
                 organization_name=org,
                 validity_days=days,
-                permitted_subtrees=opts["multi"].get("permit"),
+                permitted_subtrees=_permitted_subtrees(opts),
                 key_secret=key_secret,
             )
         else:
@@ -671,6 +685,7 @@ def _print_entry_list(
                 "fingerprint": e.fingerprint,
                 "expires": e.not_valid_after,
                 "status": "revoked" if e.revoked_at else "active",
+                "uri_san": e.uri_san,
                 "revoked_at": e.revoked_at,
                 "cert_path": str(store.root / e.cert_path) if e.cert_path else "",
                 "key_path": str(store.root / e.key_path) if e.key_path else "",
@@ -688,9 +703,10 @@ def _print_entry_list(
         status = "revoked" if entry.revoked_at else "active"
         color = theme.error if entry.revoked_at else theme.ok
         note = f"  superseded by {newer}" if newer else ""
+        uri = f"  uri={entry.uri_san}" if entry.uri_san else ""
         print(
             f"{color(status)}  {entry.kind:6}  {entry.common_name}  "
-            f"serial={entry.serial_number}  expires={entry.not_valid_after}{theme.warn(note) if note else ''}"
+            f"serial={entry.serial_number}  expires={entry.not_valid_after}{uri}{theme.warn(note) if note else ''}"
         )
 
 
@@ -1136,6 +1152,9 @@ def _print_cert_summary(
     sans = get_certificate_sans(cert_pem)
     if sans:
         print(f"sans      {', '.join(sans)}")
+    uris = get_certificate_uris(cert_pem)
+    if uris:
+        print(f"uris      {', '.join(uris)}")
 
 
 def _print_csr_summary(summary: CsrSummary, theme: Theme) -> None:

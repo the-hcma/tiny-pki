@@ -57,6 +57,7 @@ By default the CA signs leaves only. `--path-length 1` creates a root that may a
 | `--key-type rsa\|ec-p256` | Key algorithm (default `rsa`). See [security.md](security.md#key-types-sizes-and-validity). |
 | `--key-size 2048\|3072\|4096` | RSA key size (default 4096). Refused with `--key-type ec-p256`. |
 | `--permit NAME` | Add a Name Constraint: a DNS suffix (`home` covers `home` and every name under it) or an IP network (`192.168.0.0/16`). Repeat it for each; constrain both DNS and IP (see [security.md](security.md#limit-what-the-ca-can-vouch-for)). Constraints cannot be changed later. For an intermediate, each must lie within the issuer's. |
+| `--permit-uri HOST` | Add a URI Name Constraint, so the CA may issue client certificates with a `--uri-san`. `example.home` permits URIs whose host is exactly `example.home`; `.example.home` permits any host under it. Repeat it for each. Once a CA has any `--permit`, a URI SAN needs a matching `--permit-uri`. |
 | `--crl-days N` | CRL lifetime in days, 1–365 (default 30), saved in the store and used by every later publish. |
 | `--encrypt-key` | Encrypt `ca/ca.key` at rest when creating the CA; the secret is read from `--key-secret-file`, a configured credential file, or an interactive prompt. |
 | `--key-secret-file PATH` | Read the high-entropy CA-key secret from the first line of this file; use only with `--encrypt-key` for `init`. |
@@ -64,6 +65,7 @@ By default the CA signs leaves only. `--path-length 1` creates a root that may a
 ```bash
 tiny-pki --store ./stores/ca init --cn "Home CA" --permit home --permit 192.168.0.0/16
 tiny-pki --store ./stores/root init --cn "Home Root" --path-length 1 --permit home --encrypt-key
+tiny-pki --store ./stores/mqtt init --cn "MQTT CA" --permit home --permit-uri example.home
 tiny-pki --store ./stores/issuing init --intermediate-of ./stores/root --cn "Home Issuing"
 ```
 
@@ -85,6 +87,7 @@ Issues a client certificate (`CLIENT_AUTH`, identified by its CN) or a server ce
 | `--org NAME` | Organization (O); defaults to the CA's. |
 | `--allow-dn-special-chars` | Allow `,` `+` `=` `"` `<` `>` `;` or a leading `#` in the name. They are refused by default because `bob,CN=alice` would end in `,CN=alice` in the DN string nginx and Mosquitto match. |
 | `--keep-previous` | Clients only: keep the previous certificate live, for [rotation](#rotating-a-client-certificate). |
+| `--uri-san URI` | Clients only: add one URI SAN (see [client URI SANs](#client-uri-sans)). |
 | `--san NAME` | Servers only: a DNS name or IP address. Repeat it for each; without it the CN is the only SAN. |
 | `--yes` | Servers only: add a host-like CN that is missing from `--san` without asking. |
 | `--no-cn-san` | Servers only: never add the CN to the SANs (needs `--san`). |
@@ -94,6 +97,7 @@ TLS clients ignore the CN, so when a server's CN is a host name or IP address mi
 ```bash
 tiny-pki --store ./stores/ca create client alice --days 730
 tiny-pki --store ./stores/ca create client phone --key-type ec-p256
+tiny-pki --store ./stores/ca create client sensor-1 --uri-san spiffe://example.home/device/sensor-1
 tiny-pki --store ./stores/ca create server api.home --san api.home --san 192.168.1.10
 ```
 
@@ -117,7 +121,9 @@ A server certificate's SANs come from `--san` and the CN, exactly as for `create
 | `--org NAME` | Organization (O); defaults to the CA's. |
 | `--allow-dn-special-chars` | Leaves only: allow `,` `+` `=` `"` `<` `>` `;` or a leading `#` in the name, as for `create`. |
 | `--permit NAME` | Intermediates only: narrow the name constraints to this DNS suffix or IP network, within the store CA's. Repeat it for each. |
+| `--permit-uri HOST` | Intermediates only: narrow the URI name constraints to this host (`.example.home` for hosts under it), within the store CA's. Repeat it for each. |
 | `--keep-previous` | Clients only: keep the previous certificate live, for [rotation](#rotating-a-client-certificate). |
+| `--uri-san URI` | Clients only: add one URI SAN (see [client URI SANs](#client-uri-sans)). The CSR's own SANs are still ignored. |
 | `--san NAME` | Servers only: a DNS name or IP address. Repeat it for each; without it the CN is the only SAN. |
 | `--accept-csr-sans` | Servers only: also include the SANs the CSR requests, without asking. |
 | `--yes` | Servers only: add a host-like CN that is missing from `--san` without asking. |
@@ -131,6 +137,14 @@ tiny-pki --store ./stores/ca sign client alice-laptop --csr laptop.csr --out ali
 tiny-pki --store ./stores/ca sign server api.home --csr api.csr --san api.home --san 192.168.1.10 --out api.crt
 tiny-pki --store ./stores/root sign intermediate "OpenBao Issuing" --csr bao.csr --permit svc.home --out bao.crt
 ```
+
+#### Client URI SANs
+
+`--uri-san URI` gives a client certificate one URI SAN next to its CN, for brokers and services that identify clients by URI, such as SPIFFE IDs or amqtt's `UserAuthCertPlugin`, which reads the username from the URI SAN. The URI must be absolute, with a scheme and a host, and must not contain user info (`user@`), a query, a fragment, whitespace or non-ASCII characters. For `spiffe://` URIs the trust domain is lower-case letters, digits, `.`, `-` and `_` with no port, and every path segment is letters, digits, `.`, `-` or `_` (not `.` or `..`). The scheme is lower-cased; nothing else is changed. A CA with name constraints needs a matching `--permit-uri` at `init`.
+
+The URI is recorded in `index.json` as `uri_san`, shown by `list` (and `list --json`) and printed by `inspect`. A `--keep-previous` rotation keeps the previous certificate's URI on its entry; give the new certificate the same `--uri-san` so the broker maps it to the same identity.
+
+amqtt's `UserAuthCertPlugin` (`amqtt.contrib.cert`) accepts a client whose first URI SAN is `spiffe://<uri_domain>/device/<id>` and whose MQTT `client_id` is `<id>`. To check a certificate by hand, run a TLS listener with `cafile` set to the store's `public/ca.crt`, `client_cert: required` and the plugin's `uri_domain: example.home`, then connect with `client_id` `sensor-1` and the certificate from `create client sensor-1 --uri-san spiffe://example.home/device/sensor-1`. The connection is accepted; a different `client_id` is refused.
 
 ### list
 
