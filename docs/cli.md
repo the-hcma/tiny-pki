@@ -58,7 +58,7 @@ By default the CA signs leaves only. `--path-length 1` creates a root that may a
 | `--key-size 2048\|3072\|4096` | RSA key size (default 4096). Refused with `--key-type ec-p256`. |
 | `--permit NAME` | Add a Name Constraint: a DNS suffix (`home` covers `home` and every name under it) or an IP network (`192.168.0.0/16`). Repeat it for each; constrain both DNS and IP (see [security.md](security.md#limit-what-the-ca-can-vouch-for)). Constraints cannot be changed later. For an intermediate, each must lie within the issuer's. |
 | `--permit-uri HOST` | Add a URI Name Constraint, so the CA may issue client certificates with a `--uri-san`. `example.home` permits URIs whose host is exactly `example.home`; `.example.home` permits any host under it. Repeat it for each. Once a CA has any `--permit`, a URI SAN needs a matching `--permit-uri`. |
-| `--crl-days N` | CRL lifetime in days, 1–365 (default 30), saved in the store and used by every later publish. |
+| `--crl-days N` | CRL lifetime in days, 1–365 (default 7), saved in the store and used by every later publish. |
 | `--encrypt-key` | Encrypt `ca/ca.key` at rest when creating the CA; the secret is read from `--key-secret-file`, a configured credential file, or an interactive prompt. |
 | `--key-secret-file PATH` | Read the high-entropy CA-key secret from the first line of this file; use only with `--encrypt-key` for `init`. |
 
@@ -259,6 +259,8 @@ Removes a revoked certificate's files. The index keeps a tombstone with the seri
 
 ```text
 tiny-pki --store DIR crl [--days N] [--chain-crl PATH] [--key-secret-file PATH]
+tiny-pki --store DIR crl hook [COMMAND | --clear]
+tiny-pki --store DIR crl url [URL | --clear]
 ```
 
 Signs a fresh CRL from the index and writes it to `ca/crl.pem` and `public/crl.pem` (which, for an intermediate CA, also holds the CRLs of the CAs above it). `renew-crl` is an alias. Run it on a timer well inside the CRL lifetime: once the CRL expires, nginx rejects every client (see [renewing the CRL on a timer](#renewing-the-crl-on-a-timer)).
@@ -266,10 +268,24 @@ Signs a fresh CRL from the index and writes it to `ca/crl.pem` and `public/crl.p
 | Flag | Meaning |
 | --- | --- |
 | `--days N` | Change the stored CRL lifetime (1–365 days) and use it for this and every later publish. |
+| `--clear` | With `hook` or `url`: remove the setting. |
 | `--chain-crl PATH` | Intermediate CA only: first import the new CRL(s) of the CAs above it (PEM or DER; the issuer store's `public/crl.pem` works). Each must be signed by a CA in the chain and may not be older than the one it replaces. |
 | `--key-secret-file PATH` | Read the CA-key secret from the first line of a file when the CA key is encrypted. |
 
 Once `ocsp` has published stapling responses, `crl` refreshes them too.
+
+`crl hook COMMAND` saves a command the CLI runs after any command that changed `public/crl.pem` or the stapled OCSP responses: `crl` itself, `revoke`, `create`, `sign`, `delete` and `ocsp`. Use it to reload the TLS servers that read the CRL, so revocation takes effect at once rather than at the next timer run. Give the command as one quoted argument. It is split like a shell would split it but run without a shell (use `sh -c '...'` for pipes or `&&`), in the store root, with `TINY_PKI_STORE`, `TINY_PKI_CRL` (the path of `public/crl.pem`) and `TINY_PKI_OCSP_DIR` added to its environment, and a limit of 120 seconds. If it fails, the command that published still took effect; the CLI prints an error and exits 1 so a timer notices. `crl hook` alone prints the saved command, and `crl hook --clear` removes it. The command is saved in plain text in `ca/publishhook`, so keep tokens and passwords out of it: read them from a file or the environment inside the script it runs. The CLI does not echo the command when it runs the hook or when it fails.
+
+`crl url URL` writes a CRL Distribution Points extension with that `http://` or `https://` URL into every certificate issued afterwards, for clients and servers that fetch the CRL themselves. An HTTP CRL Distribution Points URL must serve one DER-encoded CRL, but tiny-pki writes PEM, so serve a DER copy of `ca/crl.pem` (this CA's own CRL; for an intermediate, `public/crl.pem` also holds its issuers' CRLs, which belong at their own URLs) and refresh it after every publish, for example from `crl hook`. Certificates already issued keep what they were issued with. `crl url` alone prints the URL, and `crl url --clear` stops adding the extension.
+
+```bash
+tiny-pki --store /srv/pki/home-ca crl hook 'systemctl reload nginx'
+tiny-pki --store /srv/pki/home-ca crl hook "sh -c 'cp \"\$TINY_PKI_CRL\" /etc/mosquitto/pki/crl.pem && systemctl reload mosquitto'"
+tiny-pki --store /srv/pki/home-ca crl url http://pki.home/ca.crl
+tiny-pki --store /srv/pki/home-ca crl hook "sh -c 'openssl crl -in ca/crl.pem -outform DER -out /var/www/pki/ca.crl'"
+```
+
+tiny-pki does not publish delta CRLs: OpenSSL-based servers such as nginx and Mosquitto would silently ignore them (see [security.md](security.md#revocation-only-works-if-the-crl-is-fresh)).
 
 ### ocsp
 
@@ -353,6 +369,7 @@ Flags expired, expiring, not-yet-valid, revoked and untrusted certificates and C
 | `--ca PATH` | Files only: flag certificates and CRLs not issued by this CA. |
 | `--crl PATH` | Files only (needs `--ca`): report certificates listed in this CRL as revoked. |
 | `--password-file PATH` | Files only: password for PKCS#12 bundles. |
+| `--crl-renewal DURATION` | How often a timer renews the CRL, in hours or days (`12h`, `1d`). A CRL that expires before the next renewal, or whose lifetime is under twice the interval (so one missed run lets it lapse), is reported as expiring. |
 
 ### completion
 
@@ -478,7 +495,7 @@ nginx reads the file at startup and reload, so reload it after each publish, as 
 
 ### Renewing the CRL on a timer
 
-nginx rejects every client once the CRL passes its `nextUpdate`, so publish a fresh one well inside the lifetime and reload the server. `/etc/systemd/system/tiny-pki-crl.service`:
+nginx rejects every client once the CRL passes its `nextUpdate` (7 days after each publish by default), so publish a fresh one daily and reload the server. With `crl hook 'systemctl reload nginx'` set, the publish runs the reload itself, and so does every `revoke`. `/etc/systemd/system/tiny-pki-crl.service`:
 
 ```ini
 [Unit]
@@ -487,24 +504,23 @@ Description=Publish a fresh tiny-pki CRL
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/tiny-pki --store /srv/pki/home-ca --color never crl
-ExecStartPost=/usr/bin/systemctl reload nginx
 ```
 
 `/etc/systemd/system/tiny-pki-crl.timer`:
 
 ```ini
 [Unit]
-Description=Weekly tiny-pki CRL publish
+Description=Daily tiny-pki CRL publish
 
 [Timer]
-OnCalendar=weekly
+OnCalendar=daily
 Persistent=true
 
 [Install]
 WantedBy=timers.target
 ```
 
-Enable it with `systemctl enable --now tiny-pki-crl.timer`. With [OCSP stapling](#stapling-ocsp-from-nginx) on, use `OnCalendar=daily`: the same run refreshes the stapled responses, which are valid for 7 days. Pair it with a `check` timer ([monitoring.md](monitoring.md#systemd-timer)), which reports the CRL as expiring if the publish stops working.
+Enable it with `systemctl enable --now tiny-pki-crl.timer`. Without a hook, add `ExecStartPost=/usr/bin/systemctl reload nginx` to the service. The same run refreshes [stapled OCSP responses](#stapling-ocsp-from-nginx), which are also valid for 7 days. Pair it with a `check --crl-renewal 1d` timer ([monitoring.md](monitoring.md#systemd-timer)), which reports the CRL as expiring if the publish stops working or if `crl --days` is set too short for a daily run. For a weekly timer, set `crl --days 30` (and `--crl-renewal 7d`).
 
 ### Running an intermediate CA
 

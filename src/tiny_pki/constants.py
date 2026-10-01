@@ -22,7 +22,7 @@ CLOCK_SKEW_BACKDATE = timedelta(minutes=5)
 DEFAULT_CA_KEY_SIZE = 4096
 DEFAULT_CA_VALIDITY_DAYS = 3650
 DEFAULT_CLIENT_VALIDITY_DAYS = 397
-DEFAULT_CRL_VALIDITY_DAYS = 30
+DEFAULT_CRL_VALIDITY_DAYS = 7
 DEFAULT_INTERMEDIATE_VALIDITY_DAYS = 1825
 DEFAULT_KEY_TYPE: KeyType = "rsa"
 DEFAULT_LEAF_KEY_SIZE = 3072
@@ -41,6 +41,9 @@ MAX_STORE_CRL_VALIDITY_DAYS = 365
 MAX_VALIDITY_DAYS = 36500
 
 MIN_PKCS12_PASSWORD_LENGTH = 16
+
+# How long CertificateStore.run_publish_hook waits for the reload command.
+PUBLISH_HOOK_TIMEOUT_SECONDS = 120
 
 # A permitted_subtrees entry with this prefix is a URI Name Constraint on the host ("uri:example.home").
 URI_SUBTREE_PREFIX = "uri:"

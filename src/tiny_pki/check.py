@@ -145,17 +145,25 @@ def check_crl(
     within: timedelta | None = None,
     by: datetime | None = None,
     ca_cert_pem: bytes | None = None,
+    renewal_interval: timedelta | None = None,
 ) -> CertificateStatus:
     """Check a CRL's freshness: ``EXPIRED`` once ``nextUpdate`` passes.
 
     With ``ca_cert_pem``, a CRL not signed by that CA is ``UNTRUSTED``. A CRL
     without ``nextUpdate`` never goes stale and is reported as ``OK``.
 
+    ``renewal_interval`` is how often a timer republishes the CRL. The CRL is
+    ``EXPIRING`` when it would expire before the next renewal, or when its
+    lifetime is under twice the interval, so a single missed renewal would let
+    it lapse.
+
     Raises:
-        TinyPkiError: On naive datetimes, a negative ``within``, or a
-            ``ca_cert_pem`` that is not a CA certificate.
+        TinyPkiError: On naive datetimes, a negative ``within``, a non-positive
+            ``renewal_interval``, or a ``ca_cert_pem`` that is not a CA certificate.
     """
     now = _require_aware(now or datetime.now(UTC), "now")
+    if renewal_interval is not None and renewal_interval <= timedelta(0):
+        raise TinyPkiError(f"Expected a positive renewal_interval, got {renewal_interval}")
     crl = x509.load_pem_x509_crl(crl_pem)
     reasons: list[tuple[Status, str]] = []
     if ca_cert_pem is not None:
@@ -171,6 +179,8 @@ def check_crl(
         window = default_warning_window("crl", not_after - not_before)
         cutoff = _cutoff(now, within=within, by=by, default=window)
         reasons.extend(_time_reasons(now, not_before, not_after, cutoff))
+        if renewal_interval is not None:
+            reasons.extend(_renewal_reasons(now, not_before, not_after, renewal_interval))
     try:
         crl_number: int | None = crl.extensions.get_extension_for_class(x509.CRLNumber).value.crl_number
     except x509.ExtensionNotFound:
@@ -305,6 +315,25 @@ def _result(
         status=status,
         reasons=tuple(message for _, message in reasons),
     )
+
+
+def _renewal_reasons(
+    now: datetime, not_before: datetime, not_after: datetime, interval: timedelta
+) -> list[tuple[Status, str]]:
+    reasons: list[tuple[Status, str]] = []
+    if now < not_after < now + interval:
+        reasons.append(
+            (Status.EXPIRING, f"expires on {not_after.isoformat()}, before the next renewal (every {interval})")
+        )
+    if not_after - not_before < 2 * interval:
+        reasons.append(
+            (
+                Status.EXPIRING,
+                f"lifetime {not_after - not_before} is under twice the renewal interval {interval}; "
+                "one missed renewal would let it lapse",
+            )
+        )
+    return reasons
 
 
 def _time_reasons(

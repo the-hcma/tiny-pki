@@ -49,7 +49,7 @@ def store(tmp_path: Path, capsys: CaptureFixture[str]) -> Path:
         (("delete", "bob", "--bogus"), "Unknown flag --bogus"),
         (("delete", "bob", "alice", "--force"), "Unexpected extra arguments: alice"),
         (("crl", "--bogus"), "Unknown flag --bogus"),
-        (("crl", "extra"), "crl takes no positional arguments"),
+        (("crl", "extra"), "Expected crl, crl hook or crl url"),
         (("list", "clients", "--bogus"), "Unknown flag --bogus"),
         (("list", "clients", "servers"), "Unexpected extra arguments: servers"),
         (("show", "crl", "--json"), "Unknown flag --json"),

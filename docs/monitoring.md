@@ -23,7 +23,7 @@ A result is `expiring` when it is valid now but its `notAfter` (or the CRL's `ne
 | `--within DAYS` | now + DAYS |
 | `--by YYYY-MM-DD` | the end of that day, local time |
 | both | whichever is earlier |
-| neither | now + a third of each certificate's own lifetime, capped at 30 days for leaves and 180 days for the CA; CRLs are not capped (10 days for the default 30-day CRL) |
+| neither | now + a third of each certificate's own lifetime, capped at 30 days for leaves and 180 days for the CA; CRLs are not capped (2 days 8 hours for the default 7-day CRL) |
 
 When a leaf is checked against its CA and the CA expires first, the CA's expiry is used, with the reason "CA expires first".
 
