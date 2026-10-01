@@ -181,19 +181,52 @@ For a CSR file, `inspect` prints the requested subject and SANs, the key type an
 
 ```text
 tiny-pki --store DIR export pem|p12 NAME [options]
+tiny-pki --store DIR export pem NAME [--out PATH | --cert-out PATH --key-out PATH] [--ca-out PATH]
 ```
 
-`pem` writes the certificate and private key to one file (default `NAME.pem` in the current directory). `p12` writes a password-protected PKCS#12 bundle with the certificate, key and CA (plus the chain above it, for an intermediate CA), for phones and browsers (default `bundles/NAME-SERIAL.p12` in the store). Files are written with mode `0600`, and a destination that is a symlink is refused.
+`pem` writes the certificate and private key to one file (default `NAME.pem` in the current directory), or to separate files with `--cert-out` and `--key-out`. `p12` writes a password-protected PKCS#12 bundle with the certificate, key and CA (plus the chain above it, for an intermediate CA), for phones and browsers (default `bundles/NAME-SERIAL.p12` in the store). Files holding a private key are written with mode `0600`, certificate-only files with `0644`, and a destination that is a symlink is refused.
 
-For a certificate issued by [`sign`](#sign), and for an intermediate CA, the store has no private key: `pem` writes the certificate alone (mode `0644`), and `p12` is refused.
+For a certificate issued by [`sign`](#sign), and for an intermediate CA, the store has no private key: `pem` writes the certificate alone (mode `0644`), `--key-out` is refused (`--cert-out` alone works), and `p12` is refused.
 
 | Flag | Meaning |
 | --- | --- |
 | `--out PATH` | Write to this file instead of the default. |
+| `--cert-out PATH` | `pem`: write the certificate (mode `0644`) to this file. Give it with `--key-out`, not with `--out`. |
+| `--key-out PATH` | `pem`: write the private key (mode `0600`) to this file. Give it with `--cert-out`, not with `--out`. |
+| `--ca-out PATH` | `pem`: also write the CA certificate (mode `0644`) to this file: the bytes of `public/ca.crt`, or of `public/ca-chain.pem` (the CA followed by the CAs above it) for an intermediate CA. Works with the combined and the split form. |
 | `--password-file PATH` | `p12`: read the password (at least 16 bytes) from the first line of this file instead of prompting. The CLI then offers to delete the file. |
 | `--legacy` | `p12`: use 3DES with a SHA-1 MAC for older Android and Apple keychains that cannot import the default AES-256 bundle. |
 
 The password is never taken as an argument, because arguments end up in shell history and process listings. Without `--password-file`, `export p12` prompts twice.
+
+Every destination is checked before anything is written: two outputs may not share a path, and each must be a file in an existing directory. The files are staged next to their destinations and renamed into place only once all of them are written, so a failed export leaves existing files unchanged. If a rename fails after earlier ones succeeded, those files are put back and any it newly created are removed.
+
+Split files suit TLS software configured with separate `certfile`, `keyfile` and `cafile` settings:
+
+```bash
+tiny-pki --store ./stores/ca export pem mqtt.home --cert-out broker.crt --key-out broker.key --ca-out ca.crt
+tiny-pki --store ./stores/ca export pem sensor-1 --cert-out sensor-1.crt --key-out sensor-1.key --ca-out ca.crt
+```
+
+A Mosquitto listener that requires client certificates and uses the CN as the username, and a client:
+
+```text
+listener 8883
+cafile /etc/mosquitto/pki/ca.crt
+certfile /etc/mosquitto/pki/broker.crt
+keyfile /etc/mosquitto/pki/broker.key
+crlfile /etc/mosquitto/pki/crl.pem
+require_certificate true
+use_identity_as_username true
+```
+
+```bash
+mosquitto_pub -h mqtt.home -p 8883 --cafile ca.crt --cert sensor-1.crt --key sensor-1.key -t sensors/1 -m hello
+```
+
+amqtt has no YAML equivalent in a release yet: as of v0.12.1 a listener cannot require client certificates or check a CRL, and the options for both (`client_cert`, `crlfile`, `crl_check`, `ssl_context`) are on its `main` branch only. Once a release has them, [`tiny_pki.tls`](api.md#optional-tiny_pkitls) builds the same context for `ssl_context`; until then use Mosquitto or nginx for mTLS.
+
+For Mosquitto, copy `public/crl.pem` alongside the other files after each revoke or CRL publish and reload the broker.
 
 ### revoke
 
