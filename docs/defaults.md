@@ -20,6 +20,7 @@ This page lists every default tiny-pki ships with, the guidance behind it, and h
 | Setting | Default | Cap | Override | Rationale |
 | --- | --- | --- | --- | --- |
 | CA validity | 3650 days (`DEFAULT_CA_VALIDITY_DAYS`) | 36500 days (`MAX_VALIDITY_DAYS`) | `validity_days=` / `--days` | Re-installing a root on every device is expensive, so a private root lasts about ten years. Leaves may not outlive it. |
+| Intermediate CA validity | 1825 days (`DEFAULT_INTERMEDIATE_VALIDITY_DAYS`) | the issuer's `notAfter` | `validity_days=` / `--days` | Half the root's default, so an intermediate can be renewed (and its key rotated) without replacing the root on devices; it may not outlive its issuer. |
 | Server validity | 90 days (`DEFAULT_SERVER_VALIDITY_DAYS`) | 200 days (`MAX_SERVER_VALIDITY_DAYS`); 36500 even with the override | `allow_long_validity=True` / `--allow-long-validity` | Let's Encrypt issues 90-day certificates. CA/B Forum SC-081 caps public TLS at 200 days from 2026-03-15, falling to 100 (2027) and 47 (2029). |
 | Client validity | 397 days (`DEFAULT_CLIENT_VALIDITY_DAYS`) | 825 days (`MAX_CLIENT_VALIDITY_DAYS`); 36500 even with the override | `allow_long_validity=True` / `--allow-long-validity` | Client certificates are re-provisioned by hand on phones, so they get about a year (the pre-SC-081 public limit). The cap matches Apple's limit. |
 | Apple warning | above 825 days (`APPLE_MAX_SERVER_VALIDITY_DAYS`) | n/a | n/a | iOS and macOS reject TLS server certificates valid for more than 825 days, even from private CAs. tiny-pki emits `TinyPkiWarning` when a bypass goes past it. |
@@ -43,7 +44,7 @@ This page lists every default tiny-pki ships with, the guidance behind it, and h
 
 | Setting | Default | Rationale |
 | --- | --- | --- |
-| `BasicConstraints` | `ca=True, path_length=0` (critical) | tiny-pki never creates intermediates, so the CA can't mint subordinate CAs. |
+| `BasicConstraints` | `ca=True, path_length=0` (critical); `path_length=1` with `path_length=1` / `init --path-length 1`; intermediates always `path_length=0` | A CA signs leaves only unless you ask for a root that signs intermediates, and an intermediate can never mint further CAs, so a chain is at most root, intermediate, leaf. |
 | Name constraints | off; `permitted_subtrees=` / `init --permit` adds critical `NameConstraints` | Limits what a stolen CA key can impersonate, but only for the name types you list: constrain both DNS and IP (see [security.md](./security.md)). tiny-pki also refuses to issue leaves outside the constraints. |
 | CRL extensions | `CRLNumber` (microseconds since the epoch; the CLI store also records the last number in `ca/crlnumber` and never goes below `last + 1`) and `AuthorityKeyIdentifier` | RFC 5280 requires both. A monotonic number lets clients discard older CRLs. |
 

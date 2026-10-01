@@ -31,6 +31,7 @@ from tiny_pki.constants import (
     DEFAULT_CA_KEY_SIZE,
     DEFAULT_CA_VALIDITY_DAYS,
     DEFAULT_CLIENT_VALIDITY_DAYS,
+    DEFAULT_INTERMEDIATE_VALIDITY_DAYS,
     DEFAULT_KEY_TYPE,
     DEFAULT_LEAF_KEY_SIZE,
     DEFAULT_ORGANIZATION_NAME,
@@ -61,10 +62,14 @@ def generate_ca_certificate(
     key_size: int | None = None,
     key_type: KeyType = DEFAULT_KEY_TYPE,
     permitted_subtrees: list[str] | None = None,
+    path_length: int = 0,
 ) -> tuple[bytes, bytes]:
     """Generate a self-signed CA certificate and private key.
 
-    The CA may only sign leaves (``BasicConstraints(path_length=0)``).
+    With the default ``path_length=0`` the CA may only sign leaves
+    (``BasicConstraints(path_length=0)``). ``path_length=1`` makes a root that can
+    also sign intermediate CAs (see :func:`generate_intermediate_ca_certificate`),
+    so its key can stay offline while an intermediate issues the leaves.
     ``permitted_subtrees`` optionally restricts it with a critical Name Constraints
     extension: DNS suffixes (``"home"`` permits ``home`` and ``*.home``) and IP
     networks (``"192.168.0.0/16"``; a bare IP means a single host). RFC 5280
@@ -85,8 +90,8 @@ def generate_ca_certificate(
     Raises:
         TinyPkiError: If ``key_type`` is unknown, ``key_size`` is not in
             ``ALLOWED_KEY_SIZES`` (or is given for ``"ec-p256"``), a name is
-            empty, too long, or contains control characters, or a permitted subtree
-            is invalid.
+            empty, too long, or contains control characters, a permitted subtree
+            is invalid, or ``path_length`` is not 0 or 1.
     """
     common_name = normalize_subject_attribute(common_name, "common_name", max_length=MAX_COMMON_NAME_LENGTH)
     organization_name = normalize_subject_attribute(
@@ -94,6 +99,11 @@ def generate_ca_certificate(
     )
     rsa_key_size = require_key_params(key_type, key_size, default_size=DEFAULT_CA_KEY_SIZE)
     _require_validity_days(validity_days)
+    if isinstance(path_length, bool) or path_length not in (0, 1):
+        raise TinyPkiError(
+            "Expected path_length 0 (the CA signs leaves) or 1 (it also signs intermediate CAs, which sign leaves), "
+            f"got {path_length!r}"
+        )
     subtrees = [_permitted_subtree(entry) for entry in permitted_subtrees or []]
 
     key = generate_private_key(rsa_key_size)
@@ -116,7 +126,7 @@ def generate_ca_certificate(
         .serial_number(x509.random_serial_number())
         .not_valid_before(not_before)
         .not_valid_after(not_after)
-        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=path_length), critical=True)
         .add_extension(
             x509.KeyUsage(
                 digital_signature=True,
@@ -448,6 +458,114 @@ def sign_server_csr(
     return cert.public_bytes(serialization.Encoding.PEM)
 
 
+def generate_intermediate_ca_certificate(
+    issuer_cert_pem: bytes,
+    issuer_key_pem: bytes,
+    common_name: str,
+    *,
+    organization_name: str | None = None,
+    validity_days: int = DEFAULT_INTERMEDIATE_VALIDITY_DAYS,
+    key_size: int | None = None,
+    key_type: KeyType = DEFAULT_KEY_TYPE,
+    permitted_subtrees: list[str] | None = None,
+) -> tuple[bytes, bytes]:
+    """Generate an intermediate CA certificate and key, signed by a root created with ``path_length=1``.
+
+    The intermediate signs leaves only (``BasicConstraints(ca=True, path_length=0)``,
+    ``keyCertSign`` + ``cRLSign``), so every leaf-issuing function accepts it as
+    ``ca_cert_pem`` / ``ca_key_pem``, and relying parties that trust the root
+    accept its leaves once they are given the chain. It inherits the issuer's
+    Name Constraints; ``permitted_subtrees`` (same syntax as for
+    :func:`generate_ca_certificate`) narrows them and must lie within the
+    issuer's. ``organization_name=None`` reuses the issuer's O, and ``key_type`` /
+    ``key_size`` work as for the root (RSA default ``DEFAULT_CA_KEY_SIZE``).
+
+    Returns:
+        Tuple of ``(certificate_pem, private_key_pem)``.
+
+    Raises:
+        TinyPkiError: If the issuer cannot sign CA certificates (``path_length=0``),
+            a name or key parameter is invalid, a permitted subtree is outside the
+            issuer's, or the certificate would outlive the issuer.
+    """
+    common_name = normalize_subject_attribute(common_name, "common_name", max_length=MAX_COMMON_NAME_LENGTH)
+    rsa_key_size = require_key_params(key_type, key_size, default_size=DEFAULT_CA_KEY_SIZE)
+    _require_validity_days(validity_days)
+    issuer_cert = x509.load_pem_x509_certificate(issuer_cert_pem)
+    _require_can_sign_intermediate(issuer_cert)
+    constraints = _intermediate_name_constraints(issuer_cert, permitted_subtrees)
+    issuer_key = load_ca_private_key(issuer_cert, issuer_key_pem)
+    org = _leaf_organization(issuer_cert, organization_name)
+    not_before, not_after = _intermediate_validity_window(issuer_cert, validity_days)
+    key = generate_private_key(rsa_key_size)
+    cert = _intermediate_certificate(
+        issuer_cert,
+        issuer_key,
+        key.public_key(),
+        common_name=common_name,
+        organization_name=org,
+        name_constraints=constraints,
+        not_before=not_before,
+        not_after=not_after,
+    )
+    return _pem_pair(cert, key)
+
+
+def sign_intermediate_csr(
+    issuer_cert_pem: bytes,
+    issuer_key_pem: bytes,
+    csr_pem: bytes,
+    common_name: str,
+    *,
+    organization_name: str | None = None,
+    validity_days: int = DEFAULT_INTERMEDIATE_VALIDITY_DAYS,
+    permitted_subtrees: list[str] | None = None,
+) -> bytes:
+    """Sign an intermediate CA's certificate signing request, for a CA whose key lives elsewhere.
+
+    Use it when the intermediate runs outside this process: OpenBao's
+    ``pki/intermediate/generate/internal``, or a tiny-pki store on another host.
+    Only the CSR's public key is used; the name, validity, constraints and
+    extensions are exactly those of :func:`generate_intermediate_ca_certificate`,
+    and the CSR must pass the same policy as :func:`sign_client_csr`.
+
+    Returns:
+        The certificate in PEM format.
+
+    Raises:
+        TinyPkiError: If the CSR is malformed or fails that policy, or for any
+            reason :func:`generate_intermediate_ca_certificate` would refuse.
+
+    Warns:
+        TinyPkiWarning: When the CSR's subject CN differs from ``common_name``, or
+            it requests extensions (its own ``BasicConstraints`` included); all are
+            ignored. Warnings are emitted only after the certificate is issued.
+    """
+    common_name = normalize_subject_attribute(common_name, "common_name", max_length=MAX_COMMON_NAME_LENGTH)
+    _require_validity_days(validity_days)
+    csr = load_csr(csr_pem)
+    public_key = require_signable_public_key(csr)
+    issuer_cert = x509.load_pem_x509_certificate(issuer_cert_pem)
+    _require_can_sign_intermediate(issuer_cert)
+    constraints = _intermediate_name_constraints(issuer_cert, permitted_subtrees)
+    issuer_key = load_ca_private_key(issuer_cert, issuer_key_pem)
+    org = _leaf_organization(issuer_cert, organization_name)
+    pending_warnings = _ignored_csr_request_warnings(csr, common_name, profile="intermediate CA")
+    not_before, not_after = _intermediate_validity_window(issuer_cert, validity_days)
+    cert = _intermediate_certificate(
+        issuer_cert,
+        issuer_key,
+        public_key,
+        common_name=common_name,
+        organization_name=org,
+        name_constraints=constraints,
+        not_before=not_before,
+        not_after=not_after,
+    )
+    _emit_warnings(pending_warnings)
+    return cert.public_bytes(serialization.Encoding.PEM)
+
+
 def max_leaf_validity_days(
     ca_cert_pem: bytes,
     *,
@@ -474,6 +592,55 @@ def max_leaf_validity_days(
     if allow_long_validity:
         return remaining
     return min(remaining, MAX_SERVER_VALIDITY_DAYS if kind == "server" else MAX_CLIENT_VALIDITY_DAYS)
+
+
+def require_name_constraints_within(ca_cert: x509.Certificate, ancestor: x509.Certificate) -> None:
+    """Refuse a CA whose own Name Constraints allow a name that ``ancestor``'s forbid.
+
+    Issuance and ``check`` enforce only the issuing CA's constraints, so they match
+    what relying parties enforce for the whole chain only when the issuing CA
+    carries constraints at least as narrow as every CA above it (intermediates
+    tiny-pki signs always do). For each name type ``ancestor`` permits, the CA
+    must permit that type only within it; each subtree ``ancestor`` excludes must
+    be excluded by the CA too, or lie outside everything the CA permits of that type.
+
+    Raises:
+        TinyPkiError: The CA's constraints are broader than ``ancestor``'s.
+    """
+    outer = _name_constraints(ancestor)
+    if outer is None:
+        return
+    inner = _name_constraints(ca_cert)
+    inner_permitted = list(inner.permitted_subtrees or []) if inner else []
+    inner_excluded = list(inner.excluded_subtrees or []) if inner else []
+    label, ancestor_label = ca_cert.subject.rfc4514_string(), ancestor.subject.rfc4514_string()
+    outer_permitted = list(outer.permitted_subtrees or [])
+    for name_type in {type(subtree) for subtree in outer_permitted}:
+        allowed = [subtree for subtree in outer_permitted if isinstance(subtree, name_type)]
+        own = [subtree for subtree in inner_permitted if isinstance(subtree, name_type)]
+        if not own or not all(any(_subtree_within(s, a) for a in allowed) for s in own):
+            raise TinyPkiError(
+                f"Expected {label} to permit only names within {ancestor_label}'s permitted "
+                f"{[str(a.value) for a in allowed]}, got {[str(s.value) for s in own] or 'any'}; "
+                "relying parties would reject leaves this store issues outside them"
+            )
+    for excluded in outer.excluded_subtrees or []:
+        if any(_subtree_within(excluded, own) for own in inner_excluded):
+            continue
+        same_type = [s for s in inner_permitted if isinstance(s, type(excluded))]
+        if same_type and not any(_subtree_within(s, excluded) or _subtree_within(excluded, s) for s in same_type):
+            continue
+        raise TinyPkiError(
+            f"Expected {label} to exclude {str(excluded.value)!r} like {ancestor_label} does; "
+            "relying parties would reject leaves this store issues there"
+        )
+
+
+def _name_constraints(cert: x509.Certificate) -> x509.NameConstraints | None:
+    try:
+        return cert.extensions.get_extension_for_class(x509.NameConstraints).value
+    except x509.ExtensionNotFound:
+        return None
 
 
 _CN_DNS_ID = re.compile(r"^[a-z0-9_.-]+$")
@@ -596,7 +763,7 @@ def _ignored_csr_request_warnings(
     csr: x509.CertificateSigningRequest,
     common_name: str,
     *,
-    profile: Literal["client", "server"],
+    profile: Literal["client", "intermediate CA", "server"],
     handled: frozenset[str] = frozenset(),
 ) -> list[str]:
     """Describe what a CSR asked for that signing ignores: a different CN, and requested extensions.
@@ -625,6 +792,31 @@ def _normalized_or_raw(san: str) -> str:
         return san
 
 
+def _require_can_sign_intermediate(issuer_cert: x509.Certificate) -> None:
+    try:
+        constraints = issuer_cert.extensions.get_extension_for_class(x509.BasicConstraints).value
+    except x509.ExtensionNotFound:
+        constraints = None
+    label = issuer_cert.subject.rfc4514_string()
+    if constraints is None or not constraints.ca:
+        raise TinyPkiError(f"Expected a CA certificate as the issuer, got {label}")
+    if constraints.path_length is not None and constraints.path_length < 1:
+        raise TinyPkiError(
+            f"Expected an issuer that may sign CA certificates, but {label} has path_length="
+            f"{constraints.path_length} and signs only leaves; create a root with path_length=1 "
+            "(CLI: init --path-length 1)"
+        )
+    try:
+        usage = issuer_cert.extensions.get_extension_for_class(x509.KeyUsage).value
+    except x509.ExtensionNotFound:
+        return
+    if not usage.key_cert_sign:
+        raise TinyPkiError(
+            f"Expected an issuer whose Key Usage allows keyCertSign, but {label} does not, so relying parties "
+            "would reject any certificate it signs"
+        )
+
+
 def _require_plain_common_name(common_name: str) -> None:
     """Refuse RFC 4514 special characters that make a DN string look like another identity.
 
@@ -645,6 +837,94 @@ def _require_plain_common_name(common_name: str) -> None:
                 " it can make the subject DN look like another identity"
                 " (pass allow_dn_special_chars=True, CLI: --allow-dn-special-chars, to allow it)"
             )
+
+
+def _intermediate_certificate(
+    issuer_cert: x509.Certificate,
+    issuer_key: PrivateKey,
+    public_key: PublicKey,
+    *,
+    common_name: str,
+    organization_name: str,
+    name_constraints: x509.NameConstraints | None,
+    not_before: datetime,
+    not_after: datetime,
+) -> x509.Certificate:
+    """Build and sign the intermediate CA profile shared by generated and CSR-issued intermediates."""
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, organization_name),
+        ]
+    )
+    builder = x509.CertificateBuilder()
+    if name_constraints is not None:
+        builder = builder.add_extension(name_constraints, critical=True)
+    return (
+        builder.subject_name(subject)
+        .issuer_name(issuer_cert.subject)
+        .public_key(public_key)
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(not_before)
+        .not_valid_after(not_after)
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_cert_sign=True,
+                crl_sign=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(public_key), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(issuer_key.public_key()), critical=False)
+        .sign(issuer_key, hashes.SHA256())
+    )
+
+
+def _intermediate_name_constraints(
+    issuer_cert: x509.Certificate, permitted_subtrees: list[str] | None
+) -> x509.NameConstraints | None:
+    """The issuer's Name Constraints, narrowed to ``permitted_subtrees`` when given.
+
+    Relying parties enforce every constraint in the chain anyway; copying them
+    into the intermediate lets issuance refuse out-of-bounds leaves up front.
+    """
+    requested = [_permitted_subtree(entry) for entry in permitted_subtrees or []]
+    try:
+        issuer_constraints = issuer_cert.extensions.get_extension_for_class(x509.NameConstraints).value
+    except x509.ExtensionNotFound:
+        issuer_constraints = None
+    issuer_permitted = list(issuer_constraints.permitted_subtrees or []) if issuer_constraints else []
+    excluded = list(issuer_constraints.excluded_subtrees or []) if issuer_constraints else []
+    for subtree in requested:
+        if issuer_permitted and not any(_subtree_within(subtree, root) for root in issuer_permitted):
+            allowed = [str(g.value) for g in issuer_permitted]
+            raise TinyPkiError(
+                f"Expected permitted subtrees within the issuer's permitted names {allowed}, got {str(subtree.value)!r}"
+            )
+    permitted = requested or issuer_permitted
+    if not permitted and not excluded:
+        return None
+    return x509.NameConstraints(permitted_subtrees=permitted or None, excluded_subtrees=excluded or None)
+
+
+def _intermediate_validity_window(issuer_cert: x509.Certificate, validity_days: int) -> tuple[datetime, datetime]:
+    not_before, not_after = _validity_window(validity_days)
+    issuer_not_after = issuer_cert.not_valid_after_utc
+    if not_after > issuer_not_after:
+        remaining_days = max((issuer_not_after - not_before).days, 0)
+        raise TinyPkiError(
+            f"Expected the intermediate CA to expire by its issuer's notAfter ({issuer_not_after.isoformat()}), "
+            f"got validity_days={validity_days}; use validity_days <= {remaining_days} or renew the issuer"
+        )
+    return not_before, not_after
 
 
 def _is_ip_literal(text: str) -> bool:
@@ -894,6 +1174,18 @@ def _server_sans(
             sans.append(cn_san)
             warn.append(f"Added common_name {common_name!r} to the SANs as {cn_san!r} (TLS clients ignore the CN)")
     return sans
+
+
+def _subtree_within(subtree: x509.GeneralName, root: x509.GeneralName) -> bool:
+    if isinstance(subtree, x509.DNSName) and isinstance(root, x509.DNSName):
+        return _dns_within(subtree.value, root.value)
+    if isinstance(subtree, x509.IPAddress) and isinstance(root, x509.IPAddress):
+        inner, outer = subtree.value, root.value
+        if isinstance(inner, ipaddress.IPv4Network) and isinstance(outer, ipaddress.IPv4Network):
+            return inner.subnet_of(outer)
+        if isinstance(inner, ipaddress.IPv6Network) and isinstance(outer, ipaddress.IPv6Network):
+            return inner.subnet_of(outer)
+    return False
 
 
 def _validity_window(validity_days: int) -> tuple[datetime, datetime]:

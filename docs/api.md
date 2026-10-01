@@ -8,7 +8,9 @@ The library needs only `cryptography` (`pip install tiny-pki`); none of the modu
 
 | Function | Returns |
 | --- | --- |
-| `generate_ca_certificate(common_name="Private CA", *, organization_name="tiny-pki", validity_days=3650, key_size=None, key_type="rsa", permitted_subtrees=None)` | `(ca_cert_pem, ca_key_pem)` — self-signed, `BasicConstraints(ca=True, path_length=0)` (signs leaves only), `keyCertSign` + `cRLSign`; optional critical Name Constraints |
+| `generate_ca_certificate(common_name="Private CA", *, organization_name="tiny-pki", validity_days=3650, key_size=None, key_type="rsa", permitted_subtrees=None, path_length=0)` | `(ca_cert_pem, ca_key_pem)` — self-signed, `BasicConstraints(ca=True, path_length=path_length)`, `keyCertSign` + `cRLSign`; optional critical Name Constraints. `path_length=0` signs leaves only; `1` also signs intermediate CAs (see [Intermediate CAs](#intermediate-cas)) |
+| `generate_intermediate_ca_certificate(issuer_cert_pem, issuer_key_pem, common_name, *, organization_name=None, validity_days=1825, key_size=None, key_type="rsa", permitted_subtrees=None)` | `(cert_pem, key_pem)` — an intermediate CA signed by a `path_length=1` root: `BasicConstraints(ca=True, path_length=0)`, `keyCertSign` + `cRLSign`, the issuer's Name Constraints (narrowed by `permitted_subtrees`) |
+| `sign_intermediate_csr(issuer_cert_pem, issuer_key_pem, csr_pem, common_name, *, organization_name=None, validity_days=1825, permitted_subtrees=None)` | `cert_pem` — the same intermediate profile, for the public key in a CSR from a CA whose key lives elsewhere (OpenBao, another host) |
 | `generate_client_certificate(ca_cert_pem, ca_key_pem, common_name, *, organization_name=None, validity_days=397, key_size=None, key_type="rsa", allow_long_validity=False, allow_dn_special_chars=False, ocsp_url=None)` | `(cert_pem, key_pem)` — `CLIENT_AUTH` EKU; CN is the identity |
 | `generate_server_certificate(ca_cert_pem, ca_key_pem, common_name, san_entries, *, organization_name=None, validity_days=90, key_size=None, key_type="rsa", allow_long_validity=False, include_common_name_in_sans=True, allow_dn_special_chars=False, ocsp_url=None)` | `(cert_pem, key_pem)` — `SERVER_AUTH` EKU; `san_entries` are DNS names or IP literals (at least one) |
 | `sign_client_csr(ca_cert_pem, ca_key_pem, csr_pem, common_name, *, organization_name=None, validity_days=397, allow_long_validity=False, allow_dn_special_chars=False, ocsp_url=None)` | `cert_pem` — the same client profile as `generate_client_certificate`, for the public key in a device's CSR; see [Signing a CSR](#signing-a-csr) |
@@ -66,6 +68,18 @@ Name rules (`tiny_pki.names`):
 | `normalize_subject_attribute(value, field_name, *, max_length)` | stripped, validated CN/O |
 | `common_name_as_san(common_name)` | the SAN form of a host-like CN, else `None` |
 
+### Intermediate CAs
+
+A root created with `path_length=1` can sign intermediate CAs, which sign leaves; the root key is then needed only to sign intermediates and CRLs, so it can stay offline. An intermediate works wherever a CA does: pass its certificate and key as `ca_cert_pem` / `ca_key_pem` to every leaf function, `generate_crl` and `generate_ocsp_response*`.
+
+- Intermediates always carry `path_length=0`: they sign leaves only, so the chain is at most root, intermediate, leaf.
+- They inherit the issuer's Name Constraints (permitted and excluded). `permitted_subtrees` narrows them, and each entry must lie within one of the issuer's permitted subtrees; leaf issuance then enforces the narrower set.
+- `organization_name=None` reuses the issuer's O. The RSA default size is `DEFAULT_CA_KEY_SIZE`.
+- An intermediate may not outlive its issuer; `TinyPkiError` names the largest `validity_days` that fits.
+- An issuer with `path_length=0` (every CA created before this option, and every intermediate), or whose Key Usage lacks `keyCertSign`, is refused.
+- Relying parties need the chain: serve the intermediate next to each leaf (a TLS server's full chain), trust the root, and, when they check CRLs, give them the root's CRL as well as the intermediate's. `generate_pkcs12` accepts the chain as concatenated PEM.
+- `sign_intermediate_csr` applies the CSR policy of [Signing a CSR](#signing-a-csr); the CSR's own `BasicConstraints` and other extensions are ignored with a `TinyPkiWarning`.
+
 ### Signing a CSR
 
 `sign_client_csr` issues a client certificate for a key that never leaves the device (a keychain, TPM, or YubiKey), and `sign_server_csr` a server certificate for a key that never leaves the server. The CSR is PEM (including Windows `certreq`'s `NEW CERTIFICATE REQUEST` header) or DER.
@@ -112,6 +126,8 @@ tiny-pki runs no responder. These functions sign OCSP responses (RFC 6960) with 
 | Function | Returns |
 | --- | --- |
 | `generate_pkcs12(cert_pem, key_pem, ca_cert_pem, friendly_name, password, *, legacy=False)` | PKCS#12 `bytes` (cert + key + CA chain) |
+
+- `ca_cert_pem` is the issuing CA, optionally followed by the certificates above it (an intermediate, then its root) as concatenated PEM; every one goes into the bundle.
 
 - `password` is `bytes` of at least `MIN_PKCS12_PASSWORD_LENGTH` (16).
 - By default the bundle uses AES-256-CBC with PBKDF2-HMAC-SHA256 and an HMAC-SHA256 MAC (`cryptography`'s best available encryption).
@@ -162,6 +178,7 @@ Expiry and validity checks for alerting (`tiny_pki.check`, re-exported from `tin
 | `DEFAULT_CA_VALIDITY_DAYS` | `3650` |
 | `DEFAULT_CLIENT_VALIDITY_DAYS` | `397` |
 | `DEFAULT_CRL_VALIDITY_DAYS` | `30`: `generate_crl` default and a store's CRL lifetime until set |
+| `DEFAULT_INTERMEDIATE_VALIDITY_DAYS` | `1825`: lifetime of an intermediate CA (`generate_intermediate_ca_certificate`, `sign_intermediate_csr`) |
 | `DEFAULT_KEY_TYPE` | `"rsa"` |
 | `DEFAULT_LEAF_KEY_SIZE` | `3072` |
 | `DEFAULT_OCSP_VALIDITY_DAYS` | `7`: OCSP response lifetime for `generate_ocsp_response*` and a store's stapling responses until set |

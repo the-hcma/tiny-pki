@@ -25,6 +25,7 @@ from cryptography.hazmat.primitives.serialization import pkcs12
 from tiny_pki import (
     DEFAULT_CA_VALIDITY_DAYS,
     DEFAULT_CLIENT_VALIDITY_DAYS,
+    DEFAULT_INTERMEDIATE_VALIDITY_DAYS,
     DEFAULT_KEY_TYPE,
     DEFAULT_ORGANIZATION_NAME,
     DEFAULT_SERVER_VALIDITY_DAYS,
@@ -59,6 +60,12 @@ CHECK_EXIT_UNKNOWN = 3
 CHECK_EXIT_WARNING = 1
 _CHECK_KINDS = tuple(sorted(CHECK_KINDS))
 _CHECK_SUFFIXES = frozenset({".cer", ".crl", ".crt", ".p12", ".pem", ".pfx"})
+_KEY_HOLDER = {"client": "device", "intermediate": "intermediate CA", "server": "server"}
+_SIGN_DEFAULT_DAYS = {
+    "client": DEFAULT_CLIENT_VALIDITY_DAYS,
+    "intermediate": DEFAULT_INTERMEDIATE_VALIDITY_DAYS,
+    "server": DEFAULT_SERVER_VALIDITY_DAYS,
+}
 
 
 class HandlerNotReadyError(RuntimeError):
@@ -174,11 +181,34 @@ def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) 
         raise ValueError("init takes no positional arguments; use --cn / --org")
     if store.has_ca():
         raise ValueError(f"CA already exists under {store.root}")
-    encrypted_key = "encrypt-key" in opts["flags"]
-    if "key-secret-file" in opts["flags"] and not encrypted_key:
+    flags = opts["flags"]
+    if "issuer-key-secret-file" in flags and "intermediate-of" not in flags:
+        raise ValueError("--issuer-key-secret-file requires --intermediate-of")
+    if "path-length" in flags and "intermediate-of" in flags:
+        raise ValueError("--path-length applies to a root CA; an intermediate CA always signs leaves only")
+    path_length = _parse_path_length(flags["path-length"]) if "path-length" in flags else 0
+    issuer = CertificateStore(flags["intermediate-of"]) if "intermediate-of" in flags else None
+    if issuer is not None and not issuer.has_ca():
+        raise ValueError(f"Expected a CA under --intermediate-of {issuer.root}")
+    encrypted_key = "encrypt-key" in flags
+    if "key-secret-file" in flags and not encrypted_key:
         raise ValueError("--key-secret-file requires --encrypt-key for init")
-    key_secret = _required_key_secret(opts["flags"], store=store, theme=theme, confirm=True) if encrypted_key else None
-    crl_days = _parse_crl_days(opts["flags"]["crl-days"], "--crl-days") if "crl-days" in opts["flags"] else None
+    issuer_key_secret = _issuer_key_secret(flags, issuer=issuer, theme=theme) if issuer is not None else None
+    key_secret = _required_key_secret(flags, store=store, theme=theme, confirm=True) if encrypted_key else None
+    crl_days = _parse_crl_days(flags["crl-days"], "--crl-days") if "crl-days" in flags else None
+    if issuer is not None:
+        _init_intermediate(
+            store,
+            issuer,
+            opts,
+            key_secret=key_secret,
+            issuer_key_secret=issuer_key_secret,
+            crl_days=crl_days,
+            theme=theme,
+        )
+        if encrypted_key and "key-secret-file" in flags:
+            _offer_to_remove_key_secret_file(Path(flags["key-secret-file"]), theme)
+        return
     cn = opts["flags"].get("cn", "Private CA")
     org = opts["flags"].get("org", DEFAULT_ORGANIZATION_NAME)
     days = _parse_days(opts["flags"].get("days", str(DEFAULT_CA_VALIDITY_DAYS)), default=DEFAULT_CA_VALIDITY_DAYS)
@@ -190,13 +220,55 @@ def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) 
         key_size=key_size,
         key_type=key_type,
         permitted_subtrees=opts["multi"].get("permit"),
+        path_length=path_length,
     )
     store.write_ca(cert_pem, key_pem, key_secret=key_secret)
     store.publish_crl(validity_days=crl_days, key_secret=key_secret)
     print(theme.ok(f"CA created: {get_certificate_subject(cert_pem)}"))
     print(theme.dim(f"fingerprint {get_certificate_fingerprint(cert_pem)}"))
+    if path_length:
+        print(theme.dim("it may sign intermediate CAs: init --intermediate-of or sign intermediate"))
     if encrypted_key and "key-secret-file" in opts["flags"]:
         _offer_to_remove_key_secret_file(Path(opts["flags"]["key-secret-file"]), theme)
+
+
+def _init_intermediate(
+    store: CertificateStore,
+    issuer: CertificateStore,
+    opts: _ParsedFlags,
+    *,
+    key_secret: str | None,
+    issuer_key_secret: str | None,
+    crl_days: int | None,
+    theme: Theme,
+) -> None:
+    flags = opts["flags"]
+    days = _parse_days(
+        flags.get("days", str(DEFAULT_INTERMEDIATE_VALIDITY_DAYS)), default=DEFAULT_INTERMEDIATE_VALIDITY_DAYS
+    )
+    key_type, key_size = _parse_key_options(flags)
+    entry = store.init_intermediate(
+        issuer,
+        flags.get("cn") or "Intermediate CA",
+        organization_name=flags.get("org") or None,
+        validity_days=days,
+        key_size=key_size,
+        key_type=key_type,
+        permitted_subtrees=opts["multi"].get("permit"),
+        key_secret=key_secret,
+        issuer_key_secret=issuer_key_secret,
+        crl_validity_days=crl_days,
+    )
+    cert_pem = store.read_ca_certificate()
+    print(theme.ok(f"intermediate CA created: {get_certificate_subject(cert_pem)}, signed by {issuer.root}"))
+    print(theme.dim(f"fingerprint {get_certificate_fingerprint(cert_pem)}"))
+    print(theme.dim(f"recorded in the issuer's index as serial {entry.serial_number}; its key never left {store.root}"))
+    print(
+        theme.dim(
+            f"TLS servers trust {store.public_dir / 'ca-chain.pem'} and check {store.public_dir / 'crl.pem'}; "
+            "import each new issuer CRL with crl --chain-crl PATH"
+        )
+    )
 
 
 def _cmd_check(args: list[str], *, store: CertificateStore | None, theme: Theme) -> int:
@@ -325,14 +397,22 @@ def _cmd_create(args: list[str], *, store: CertificateStore | None, theme: Theme
 def _cmd_sign(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     store = _require_store(store)
     if not args:
-        raise ValueError("Expected sign client|server <name> --csr PATH")
+        raise ValueError("Expected sign client|server|intermediate <name> --csr PATH")
     kind = args[0]
-    if kind not in {"client", "server"}:
-        raise ValueError(f"Expected sign client|server, got {kind!r}")
+    if kind not in _SIGN_DEFAULT_DAYS:
+        raise ValueError(f"Expected sign client|server|intermediate, got {kind!r}")
     opts = _parse_flags(args[1:], command="sign")
     flags = opts["flags"]
     name = _require_one_positional(opts, f"sign {kind} <name> --csr PATH")
     server_only = {"accept-csr-sans", "no-cn-san", "yes"} & flags.keys()
+    leaf_only = {"allow-dn-special-chars", "allow-long-validity", "keep-previous"} & flags.keys()
+    if kind == "intermediate" and (opts["multi"].get("san") or server_only or leaf_only):
+        raise ValueError(
+            "--san / --accept-csr-sans / --no-cn-san / --yes / --keep-previous / --allow-long-validity / "
+            "--allow-dn-special-chars do not apply to intermediate CAs"
+        )
+    if kind != "intermediate" and opts["multi"].get("permit"):
+        raise ValueError("--permit is only supported for intermediate CAs")
     if kind == "client" and (opts["multi"].get("san") or server_only):
         raise ValueError("--san / --accept-csr-sans / --no-cn-san / --yes are only supported for server certificates")
     if kind == "server" and "keep-previous" in flags:
@@ -347,7 +427,7 @@ def _cmd_sign(args: list[str], *, store: CertificateStore | None, theme: Theme) 
         csr_pem = csr_path.read_bytes()
     except OSError as exc:
         raise ValueError(f"Expected a readable --csr file, got {csr_path} ({exc.strerror})") from exc
-    default_days = DEFAULT_CLIENT_VALIDITY_DAYS if kind == "client" else DEFAULT_SERVER_VALIDITY_DAYS
+    default_days = _SIGN_DEFAULT_DAYS[kind]
     days = _parse_days(flags.get("days", str(default_days)), default=default_days)
     org = flags.get("org")
     allow_long_validity = "allow-long-validity" in flags
@@ -373,6 +453,15 @@ def _cmd_sign(args: list[str], *, store: CertificateStore | None, theme: Theme) 
                 keep_previous="keep-previous" in flags,
                 key_secret=key_secret,
             )
+        elif kind == "intermediate":
+            entry = store.sign_intermediate_csr(
+                name,
+                csr_pem,
+                organization_name=org,
+                validity_days=days,
+                permitted_subtrees=opts["multi"].get("permit"),
+                key_secret=key_secret,
+            )
         else:
             entry = store.sign_server_csr(
                 name,
@@ -389,7 +478,7 @@ def _cmd_sign(args: list[str], *, store: CertificateStore | None, theme: Theme) 
     for warning in caught:
         print(theme.warn(f"warning: {warning.message}"), file=sys.stderr)
 
-    holder = "device" if kind == "client" else "server"
+    holder = _KEY_HOLDER[kind]
     print(theme.ok(f"issued {kind} {entry.common_name} from {csr_path} (the private key stays on the {holder})"))
     print(theme.dim(f"serial {entry.serial_number}  fp {entry.fingerprint}"))
     out_flag = opts["flags"].get("out")
@@ -411,7 +500,7 @@ def _print_superseded_hints(store: CertificateStore, entry: IssuedCertificate, t
 def _cmd_show(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     store = _require_store(store)
     target = args[0] if args else "certs"
-    if target in {"ca", "certs", "clients", "servers", "revoked"}:
+    if target in {"ca", "certs", "clients", "intermediates", "servers", "revoked"}:
         _cmd_list([target, *args[1:]], store=store, theme=theme)
         return
     _require_one_positional(_parse_flags(args, command="show"), "show ca|certs|crl|<identity>")
@@ -464,6 +553,14 @@ def _cmd_list(args: list[str], *, store: CertificateStore | None, theme: Theme) 
             as_json=as_json,
         )
         return
+    if target == "intermediates":
+        _print_entry_list(
+            store.list_certificates(kind="intermediate", status="active"),
+            store=store,
+            theme=theme,
+            as_json=as_json,
+        )
+        return
     if target == "revoked":
         _print_entry_list(
             store.list_certificates(status="revoked"),
@@ -480,15 +577,18 @@ def _cmd_list(args: list[str], *, store: CertificateStore | None, theme: Theme) 
             as_json=as_json,
         )
         return
-    raise ValueError(f"Expected list ca|clients|servers|revoked|certs, got {target!r}")
+    raise ValueError(f"Expected list ca|clients|servers|intermediates|revoked|certs, got {target!r}")
 
 
 def _list_ca(store: CertificateStore, *, theme: Theme, as_json: bool) -> None:
     ca_cert = store.read_ca_certificate()
+    chain = x509.load_pem_x509_certificates(store.read_ca_chain())[1:]
     if as_json:
         print(
             json.dumps(
                 {
+                    "chain": [get_certificate_subject(cert.public_bytes(serialization.Encoding.PEM)) for cert in chain],
+                    "chain_path": str(store.ca_chain_path) if chain else None,
                     "cn": get_certificate_subject(ca_cert),
                     "fingerprint": get_certificate_fingerprint(ca_cert),
                     "expires": get_certificate_expiry(ca_cert).isoformat(),
@@ -507,9 +607,13 @@ def _list_ca(store: CertificateStore, *, theme: Theme, as_json: bool) -> None:
         return
     _print_cert_summary(ca_cert, theme)
     print(theme.dim(f"cert {store.ca_cert_path}"))
+    if chain:
+        names = " -> ".join(get_certificate_subject(cert.public_bytes(serialization.Encoding.PEM)) for cert in chain)
+        print(theme.dim(f"chain {store.ca_chain_path} (intermediate CA; issued by {names})"))
     print(theme.dim(f"crl  {store.crl_path} (valid {store.crl_validity_days} days per publish)"))
     print(theme.dim(f"index {store.index_path}"))
-    print(theme.dim(f"public {store.public_dir} (ca.crt + crl.pem for TLS servers; no key)"))
+    published = "ca.crt + ca-chain.pem + crl.pem (own and issuer CRLs)" if chain else "ca.crt + crl.pem"
+    print(theme.dim(f"public {store.public_dir} ({published} for TLS servers; no key)"))
     ocsp_days = store.ocsp_validity_days
     if ocsp_days is not None:
         print(theme.dim(f"ocsp {store.ocsp_dir} (stapling responses, valid {ocsp_days} days per publish)"))
@@ -520,6 +624,7 @@ def _list_ca(store: CertificateStore, *, theme: Theme, as_json: bool) -> None:
 def _list_summary(store: CertificateStore, *, theme: Theme, as_json: bool) -> None:
     clients = store.list_certificates(kind="client", status="active")
     servers = store.list_certificates(kind="server", status="active")
+    intermediates = store.list_certificates(kind="intermediate", status="active")
     revoked = store.list_certificates(status="revoked")
     ca_cn = get_certificate_subject(store.read_ca_certificate()) if store.has_ca() else None
     if as_json:
@@ -528,6 +633,7 @@ def _list_summary(store: CertificateStore, *, theme: Theme, as_json: bool) -> No
                 {
                     "ca_cn": ca_cn,
                     "clients": len(clients),
+                    "intermediates": len(intermediates),
                     "servers": len(servers),
                     "revoked": len(revoked),
                     "store": str(store.root),
@@ -540,7 +646,10 @@ def _list_summary(store: CertificateStore, *, theme: Theme, as_json: bool) -> No
         print(theme.dim("(no CA)"))
     else:
         print(theme.ok(f"CA {ca_cn}"))
-    print(theme.dim(f"clients {len(clients)}  servers {len(servers)}  revoked {len(revoked)}"))
+    counts = f"clients {len(clients)}  servers {len(servers)}  revoked {len(revoked)}"
+    if intermediates:
+        counts += f"  intermediates {len(intermediates)}"
+    print(theme.dim(counts))
     print(theme.dim(f"store {store.root}"))
 
 
@@ -669,7 +778,12 @@ def _cmd_export(args: list[str], *, store: CertificateStore | None, theme: Theme
         raise ValueError(f"Expected export pem|p12, got {fmt!r}")
     cert_pem = store.read_certificate_pem(entry)
     if not entry.key_path:
-        holder = "device" if entry.kind == "client" else "server"
+        holder = _KEY_HOLDER[entry.kind]
+        if fmt == "p12" and entry.kind == "intermediate":
+            raise ValueError(
+                f"Expected a leaf to build a PKCS#12 bundle, but {entry.common_name!r} is an intermediate CA whose "
+                "key lives in its own store; use export pem for the certificate"
+            )
         if fmt == "p12":
             raise ValueError(
                 f"Expected a private key for {entry.common_name!r} to build a PKCS#12 bundle, but it was signed "
@@ -680,7 +794,7 @@ def _cmd_export(args: list[str], *, store: CertificateStore | None, theme: Theme
         print(theme.ok(f"wrote {out} (certificate only: the private key stays on the {holder})"))
         return
     key_pem = store.read_key_pem(entry)
-    ca_cert = store.read_ca_certificate()
+    ca_cert = store.read_ca_chain()
 
     if fmt == "pem":
         out = Path(opts["flags"].get("out", f"{_safe_export_name(entry.common_name)}.pem"))
@@ -822,6 +936,26 @@ def _required_key_secret(flags: dict[str, str], *, store: CertificateStore, them
     return secret
 
 
+def _issuer_key_secret(flags: dict[str, str], *, issuer: CertificateStore, theme: Theme) -> str | None:
+    """Load the ``--intermediate-of`` store's CA-key secret; the environment sources are this store's, not its."""
+    path = flags.get("issuer-key-secret-file")
+    if not issuer.ca_key_encrypted:
+        if path is not None:
+            raise ValueError("--issuer-key-secret-file was given but the issuer's CA private key is not encrypted")
+        return None
+    if path is not None:
+        return _read_key_secret_file(Path(path), theme=theme)
+    if not sys.stdin.isatty():
+        raise ValueError("Expected --issuer-key-secret-file PATH for the issuer's encrypted CA private key")
+    try:
+        secret = getpass.getpass("Issuer CA key secret: ")
+    except EOFError as exc:
+        raise ValueError("Expected the issuer's CA key secret") from exc
+    if not secret:
+        raise ValueError("Expected a non-empty issuer CA key secret")
+    return secret
+
+
 def _read_key_secret_file(path: Path, *, theme: Theme) -> str:
     """Read the first UTF-8 line from a secret file without echoing its contents."""
     try:
@@ -892,6 +1026,19 @@ def _cmd_crl(args: list[str], *, store: CertificateStore | None, theme: Theme) -
     days = _parse_crl_days(opts["flags"]["days"], "--days") if "days" in opts["flags"] else None
     store = _require_store(store)
     key_secret = _key_secret(opts["flags"], store=store, theme=theme)
+    chain_crl_flag = opts["flags"].get("chain-crl")
+    if chain_crl_flag:
+        chain_crl_path = Path(chain_crl_flag)
+        try:
+            data = chain_crl_path.read_bytes()
+        except OSError as exc:
+            raise ValueError(f"Expected a readable --chain-crl file, got {chain_crl_path} ({exc.strerror})") from exc
+        certs, crls = _pem_or_der_artifacts(data, chain_crl_path)
+        if certs or not crls:
+            raise ValueError(f"Expected only CRLs in --chain-crl {chain_crl_path}")
+        for crl in crls:
+            store.import_chain_crl(crl)
+        print(theme.ok(f"imported {len(crls)} issuer CRL(s) from {chain_crl_path} into {store.chain_crl_path}"))
     store.publish_crl(validity_days=days, key_secret=key_secret)
     print(theme.ok(f"crl regenerated: {store.crl_path} (valid {store.crl_validity_days} days)"))
 
@@ -1257,6 +1404,12 @@ def _parse_ocsp_days(raw: str) -> int:
     if not 1 <= days <= MAX_OCSP_VALIDITY_DAYS:
         raise ValueError(f"Expected --days between 1 and {MAX_OCSP_VALIDITY_DAYS}, got {days}")
     return days
+
+
+def _parse_path_length(raw: str) -> int:
+    if raw not in {"0", "1"}:
+        raise ValueError(f"Expected --path-length 0 (sign leaves only) or 1 (also sign intermediate CAs), got {raw!r}")
+    return int(raw)
 
 
 def _parse_key_options(flags: dict[str, str]) -> tuple[KeyType, int | None]:

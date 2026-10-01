@@ -44,13 +44,13 @@ def decrypt_private_key(encrypted_data: bytes, secret: str, *, info: bytes | Non
 
 def derive_fernet_key(secret: str, *, info: bytes | None = DEFAULT_INFO) -> bytes:
     """Derive a Fernet-compatible key from a high-entropy secret string."""
-    _require_strong_secret(secret)
+    require_strong_secret(secret)
     return _derive_fernet_key(secret, info)
 
 
 def encrypt_private_key(pem_data: bytes, secret: str, *, info: bytes | None = DEFAULT_INFO) -> bytes:
     """Encrypt PEM private-key bytes for storage at rest."""
-    _require_strong_secret(secret)
+    require_strong_secret(secret)
     if not pem_data:
         raise TinyPkiError("Expected non-empty pem_data")
     return Fernet(_derive_fernet_key(secret, info)).encrypt(pem_data)
@@ -85,7 +85,7 @@ def decrypt_private_key_scrypt(encrypted_data: bytes, secret: str) -> bytes:
 
 def encrypt_private_key_scrypt(pem_data: bytes, secret: str) -> bytes:
     """Encrypt with a per-key salt and an envelope-recorded Scrypt profile."""
-    _require_strong_secret(secret)
+    require_strong_secret(secret)
     if not pem_data:
         raise TinyPkiError("Expected non-empty pem_data")
     salt = random_secrets.token_bytes(_SCRYPT_SALT_SIZE)
@@ -114,7 +114,8 @@ def _require_secret(secret: str) -> None:
         raise TinyPkiError("Expected a non-empty secret")
 
 
-def _require_strong_secret(secret: str) -> None:
+def require_strong_secret(secret: str) -> None:
+    """Raise :class:`TinyPkiError` unless ``secret`` is at least ``MIN_SECRET_LENGTH`` characters."""
     _require_secret(secret)
     if len(secret) < MIN_SECRET_LENGTH:
         raise TinyPkiError(f"Expected a secret of at least {MIN_SECRET_LENGTH} characters, got {len(secret)}")

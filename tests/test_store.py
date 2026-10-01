@@ -894,7 +894,7 @@ def test_add_certificate_rejects_invalid_kind(tmp_path: Path) -> None:
             not_valid_after=datetime(2099, 1, 1, tzinfo=UTC),
             fingerprint="f",
         ),
-        raises(ValueError, "client' or 'server"),
+        raises(ValueError, "'client', 'intermediate' or 'server'"),
     )
 
 

@@ -317,7 +317,7 @@ def test_cli_refuses_bad_sign_invocations(tmp_path: Path, capsys: CaptureFixture
 def test_cli_help_describes_sign(capsys: CaptureFixture[str]) -> None:
     main(["--color", "never", "help", "sign"])
     out = capsys.readouterr().out
-    assert_that(out, contains_string("usage: sign client|server NAME --csr PATH"))
+    assert_that(out, contains_string("usage: sign client|server|intermediate NAME --csr PATH"))
     assert_that(out, contains_string("--csr PATH"))
 
 

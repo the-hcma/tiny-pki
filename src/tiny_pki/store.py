@@ -5,24 +5,33 @@ Private keys, bundles, and ``index.json`` are written with mode ``0o600``;
 directories the store creates are ``0o700``, except the key-free ``public/``
 (``0o755``), which mirrors ``ca.crt`` and ``crl.pem`` for TLS servers. Leaf and
 bundle writes refuse a symlink at any path component, and index paths must point
-at a leaf file under ``clients/`` or ``servers/``.
+at a certificate file under ``clients/``, ``servers/`` or ``intermediates/``.
 
 Layout (one CA per store root)::
 
     $STORE/
       ca/ca.crt  ca/ca.key  ca/crl.pem  ca/crlnumber  ca/crldays  ca/index.json
       ca/ocspdays  ca/ocspurl           (only once OCSP stapling / an OCSP URL is set up)
-      public/ca.crt  public/crl.pem  public/ocsp/{cn}.der
+      ca/chain.pem  ca/chain-crl.pem    (only when the CA is an intermediate)
+      public/ca.crt  public/crl.pem  public/ca-chain.pem  public/ocsp/{cn}.der
       clients/{cn}-{serial}.{crt,key}   (no .key for a certificate signed from a CSR)
       servers/{cn}-{serial}.{crt,key}   (likewise)
+      intermediates/{cn}-{serial}.crt   (intermediate CAs this CA signed; never a key)
       bundles/{cn}-{serial}.p12
+
+A store whose CA is an intermediate keeps the certificates above it in
+``ca/chain.pem`` (issuer first, root last) and their CRLs in ``ca/chain-crl.pem``
+(see :meth:`CertificateStore.import_chain_crl`). ``public/crl.pem`` then holds
+its own CRL followed by those, because a TLS server that checks CRLs (nginx
+``ssl_crl``) checks every CA in the chain; ``ca/crl.pem`` stays its own only.
 
 Legacy flat layouts (``ca.crt`` / ``certs/`` at the store root) are migrated
 automatically on first ``ensure_layout``.
 
 Methods that change the index (``add_certificate``, ``mark_revoked``,
 ``delete_certificate`` and the CLI-shaped ``issue_client`` / ``issue_server`` /
-``sign_client_csr`` / ``sign_server_csr`` / ``revoke`` / ``delete``) republish
+``sign_client_csr`` / ``sign_server_csr`` / ``issue_intermediate`` /
+``sign_intermediate_csr`` / ``revoke`` / ``delete``) republish
 ``ca/crl.pem`` with the store's CA key, so the CRL never lags ``index.json``; once
 :meth:`CertificateStore.publish_ocsp` has run, every CRL publish also refreshes
 the stapled OCSP responses in ``public/ocsp/``.
@@ -51,7 +60,11 @@ from pathlib import Path
 from typing import Any, Concatenate, Literal, cast
 
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 from cryptography.fernet import InvalidToken
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.types import CertificateIssuerPublicKeyTypes
+from cryptography.x509.oid import NameOID
 
 from tiny_pki._fsutil import write_file_atomic
 from tiny_pki._keys import load_ca_private_key
@@ -59,6 +72,7 @@ from tiny_pki.check import CertificateStatus, Status, check_certificate, check_c
 from tiny_pki.constants import (
     DEFAULT_CLIENT_VALIDITY_DAYS,
     DEFAULT_CRL_VALIDITY_DAYS,
+    DEFAULT_INTERMEDIATE_VALIDITY_DAYS,
     DEFAULT_KEY_TYPE,
     DEFAULT_OCSP_VALIDITY_DAYS,
     DEFAULT_SERVER_VALIDITY_DAYS,
@@ -70,8 +84,11 @@ from tiny_pki.errors import TinyPkiError
 from tiny_pki.inspect import get_certificate_expiry, get_certificate_fingerprint, get_certificate_serial_number
 from tiny_pki.issue import (
     generate_client_certificate,
+    generate_intermediate_ca_certificate,
     generate_server_certificate,
+    require_name_constraints_within,
     sign_client_csr,
+    sign_intermediate_csr,
     sign_server_csr,
 )
 from tiny_pki.names import normalize_http_url
@@ -80,12 +97,13 @@ from tiny_pki.revoke import generate_crl
 from tiny_pki.secrets import (
     decrypt_private_key_scrypt,
     encrypt_private_key_scrypt,
+    require_strong_secret,
 )
 
 if sys.platform != "win32":
     import fcntl
 
-CertKind = Literal["client", "server"]
+CertKind = Literal["client", "intermediate", "server"]
 CertStatus = Literal["active", "all", "revoked"]
 CheckKind = Literal["ca", "client", "crl", "server"]
 CHECK_KINDS: frozenset[CheckKind] = frozenset({"ca", "client", "crl", "server"})
@@ -134,6 +152,11 @@ class CertificateStore:
         return self.root / "ca" / "ca.crt"
 
     @property
+    def ca_chain_path(self) -> Path:
+        """Certificates above an intermediate CA (issuer first, root last); absent for a root CA."""
+        return self.root / "ca" / "chain.pem"
+
+    @property
     def ca_dir(self) -> Path:
         return self.root / "ca"
 
@@ -144,6 +167,11 @@ class CertificateStore:
     @property
     def clients_dir(self) -> Path:
         return self.root / "clients"
+
+    @property
+    def chain_crl_path(self) -> Path:
+        """CRLs of the CAs in :attr:`ca_chain_path`, imported with :meth:`import_chain_crl`."""
+        return self.root / "ca" / "chain-crl.pem"
 
     @property
     def crl_path(self) -> Path:
@@ -163,6 +191,10 @@ class CertificateStore:
     @property
     def index_path(self) -> Path:
         return self.root / "ca" / "index.json"
+
+    @property
+    def intermediates_dir(self) -> Path:
+        return self.root / "intermediates"
 
     @property
     def lock_path(self) -> Path:
@@ -226,12 +258,19 @@ class CertificateStore:
         ``keep_previous=True`` leaves earlier live certificates of the same kind
         for the CN live (routine rotation); the CN then resolves to the new one,
         and the older serials are :meth:`superseded_serials` until revoked by
-        serial. A live certificate of the other kind is still revoked. Encrypted
+        serial. A live certificate of the other leaf kind is still revoked. Encrypted
         stores require ``key_secret`` so the CRL can be republished.
+
+        ``kind="intermediate"`` records an intermediate CA this CA signed: it takes
+        no key (the key belongs in the intermediate's own store), a renewal never
+        revokes the previous certificate (its leaves still chain to it; revoke it
+        by serial once they are replaced), and its CN cannot be shared with a leaf.
         """
         self.ensure_layout()
-        if kind not in ("client", "server"):
-            raise ValueError(f"Expected kind 'client' or 'server', got {kind!r}")
+        if kind not in _CERT_DIRS:
+            raise ValueError(f"Expected kind 'client', 'intermediate' or 'server', got {kind!r}")
+        if kind == "intermediate" and key_pem is not None:
+            raise ValueError("Expected no key for an intermediate CA; its key belongs in its own store")
         self._require_ca_signing_key(key_secret)
         common_name = common_name.strip()
         if not common_name:
@@ -240,7 +279,21 @@ class CertificateStore:
         for existing in self._read_index():
             if existing.serial_number == serial_hex and existing.revoked_at is not None:
                 raise ValueError(f"Serial {serial_hex} is already revoked; refuse to re-issue under that serial")
-        leaf_dir = "clients" if kind == "client" else "servers"
+            if (
+                existing.common_name.casefold() == common_name.casefold()
+                and existing.revoked_at is None
+                and existing.cert_path
+                and existing.serial_number != serial_hex
+                and (existing.kind == "intermediate") != (kind == "intermediate")
+            ):
+                raise ValueError(
+                    f"Expected {common_name!r} to name either an intermediate CA or a leaf, but a live "
+                    f"{existing.kind} certificate (serial 0x{existing.serial_number}) already uses it; pick another CN"
+                )
+        leaf_dir = _CERT_DIRS[kind]
+        if kind == "intermediate":
+            keep_previous = True
+            _make_private_dir(self._validated_write_path(leaf_dir))
         safe = _safe_filename(common_name)
         cert_rel = f"{leaf_dir}/{safe}-{serial_hex}.crt"
         key_rel = f"{leaf_dir}/{safe}-{serial_hex}.key" if key_pem is not None else ""
@@ -828,6 +881,209 @@ class CertificateStore:
         )
         return self._record(common_name, "server", cert_pem, None, key_secret=key_secret)
 
+    @_locked
+    def issue_intermediate(
+        self,
+        common_name: str,
+        *,
+        organization_name: str | None = None,
+        validity_days: int = DEFAULT_INTERMEDIATE_VALIDITY_DAYS,
+        key_size: int | None = None,
+        key_type: KeyType = DEFAULT_KEY_TYPE,
+        permitted_subtrees: list[str] | None = None,
+        key_secret: str | None = None,
+    ) -> tuple[IssuedCertificate, bytes]:
+        """Issue an intermediate CA and record its certificate; the private key is returned, never stored here.
+
+        Arguments match :func:`tiny_pki.generate_intermediate_ca_certificate`; the
+        store's CA must have been created with ``path_length=1``. Hand the key to
+        the intermediate's own store (:meth:`init_intermediate` does both steps).
+
+        Returns:
+            ``(entry, private_key_pem)``.
+        """
+        ca_material = self._require_ca_signing_key(key_secret)
+        if ca_material is None:
+            raise FileNotFoundError(f"Expected CA files under {self.ca_dir}")
+        cert_pem, key_pem = generate_intermediate_ca_certificate(
+            *ca_material,
+            common_name,
+            organization_name=organization_name,
+            validity_days=validity_days,
+            key_size=key_size,
+            key_type=key_type,
+            permitted_subtrees=permitted_subtrees,
+        )
+        return self._record(common_name, "intermediate", cert_pem, None, key_secret=key_secret), key_pem
+
+    @_locked
+    def sign_intermediate_csr(
+        self,
+        common_name: str,
+        csr_pem: bytes,
+        *,
+        organization_name: str | None = None,
+        validity_days: int = DEFAULT_INTERMEDIATE_VALIDITY_DAYS,
+        permitted_subtrees: list[str] | None = None,
+        key_secret: str | None = None,
+    ) -> IssuedCertificate:
+        """Sign an intermediate CA's CSR and record it, as ``tiny-pki sign intermediate``.
+
+        Arguments match :func:`tiny_pki.sign_intermediate_csr`. The intermediate
+        needs this store's :meth:`read_ca_chain` next to its certificate, and this
+        store's CRL, to be trusted by relying parties that check revocation.
+        """
+        ca_material = self._require_ca_signing_key(key_secret)
+        if ca_material is None:
+            raise FileNotFoundError(f"Expected CA files under {self.ca_dir}")
+        cert_pem = sign_intermediate_csr(
+            *ca_material,
+            csr_pem,
+            common_name,
+            organization_name=organization_name,
+            validity_days=validity_days,
+            permitted_subtrees=permitted_subtrees,
+        )
+        return self._record(common_name, "intermediate", cert_pem, None, key_secret=key_secret)
+
+    @_locked
+    def init_intermediate(
+        self,
+        issuer: CertificateStore,
+        common_name: str,
+        *,
+        organization_name: str | None = None,
+        validity_days: int = DEFAULT_INTERMEDIATE_VALIDITY_DAYS,
+        key_size: int | None = None,
+        key_type: KeyType = DEFAULT_KEY_TYPE,
+        permitted_subtrees: list[str] | None = None,
+        key_secret: str | None = None,
+        issuer_key_secret: str | None = None,
+        crl_validity_days: int | None = None,
+    ) -> IssuedCertificate:
+        """Create this store's CA as an intermediate signed by ``issuer``, as ``tiny-pki init --intermediate-of``.
+
+        ``issuer`` records the certificate (see :meth:`issue_intermediate`); this
+        store gets the key (encrypted with ``key_secret`` when given), the chain,
+        the issuer's CRLs (see :meth:`import_chain_crl`) and its own first CRL.
+        If setting up this store fails after the issuer signed, the issuer
+        revokes the new certificate and the CA files written here are removed,
+        so no live intermediate is left without its key and a retry can start over.
+
+        Returns:
+            The issuer's index entry for the new intermediate.
+        """
+        if self.has_ca():
+            raise ValueError(f"CA already exists under {self.root}")
+        if issuer.root == self.root:
+            raise ValueError("Expected the issuer to be a different store than the intermediate")
+        if key_secret is not None:
+            require_strong_secret(key_secret)
+        if crl_validity_days is not None:
+            _require_crl_validity_days(crl_validity_days)
+        self.ensure_layout()
+        ca_files = [
+            self._validated_write_path(name)
+            for name in (
+                "ca/ca.crt",
+                "ca/ca.key",
+                "ca/chain.pem",
+                "ca/chain-crl.pem",
+                "ca/crl.pem",
+                "ca/crldays",
+                "ca/crlnumber",
+                "public/ca.crt",
+                "public/ca-chain.pem",
+                "public/crl.pem",
+            )
+        ]
+        preexisting = {path for path in ca_files if path.exists()}
+        entry, key_pem = issuer.issue_intermediate(
+            common_name,
+            organization_name=organization_name,
+            validity_days=validity_days,
+            key_size=key_size,
+            key_type=key_type,
+            permitted_subtrees=permitted_subtrees,
+            key_secret=issuer_key_secret,
+        )
+        try:
+            self.write_ca(
+                issuer.read_certificate_pem(entry), key_pem, chain_pem=issuer.read_ca_chain(), key_secret=key_secret
+            )
+            for crl in (issuer.read_crl(), *issuer.read_chain_crls()):
+                if crl is None:
+                    continue
+                self.import_chain_crl(crl)
+            self.publish_crl(validity_days=crl_validity_days, key_secret=key_secret)
+        except BaseException:
+            for path in ca_files:
+                if path not in preexisting:
+                    path.unlink(missing_ok=True)
+            materials: dict[Path, tuple[bytes, bytes]] = _HELD_LOCKS.__dict__.setdefault("ca_material", {})
+            materials.pop(self.lock_path, None)
+            issuer.revoke(f"0x{entry.serial_number}", key_secret=issuer_key_secret)
+            raise
+        return entry
+
+    @_locked
+    def import_chain_crl(self, crl_pem: bytes) -> None:
+        """Store the CRL of a CA above this intermediate, and republish ``public/crl.pem`` with it.
+
+        Run it whenever that CA publishes a new CRL (at least before the stored
+        one reaches ``nextUpdate``): a TLS server that checks CRLs rejects every
+        client once any CRL in the chain has expired. The CRL must be signed by
+        a certificate in :attr:`ca_chain_path`, and it replaces an older CRL of
+        the same CA, never a newer one.
+
+        Raises:
+            TinyPkiError: The store's CA is not an intermediate, the CRL is not
+                signed by a CA in its chain, or its CRL number is lower than the
+                stored one's.
+        """
+        try:
+            crl = x509.load_pem_x509_crl(crl_pem)
+        except ValueError as exc:
+            raise TinyPkiError("Expected a PEM CRL to import into the chain") from exc
+        chain = self._chain_certificates()
+        if not chain:
+            raise TinyPkiError(f"Expected an intermediate CA under {self.ca_dir}; a root CA has no chain CRLs")
+        issuer = _crl_issuer(crl, chain)
+        if issuer is None:
+            names = ", ".join(cert.subject.rfc4514_string() for cert in chain)
+            raise TinyPkiError(f"Expected a CRL signed by a CA in this store's chain ({names}), got {crl.issuer}")
+        kept: list[bytes] = []
+        for existing_pem in self.read_chain_crls():
+            existing = x509.load_pem_x509_crl(existing_pem)
+            if _crl_issuer(existing, [issuer]) is None:
+                kept.append(existing_pem)
+                continue
+            old_number, new_number = _crl_number(existing_pem), _crl_number(crl_pem)
+            if old_number is not None and (new_number is None or new_number < old_number):
+                raise TinyPkiError(
+                    f"Expected a CRL for {issuer.subject.rfc4514_string()} at least as new as the stored one "
+                    f"(CRL number {old_number}), got CRL number {new_number}; refusing to roll it back"
+                )
+        kept.append(crl.public_bytes(serialization.Encoding.PEM))
+        _write_plain(self._validated_write_path("ca/chain-crl.pem"), b"".join(kept))
+        self._sync_public_dir()
+
+    def read_ca_chain(self) -> bytes:
+        """Return the CA certificate followed by its chain (:attr:`ca_chain_path`), as concatenated PEM.
+
+        For a root CA that is just the CA certificate. Give it to relying
+        parties (``ssl_trusted_certificate``) and to PKCS#12 bundles.
+        """
+        chain = self._validated_write_path("ca/chain.pem")
+        return self.read_ca_certificate() + (chain.read_bytes() if chain.is_file() else b"")
+
+    def read_chain_crls(self) -> list[bytes]:
+        """Return the CRLs imported for the CAs above this intermediate (PEM each; empty for a root CA)."""
+        path = self._validated_write_path("ca/chain-crl.pem")
+        if not path.is_file():
+            return []
+        return [crl.public_bytes(serialization.Encoding.PEM) for crl in _load_pem_crls(path.read_bytes(), source=path)]
+
     def revoke(self, identity: str, *, key_secret: str | None = None) -> IssuedCertificate:
         """Revoke a certificate, as ``tiny-pki revoke``; see :meth:`mark_revoked`."""
         return self.mark_revoked(identity, key_secret=key_secret)
@@ -952,11 +1208,32 @@ class CertificateStore:
         return path
 
     @_locked
-    def write_ca(self, cert_pem: bytes, key_pem: bytes, *, force: bool = False, key_secret: str | None = None) -> None:
+    def write_ca(
+        self,
+        cert_pem: bytes,
+        key_pem: bytes,
+        *,
+        chain_pem: bytes | None = None,
+        force: bool = False,
+        key_secret: str | None = None,
+    ) -> None:
         """Persist the CA certificate and private key (key mode 0600).
 
-        Refuses to overwrite an existing CA unless ``force=True``.
+        ``chain_pem`` makes the CA an intermediate: the certificates above it,
+        issuer first and self-signed root last, each of which must have signed the
+        one before and be allowed to (a CA whose Key Usage, when present, has
+        ``keyCertSign`` and whose ``path_length`` covers the CAs below it). The CA's
+        own Name Constraints must be at least as narrow as every chain
+        certificate's, since issuance and ``check`` enforce only the CA's own.
+        Any previously imported chain CRLs are dropped (import the new
+        issuers' CRLs with :meth:`import_chain_crl`). Refuses to overwrite an
+        existing CA unless ``force=True``.
+
+        Raises:
+            TinyPkiError: ``chain_pem`` does not lead from ``cert_pem`` to a self-signed root.
         """
+        if chain_pem is not None:
+            chain_pem = _validated_chain(cert_pem, chain_pem)
         # Migrate first so legacy root CA material is visible to has_ca().
         self.ensure_layout()
         existing_ca = self.has_ca()
@@ -969,7 +1246,12 @@ class CertificateStore:
             stored_key = _ENCRYPTED_CA_KEY_PREFIX + encrypt_private_key_scrypt(key_pem, key_secret)
         _write_plain(self._validated_write_path("ca/ca.crt"), cert_pem)
         _write_secret(self._validated_write_path("ca/ca.key"), stored_key)
-        _write_plain(self._validated_write_path("public/ca.crt"), cert_pem)
+        self._validated_write_path("ca/chain-crl.pem").unlink(missing_ok=True)
+        if chain_pem is None:
+            self._validated_write_path("ca/chain.pem").unlink(missing_ok=True)
+        else:
+            _write_plain(self._validated_write_path("ca/chain.pem"), chain_pem)
+        self._sync_public_dir()
         materials: dict[Path, tuple[bytes, bytes]] = _HELD_LOCKS.__dict__.setdefault("ca_material", {})
         materials.pop(self.lock_path, None)
 
@@ -985,7 +1267,7 @@ class CertificateStore:
         if number is not None and number > self._recorded_crl_number():
             _write_plain(self._validated_write_path("ca/crlnumber"), f"{number}\n".encode())
         _write_plain(self._validated_write_path("ca/crl.pem"), crl_pem)
-        _write_plain(self._validated_write_path("public/crl.pem"), crl_pem)
+        self._sync_public_dir()
 
     def next_crl_number(self, *, now: datetime | None = None) -> int:
         """Return a CRL number above every one this store has published.
@@ -1126,6 +1408,12 @@ class CertificateStore:
                 path.unlink(missing_ok=True)
         return written
 
+    def _chain_certificates(self) -> list[x509.Certificate]:
+        path = self._validated_write_path("ca/chain.pem")
+        if not path.is_file():
+            return []
+        return x509.load_pem_x509_certificates(path.read_bytes())
+
     def _recorded_crl_number(self) -> int:
         path = self._validated_write_path("ca/crlnumber")
         if not path.is_file():
@@ -1183,7 +1471,7 @@ class CertificateStore:
                         raise ValueError(f"Expected legacy key_path under certs/, got {key_rel!r}")
                     old_cert = self._path_under_root(cert_rel)
                     old_key = self._path_under_root(key_rel) if key_rel else None
-                    leaf_dir = "clients" if entry.kind == "client" else "servers"
+                    leaf_dir = _CERT_DIRS[entry.kind]
                     new_cert = f"{leaf_dir}/{Path(cert_rel).name}"
                     new_key = f"{leaf_dir}/{Path(key_rel).name}" if key_rel else ""
                     if old_cert.is_file():
@@ -1281,8 +1569,10 @@ class CertificateStore:
                 continue
             self._path_under_root(rel)
             parts = Path(rel).parts
-            if len(parts) != 2 or parts[0] not in ("clients", "servers") or not parts[1].endswith(suffix):
-                raise ValueError(f"Expected index path clients/<file>{suffix} or servers/<file>{suffix}, got {rel!r}")
+            if len(parts) != 2 or parts[0] != _CERT_DIRS[entry.kind] or not parts[1].endswith(suffix):
+                raise ValueError(f"Expected index path {_CERT_DIRS[entry.kind]}/<file>{suffix}, got {rel!r}")
+            if entry.kind == "intermediate" and suffix == ".key":
+                raise ValueError(f"Expected no key path for intermediate CA {entry.common_name!r}, got {rel!r}")
             if parts[1] == "ca.key":
                 raise ValueError(f"Expected index path to not name the CA key, got {rel!r}")
 
@@ -1297,13 +1587,27 @@ class CertificateStore:
         _set_owned_mode(public, _PUBLIC_DIR_MODE)
 
     def _sync_public_dir(self) -> None:
-        """Bring ``public/`` up to date with ``ca/`` (fills it in for stores created before it existed)."""
-        for name in ("ca.crt", "crl.pem"):
-            source = self._validated_write_path(f"ca/{name}")
-            if not source.is_file():
-                continue
-            data = source.read_bytes()
+        """Bring ``public/`` up to date with ``ca/`` (fills it in for stores created before it existed).
+
+        ``crl.pem`` is the own CRL plus the chain CRLs, and ``ca-chain.pem`` (the CA
+        certificate plus its chain) exists only for an intermediate CA.
+        """
+        ca_dir = self._validated_write_path("ca")
+        ca_cert, crl, chain, chain_crls = (
+            path.read_bytes() if path.is_file() else None
+            for path in (ca_dir / "ca.crt", ca_dir / "crl.pem", ca_dir / "chain.pem", ca_dir / "chain-crl.pem")
+        )
+        published: dict[str, bytes | None] = {
+            "ca.crt": ca_cert,
+            "crl.pem": None if crl is None else crl + (chain_crls or b""),
+            "ca-chain.pem": None if ca_cert is None or chain is None else ca_cert + chain,
+        }
+        for name, data in published.items():
             target = self._validated_write_path(f"public/{name}")
+            if data is None:
+                if name == "ca-chain.pem":
+                    target.unlink(missing_ok=True)
+                continue
             if (
                 not target.is_file()
                 or stat.S_IMODE(target.lstat().st_mode) != _PUBLIC_FILE_MODE
@@ -1337,6 +1641,12 @@ def check_store(
     certificate for the same CN replaces is named ``"<cn> (superseded, 0x<serial>)"``
     with a reason naming the newer serial.
 
+    For an intermediate CA, the CA is checked against its issuer (and the
+    issuer's imported CRL), and each chain certificate gets an ``"issuer <cn>"``
+    row (kind ``"ca"``) and each chain CRL an ``"issuer crl <cn>"`` row (kind
+    ``"crl"``); a missing chain CRL is ``untrusted``. Intermediate CAs this CA
+    signed are checked as kind ``"ca"``.
+
     Returns:
         ``(name, status)`` rows: ``"ca"``, ``"crl"``, then each leaf by common name.
 
@@ -1348,9 +1658,10 @@ def check_store(
     if not store.ca_cert_path.is_file():
         raise FileNotFoundError(f"Expected a CA certificate at {store.ca_cert_path}")
     ca_cert = store.ca_cert_path.read_bytes()
-    rows: list[tuple[str, CertificateStatus]] = []
-    if "ca" in kinds:
-        rows.append(("ca", check_certificate(ca_cert, within=within, by=by, ca_cert_pem=ca_cert)))
+    chain = [
+        cert.public_bytes(serialization.Encoding.PEM) for cert in x509.load_pem_x509_certificates(store.read_ca_chain())
+    ][1:]
+    rows = _chain_rows(ca_cert, chain, store.read_chain_crls(), within=within, by=by, kinds=kinds)
     index_revoked = {int(e.serial_number, 16) for e in store.list_certificates(status="revoked")}
     trusted_crl: bytes | None = None
     if crl_pem is None:
@@ -1375,7 +1686,7 @@ def check_store(
             rows.append(("crl", crl_result))
     superseded = store.superseded_serials()
     for entry in store.list_certificates(status="all" if include_revoked else "active"):
-        if entry.kind not in kinds:
+        if ("ca" if entry.kind == "intermediate" else entry.kind) not in kinds:
             continue
         cert_pem = store.read_certificate_pem(entry)
         result = check_certificate(cert_pem, within=within, by=by, ca_cert_pem=ca_cert, crl_pem=trusted_crl)
@@ -1393,6 +1704,65 @@ def check_store(
                 ),
             )
         rows.append((name, result))
+    return rows
+
+
+def _chain_rows(
+    ca_cert: bytes,
+    chain: list[bytes],
+    chain_crls: list[bytes],
+    *,
+    within: timedelta | None,
+    by: datetime | None,
+    kinds: set[CheckKind] | frozenset[CheckKind],
+) -> list[tuple[str, CertificateStatus]]:
+    """Rows for the store CA and, for an intermediate, every certificate and CRL above it."""
+    crl_by_issuer: dict[bytes, bytes] = {}
+    for crl_pem in chain_crls:
+        crl = x509.load_pem_x509_crl(crl_pem)
+        for issuer_pem in chain:
+            if _crl_issuer(crl, [x509.load_pem_x509_certificate(issuer_pem)]) is not None:
+                crl_by_issuer[issuer_pem] = crl_pem
+    rows: list[tuple[str, CertificateStatus]] = []
+    for position, cert_pem in enumerate([ca_cert, *chain]):
+        issuer_pem = chain[position] if position < len(chain) else cert_pem
+        if "ca" in kinds:
+            result = check_certificate(
+                cert_pem,
+                within=within,
+                by=by,
+                ca_cert_pem=issuer_pem,
+                crl_pem=crl_by_issuer.get(issuer_pem) if issuer_pem != cert_pem else None,
+            )
+            rows.append(("ca" if position == 0 else f"issuer {_subject_cn(cert_pem)}", result))
+        if position == 0:
+            continue
+        name = f"issuer crl {_subject_cn(cert_pem)}"
+        crl_pem = crl_by_issuer.get(cert_pem)
+        if crl_pem is None:
+            now = datetime.now(UTC)
+            label = x509.load_pem_x509_certificate(cert_pem).subject.rfc4514_string()
+            rows.append(
+                (
+                    name,
+                    CertificateStatus(
+                        kind="crl",
+                        subject=label,
+                        issuer=label,
+                        serial_number=None,
+                        not_before=now,
+                        not_after=None,
+                        cutoff=now,
+                        days_remaining=None,
+                        status=Status.UNTRUSTED,
+                        reasons=("missing; import the issuer's current CRL with `crl --chain-crl PATH`",),
+                    ),
+                )
+            )
+            continue
+        crl_result = check_crl(crl_pem, within=within, by=by, ca_cert_pem=cert_pem)
+        if "crl" in kinds or crl_result.status is Status.UNTRUSTED:
+            rows.append((name, crl_result))
     return rows
 
 
@@ -1417,9 +1787,9 @@ def _entry_from_dict(item: Any) -> IssuedCertificate:
         raise ValueError(f"Expected index entry object, got {type(item).__name__}")
     data = cast(Mapping[str, Any], item)
     kind = data.get("kind")
-    if kind not in ("client", "server"):
-        raise ValueError(f"Expected kind 'client' or 'server', got {kind!r}")
-    typed_kind: CertKind = kind
+    if kind not in _CERT_DIRS:
+        raise ValueError(f"Expected kind 'client', 'intermediate' or 'server', got {kind!r}")
+    typed_kind = cast(CertKind, kind)
     revoked_raw = data.get("revoked_at")
     return IssuedCertificate(
         common_name=str(data["common_name"]),
@@ -1452,6 +1822,7 @@ def _index_references_certs_paths(index_path: Path) -> bool:
     return False
 
 
+_CERT_DIRS: dict[str, str] = {"client": "clients", "intermediate": "intermediates", "server": "servers"}
 _DIR_MODE = 0o700
 _PUBLIC_DIR_MODE = 0o755
 _PUBLIC_FILE_MODE = 0o644
@@ -1462,6 +1833,19 @@ _HELD_LOCKS = threading.local()
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 # RFC 5280 §5.2.3: conforming CRL numbers fit in 20 octets.
 _MAX_CRL_NUMBER = 2**159 - 1
+
+
+def _crl_issuer(crl: x509.CertificateRevocationList, candidates: list[x509.Certificate]) -> x509.Certificate | None:
+    """The candidate whose subject and key signed ``crl``, if any."""
+    for cert in candidates:
+        if cert.subject != crl.issuer:
+            continue
+        try:
+            if crl.is_signature_valid(cast(CertificateIssuerPublicKeyTypes, cert.public_key())):
+                return cert
+        except TypeError:
+            continue
+    return None
 
 
 def _crl_number(crl_pem: bytes) -> int | None:
@@ -1518,6 +1902,22 @@ def _set_owned_mode(directory: Path, mode: int) -> None:
         directory.chmod(mode)
 
 
+def _load_pem_crls(data: bytes, *, source: Path) -> list[x509.CertificateRevocationList]:
+    marker = b"-----END X509 CRL-----"
+    blocks = [block + marker for block in data.split(marker) if block.strip()]
+    try:
+        return [x509.load_pem_x509_crl(block) for block in blocks]
+    except ValueError as exc:
+        raise ValueError(f"Expected concatenated PEM CRLs in {source}") from exc
+
+
+def _make_private_dir(directory: Path) -> None:
+    if not directory.exists():
+        directory.mkdir(mode=_DIR_MODE)
+    elif not directory.is_dir():
+        raise ValueError(f"Expected {directory} to be a directory")
+
+
 def _stable_ocsp_entry(group: list[IssuedCertificate]) -> IssuedCertificate | None:
     """The entry that owns ``<cn>.der``: the newest live one, or the newest one when none is live.
 
@@ -1541,6 +1941,51 @@ def _safe_filename(common_name: str) -> str:
 # a symlink at any component. write_file_atomic then refuses a symlink at the
 # final path and publishes via rename(2), which replaces a link planted in the
 # meantime instead of writing through it; readers never see a truncated file.
+def _subject_cn(cert_pem: bytes) -> str:
+    cert = x509.load_pem_x509_certificate(cert_pem)
+    names = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    return str(names[0].value) if names else cert.subject.rfc4514_string()
+
+
+def _validated_chain(cert_pem: bytes, chain_pem: bytes) -> bytes:
+    """Return ``chain_pem`` normalized, after checking it links ``cert_pem`` to a self-signed root."""
+    try:
+        cert = x509.load_pem_x509_certificate(cert_pem)
+        chain = x509.load_pem_x509_certificates(chain_pem)
+    except ValueError as exc:
+        raise TinyPkiError("Expected PEM certificates for the CA and its chain") from exc
+    links = [cert, *chain]
+    for depth, (child, parent) in enumerate(zip(links, [*chain, chain[-1]], strict=True)):
+        try:
+            constraints = parent.extensions.get_extension_for_class(x509.BasicConstraints).value
+        except x509.ExtensionNotFound:
+            constraints = None
+        try:
+            usage = parent.extensions.get_extension_for_class(x509.KeyUsage).value
+        except x509.ExtensionNotFound:
+            usage = None
+        try:
+            if constraints is None or not constraints.ca:
+                raise ValueError("not a CA certificate")
+            if usage is not None and not usage.key_cert_sign:
+                raise ValueError("its Key Usage does not allow keyCertSign")
+            # The CA certificates below ``parent`` (this store's CA included) all count against its path_length.
+            if child is not parent and constraints.path_length is not None and constraints.path_length < depth + 1:
+                raise ValueError(
+                    f"its path_length={constraints.path_length} allows fewer than the "
+                    f"{depth + 1} CA certificate(s) below it"
+                )
+            child.verify_directly_issued_by(parent)
+        except (ValueError, TypeError, InvalidSignature) as exc:
+            raise TinyPkiError(
+                f"Expected {child.subject.rfc4514_string()} to be issued by the next chain certificate "
+                f"{parent.subject.rfc4514_string()} (chain: issuer first, self-signed root last): {exc}"
+            ) from exc
+    for ancestor in chain:
+        require_name_constraints_within(cert, ancestor)
+    return b"".join(link.public_bytes(serialization.Encoding.PEM) for link in chain)
+
+
 def _write_plain(path: Path, data: bytes) -> None:
     """Atomically write non-secret bytes (cert/CRL) with mode 0644."""
     write_file_atomic(path, data, mode=0o644)
