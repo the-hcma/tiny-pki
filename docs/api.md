@@ -11,13 +11,13 @@ The library needs only `cryptography` (`pip install tiny-pki`); none of the modu
 | `generate_ca_certificate(common_name="Private CA", *, organization_name="tiny-pki", validity_days=3650, key_size=None, key_type="rsa", permitted_subtrees=None, path_length=0)` | `(ca_cert_pem, ca_key_pem)` — self-signed, `BasicConstraints(ca=True, path_length=path_length)`, `keyCertSign` + `cRLSign`; optional critical Name Constraints. `path_length=0` signs leaves only; `1` also signs intermediate CAs (see [Intermediate CAs](#intermediate-cas)) |
 | `generate_intermediate_ca_certificate(issuer_cert_pem, issuer_key_pem, common_name, *, organization_name=None, validity_days=1825, key_size=None, key_type="rsa", permitted_subtrees=None)` | `(cert_pem, key_pem)` — an intermediate CA signed by a `path_length=1` root: `BasicConstraints(ca=True, path_length=0)`, `keyCertSign` + `cRLSign`, the issuer's Name Constraints (narrowed by `permitted_subtrees`) |
 | `sign_intermediate_csr(issuer_cert_pem, issuer_key_pem, csr_pem, common_name, *, organization_name=None, validity_days=1825, permitted_subtrees=None)` | `cert_pem` — the same intermediate profile, for the public key in a CSR from a CA whose key lives elsewhere (OpenBao, another host) |
-| `generate_client_certificate(ca_cert_pem, ca_key_pem, common_name, *, organization_name=None, validity_days=397, key_size=None, key_type="rsa", allow_long_validity=False, allow_dn_special_chars=False, ocsp_url=None, uri_san=None)` | `(cert_pem, key_pem)` — `CLIENT_AUTH` EKU; CN is the identity, plus an optional URI SAN |
-| `generate_server_certificate(ca_cert_pem, ca_key_pem, common_name, san_entries, *, organization_name=None, validity_days=90, key_size=None, key_type="rsa", allow_long_validity=False, include_common_name_in_sans=True, allow_dn_special_chars=False, ocsp_url=None)` | `(cert_pem, key_pem)` — `SERVER_AUTH` EKU; `san_entries` are DNS names or IP literals (at least one) |
-| `sign_client_csr(ca_cert_pem, ca_key_pem, csr_pem, common_name, *, organization_name=None, validity_days=397, allow_long_validity=False, allow_dn_special_chars=False, ocsp_url=None, uri_san=None)` | `cert_pem` — the same client profile as `generate_client_certificate`, for the public key in a device's CSR; see [Signing a CSR](#signing-a-csr) |
-| `sign_server_csr(ca_cert_pem, ca_key_pem, csr_pem, common_name, san_entries, *, organization_name=None, validity_days=90, allow_long_validity=False, include_common_name_in_sans=True, include_csr_sans=False, allow_dn_special_chars=False, ocsp_url=None)` | `cert_pem` — the same server profile as `generate_server_certificate`, for the public key in a server's CSR; see [Signing a CSR](#signing-a-csr) |
+| `generate_client_certificate(ca_cert_pem, ca_key_pem, common_name, *, organization_name=None, validity_days=397, key_size=None, key_type="rsa", allow_long_validity=False, allow_dn_special_chars=False, ocsp_url=None, crl_url=None, uri_san=None)` | `(cert_pem, key_pem)` — `CLIENT_AUTH` EKU; CN is the identity, plus an optional URI SAN |
+| `generate_server_certificate(ca_cert_pem, ca_key_pem, common_name, san_entries, *, organization_name=None, validity_days=90, key_size=None, key_type="rsa", allow_long_validity=False, include_common_name_in_sans=True, allow_dn_special_chars=False, ocsp_url=None, crl_url=None)` | `(cert_pem, key_pem)` — `SERVER_AUTH` EKU; `san_entries` are DNS names or IP literals (at least one) |
+| `sign_client_csr(ca_cert_pem, ca_key_pem, csr_pem, common_name, *, organization_name=None, validity_days=397, allow_long_validity=False, allow_dn_special_chars=False, ocsp_url=None, crl_url=None, uri_san=None)` | `cert_pem` — the same client profile as `generate_client_certificate`, for the public key in a device's CSR; see [Signing a CSR](#signing-a-csr) |
+| `sign_server_csr(ca_cert_pem, ca_key_pem, csr_pem, common_name, san_entries, *, organization_name=None, validity_days=90, allow_long_validity=False, include_common_name_in_sans=True, include_csr_sans=False, allow_dn_special_chars=False, ocsp_url=None, crl_url=None)` | `cert_pem` — the same server profile as `generate_server_certificate`, for the public key in a server's CSR; see [Signing a CSR](#signing-a-csr) |
 | `max_leaf_validity_days(ca_cert_pem, *, kind="server", allow_long_validity=False)` | `int` — the largest `validity_days` issuing a `kind` leaf under this CA accepts right now (CA `notAfter` with the `CLOCK_SKEW_BACKDATE` backdate, and the per-kind cap unless `allow_long_validity`); `0` once the CA cannot sign any leaf. Use it to clamp or grey out `VALIDITY_PRESETS` in UIs |
 
-`organization_name=None` on leaves inherits the CA's `O`. `ocsp_url` (an `http://` or `https://` URL) adds an Authority Information Access extension naming that OCSP responder; see [OCSP](#ocsp). `validity_days` must be between 1 and `MAX_VALIDITY_DAYS` (36500).
+`organization_name=None` on leaves inherits the CA's `O`. `ocsp_url` (an `http://` or `https://` URL) adds an Authority Information Access extension naming that OCSP responder; see [OCSP](#ocsp). `crl_url` (likewise) adds a CRL Distribution Points extension with that URL as its full name, for relying parties that fetch the CRL themselves. Every leaf-issuing function takes both. `validity_days` must be between 1 and `MAX_VALIDITY_DAYS` (36500).
 
 Key types (`KEY_TYPES`):
 
@@ -104,7 +104,7 @@ A root created with `path_length=1` can sign intermediate CAs, which sign leaves
 
 | Function | Returns |
 | --- | --- |
-| `generate_crl(ca_cert_pem, ca_key_pem, revoked_entries, *, validity_days=30, crl_number=None)` | CRL PEM signed by the CA, with `CRLNumber` and `AuthorityKeyIdentifier` (RFC 5280) |
+| `generate_crl(ca_cert_pem, ca_key_pem, revoked_entries, *, validity_days=7, crl_number=None)` | CRL PEM signed by the CA, with `CRLNumber` and `AuthorityKeyIdentifier` (RFC 5280) |
 
 `crl_number` defaults to microseconds since the epoch, which only increases if the signing host's clock never goes backwards. Pass a persisted counter if you can't guarantee that.
 
@@ -167,7 +167,7 @@ Expiry and validity checks for alerting (`tiny_pki.check`, re-exported from `tin
 | Function | Returns |
 | --- | --- |
 | `check_certificate(cert_pem, *, now=None, within=None, by=None, ca_cert_pem=None, crl_pem=None)` | `CertificateStatus` |
-| `check_crl(crl_pem, *, now=None, within=None, by=None, ca_cert_pem=None)` | `CertificateStatus` for the CRL's `nextUpdate` |
+| `check_crl(crl_pem, *, now=None, within=None, by=None, ca_cert_pem=None, renewal_interval=None)` | `CertificateStatus` for the CRL's `nextUpdate`; with `renewal_interval` (how often a timer republishes it), also `expiring` when it expires before the next renewal or its lifetime is under twice the interval |
 | `default_warning_window(kind, lifetime)` | `timedelta`: one third of `lifetime`, capped at `MAX_CA_WARNING_DAYS` (180) for a CA and `MAX_LEAF_WARNING_DAYS` (30) for leaves; CRLs are not capped |
 | `worst_status(results)` | the most severe `Status` (`OK` for an empty list) |
 
@@ -188,7 +188,7 @@ Expiry and validity checks for alerting (`tiny_pki.check`, re-exported from `tin
 | `DEFAULT_CA_KEY_SIZE` | `4096` |
 | `DEFAULT_CA_VALIDITY_DAYS` | `3650` |
 | `DEFAULT_CLIENT_VALIDITY_DAYS` | `397` |
-| `DEFAULT_CRL_VALIDITY_DAYS` | `30`: `generate_crl` default and a store's CRL lifetime until set |
+| `DEFAULT_CRL_VALIDITY_DAYS` | `7`: `generate_crl` default and a store's CRL lifetime until set |
 | `DEFAULT_INTERMEDIATE_VALIDITY_DAYS` | `1825`: lifetime of an intermediate CA (`generate_intermediate_ca_certificate`, `sign_intermediate_csr`) |
 | `DEFAULT_KEY_TYPE` | `"rsa"` |
 | `DEFAULT_LEAF_KEY_SIZE` | `3072` |
@@ -203,6 +203,7 @@ Expiry and validity checks for alerting (`tiny_pki.check`, re-exported from `tin
 | `MAX_SERVER_VALIDITY_DAYS` | `200` |
 | `MAX_STORE_CRL_VALIDITY_DAYS` | `365`: upper bound for `init --crl-days` / `crl --days` / `CertificateStore.set_crl_validity_days` |
 | `MAX_VALIDITY_DAYS` | `36500`: hard ceiling for any `validity_days` (CA, leaf, CRL), even with `allow_long_validity` |
+| `PUBLISH_HOOK_TIMEOUT_SECONDS` | `120`: how long `CertificateStore.run_publish_hook` waits for the command |
 | `MIN_PKCS12_PASSWORD_LENGTH` | `16` |
 | `VALIDITY_PRESETS` | `[(90, "90 days"), …, (825, "825 days")]` for UI pickers; clamp with `max_leaf_validity_days(ca_cert_pem)` |
 

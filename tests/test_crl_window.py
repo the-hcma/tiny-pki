@@ -25,7 +25,7 @@ def test_next_update_is_validity_days_from_now(validity_days: int | None) -> Non
     crl = x509.load_pem_x509_crl(crl_pem)
     assert_that(crl.last_update_utc, equal_to(_NOW - CLOCK_SKEW_BACKDATE))
     assert_that(crl.next_update_utc, is_(not_none()))
-    assert_that(crl.next_update_utc, equal_to(_NOW + timedelta(days=validity_days or 30)))
+    assert_that(crl.next_update_utc, equal_to(_NOW + timedelta(days=validity_days or 7)))
 
 
 def test_revocation_dates_round_trip() -> None:

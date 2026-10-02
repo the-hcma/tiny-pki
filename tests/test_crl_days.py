@@ -32,19 +32,33 @@ def _crl_lifetime(store: CertificateStore) -> int:
     return (crl.next_update_utc - crl.last_update_utc).days
 
 
-def test_default_lifetime_is_30_days(tmp_path: Path) -> None:
+def test_default_lifetime_is_7_days(tmp_path: Path) -> None:
     store = CertificateStore(tmp_path / "store")
     store.write_ca(*_CA)
     store.publish_crl()
+    assert_that(store.crl_validity_days, equal_to(7))
+    assert_that(_crl_lifetime(store), equal_to(7))
+
+
+def test_a_store_with_a_crl_but_no_crldays_keeps_that_lifetime(tmp_path: Path) -> None:
+    root = tmp_path / "store"
+    store = CertificateStore(root)
+    store.write_ca(*_CA)
+    store.publish_crl(validity_days=30)
+    (root / "ca" / "crldays").unlink()
     assert_that(store.crl_validity_days, equal_to(30))
+    _cli(root, "create", "client", "alice", "--key-size", "2048")
+    assert_that(_crl_lifetime(store), equal_to(30))
+    assert_that((root / "ca" / "crldays").read_text(encoding="utf-8"), equal_to("30\n"))
+    _cli(root, "crl")
     assert_that(_crl_lifetime(store), equal_to(30))
 
 
 def test_init_crl_days_is_used_by_every_republish(tmp_path: Path) -> None:
     root = tmp_path / "store"
     store = CertificateStore(root)
-    _cli(root, "init", "--key-size", "2048", "--crl-days", "7")
-    assert_that(_crl_lifetime(store), equal_to(7))
+    _cli(root, "init", "--key-size", "2048", "--crl-days", "10")
+    assert_that(_crl_lifetime(store), equal_to(10))
     for words in (
         ("create", "client", "alice", "--key-size", "2048"),
         ("create", "client", "alice", "--key-size", "2048"),
@@ -53,7 +67,7 @@ def test_init_crl_days_is_used_by_every_republish(tmp_path: Path) -> None:
         ("crl",),
     ):
         _cli(root, *words)
-        assert_that(_crl_lifetime(store), equal_to(7))
+        assert_that(_crl_lifetime(store), equal_to(10))
 
 
 def test_crl_days_updates_the_stored_lifetime(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
@@ -87,7 +101,7 @@ def test_crl_days_out_of_range_is_refused_without_writing(
         _cli(root, *words)
     assert_that(capsys.readouterr().err, contains_string("--days"))
     assert_that(store.read_crl(), equal_to(before))
-    assert_that(store.crl_validity_days, equal_to(30))
+    assert_that(store.crl_validity_days, equal_to(7))
 
 
 def test_init_refuses_bad_crl_days_before_creating_the_ca(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
@@ -136,12 +150,12 @@ def test_crl_days_bounds_are_accepted(tmp_path: Path, days: str) -> None:
 def test_failed_publish_leaves_the_stored_lifetime_unchanged(tmp_path: Path, capsys: CaptureFixture[str]) -> None:
     root = tmp_path / "store"
     with pytest.raises(SystemExit):
-        _cli(root, "crl", "--days", "7")
+        _cli(root, "crl", "--days", "14")
     capsys.readouterr()
     _cli(root, "init", "--key-size", "2048")
     store = CertificateStore(root)
-    assert_that(store.crl_validity_days, equal_to(30))
-    assert_that(_crl_lifetime(store), equal_to(30))
+    assert_that(store.crl_validity_days, equal_to(7))
+    assert_that(_crl_lifetime(store), equal_to(7))
 
 
 @pytest.mark.parametrize("days", [0, 366, True, 7.5])
@@ -153,7 +167,7 @@ def test_publish_crl_refuses_a_bad_explicit_lifetime_without_writing(tmp_path: P
     assert_that(calling(store.publish_crl).with_args(validity_days=days), raises(TinyPkiError))
     assert_that(calling(store.set_crl_validity_days).with_args(days), raises(TinyPkiError))
     assert_that(store.read_crl(), equal_to(before))
-    assert_that(store.crl_validity_days, equal_to(30))
+    assert_that(store.crl_validity_days, equal_to(7))
     assert_that((store.ca_dir / "crldays").exists(), equal_to(False))
 
 

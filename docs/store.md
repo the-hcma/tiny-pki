@@ -9,7 +9,9 @@ $TINY_PKI_STORE/
     ca.key        # CA private key (mode 0600; plaintext PEM or versioned Fernet ciphertext)
     crl.pem       # current CRL (rewritten on revoke / delete / crl)
     crlnumber     # last published CRL number (keeps it monotonic across clock steps)
-    crldays       # CRL lifetime in days for every publish (init --crl-days / crl --days; 30 if absent)
+    crldays       # CRL lifetime in days for every publish (init --crl-days / crl --days; if absent, the current CRL's lifetime, pinned here on the next publish, or 7 for a new store)
+    crlurl        # CRL URL written into new leaves (crl url URL); absent until set
+    publishhook   # command the CLI runs after a CRL or OCSP publish (crl hook CMD); absent until set
     ocspdays      # OCSP stapling response lifetime; present only while ocsp publishing is on
     ocspurl       # OCSP responder URL written into new leaves (ocsp url URL); absent until set
     chain.pem     # intermediate CA only: the certificates above it, issuer first and root last
@@ -91,7 +93,7 @@ Paths in the index are validated to stay under the store root; a tampered index 
 
 ## `list --json`
 
-`list clients|servers|intermediates|revoked|certs --json` prints one object per entry with `cn`, `kind`, `serial`, `fingerprint`, `expires`, `status`, `revoked_at`, `uri_san` (`null` without one), absolute `cert_path` / `key_path` (empty for tombstones), `store`, and `superseded_by` (the newer live serial for the same CN after `--keep-previous`, else `null`). `list --json` prints a summary (`ca_cn`, the `clients` / `servers` / `intermediates` / `revoked` counts, `store`); `list ca --json` prints the CA's `cn`, `fingerprint`, `expires`, `chain` (the CNs above an intermediate CA, issuer first; empty for a root) and `chain_path` (`null` for a root), absolute `cert_path` / `crl_path` / `index_path`, `crl_days` (the stored CRL lifetime), `ocsp_days` (the stapling response lifetime, `null` while `ocsp` publishing is off), `ocsp_dir`, and `ocsp_url` (`null` until set).
+`list clients|servers|intermediates|revoked|certs --json` prints one object per entry with `cn`, `kind`, `serial`, `fingerprint`, `expires`, `status`, `revoked_at`, `uri_san` (`null` without one), absolute `cert_path` / `key_path` (empty for tombstones), `store`, and `superseded_by` (the newer live serial for the same CN after `--keep-previous`, else `null`). `list --json` prints a summary (`ca_cn`, the `clients` / `servers` / `intermediates` / `revoked` counts, `store`); `list ca --json` prints the CA's `cn`, `fingerprint`, `expires`, `chain` (the CNs above an intermediate CA, issuer first; empty for a root) and `chain_path` (`null` for a root), absolute `cert_path` / `crl_path` / `index_path`, `crl_days` (the stored CRL lifetime), `ocsp_days` (the stapling response lifetime, `null` while `ocsp` publishing is off), `ocsp_dir`, `ocsp_url`, `crl_url` and `publish_hook` (each `null` until set).
 
 ## Legacy flat layout
 
@@ -143,7 +145,9 @@ rows = check_store(store, within=None, include_revoked=False)  # check (store)
 | `revoke(identity)` | `revoke` | Same as `mark_revoked`. |
 | `delete(identity, force=False)` | `delete` | Same as `delete_certificate`. |
 | `publish_crl(validity_days=None)` | `crl [--days N]` | Signs the index's revoked set for the stored lifetime; returns the CRL PEM. `validity_days` also updates the stored lifetime once the CRL is written. |
-| `set_crl_validity_days(days)` / `crl_validity_days` | `init --crl-days`, `crl --days` | Set or read the CRL lifetime (1–365 days, default 30) that every publish uses. |
+| `set_crl_validity_days(days)` / `crl_validity_days` | `init --crl-days`, `crl --days` | Set or read the CRL lifetime (1–365 days, default 7) that every publish uses. |
+| `set_crl_url(url)` / `crl_url` | `crl url [URL \| --clear]` | Set (or clear with `None`) the CRL URL that every later leaf carries in CRL Distribution Points. |
+| `set_publish_hook(command)` / `publish_hook` / `run_publish_hook(timeout=120)` | `crl hook [COMMAND \| --clear]` | Set (or clear) the reload command, and run it: split like a shell would but run without one, in the store root, with `TINY_PKI_STORE`, `TINY_PKI_CRL` and `TINY_PKI_OCSP_DIR` set. Returns its exit status, or `None` without a hook. The CLI runs it after any command that changed `public/crl.pem` or `public/ocsp/`; library calls never run it on their own, so call it after publishing. |
 | `publish_ocsp(validity_days=None)` / `ocsp_validity_days` | `ocsp [--days N]` | Writes `public/ocsp/<cn>.der` for every server certificate on disk and returns the paths. It turns stapling on: from then on issuing, revoking or deleting a server certificate refreshes the responses of its CN, and every `publish_crl` refreshes all of them, under the same lock. `<cn>.der` belongs to the newest live certificate of that CN, or the newest one once none is live; CNs that map to the same file name get only `<cn>-<serial>.der`. `ocsp_validity_days` is `None` while it is off. |
 | `disable_ocsp()` | `ocsp disable` | Removes the responses, `public/ocsp/` (unless something else was put in it) and the stored lifetime. |
 | `set_ocsp_url(url)` / `ocsp_url` | `ocsp url [URL \| --clear]` | Set (or clear with `None`) the OCSP responder URL that every later leaf carries in Authority Information Access. |
@@ -154,7 +158,7 @@ rows = check_store(store, within=None, include_revoked=False)  # check (store)
 | `write_ca(cert, key, chain_pem=None)` | none | With `chain_pem` (issuer first, root last, each signing the one before, with `ca=True`, `keyCertSign` when Key Usage is present, and a `path_length` that allows the CAs below it), the CA is an intermediate. Its own Name Constraints must be at least as narrow as every chain certificate's, because issuance and `check` enforce only the CA's own; intermediates tiny-pki signs inherit them, so this only refuses foreign ones. Use it to install an intermediate signed elsewhere, such as from a CSR. Previously imported chain CRLs are dropped. |
 | `import_chain_crl(crl_pem)` / `read_chain_crls()` | `crl --chain-crl PATH` | Stores the CRL of a CA in the chain (it must be signed by one, and may not have a lower CRL number than the one it replaces) and republishes `public/crl.pem`. |
 | `read_ca_chain()` | none | The CA certificate followed by its chain, for relying parties and PKCS#12 bundles; just the CA for a root. |
-| `check_store(store, *, within, by, kinds, include_revoked)` | `check` | `(name, CertificateStatus)` rows with the same statuses and reasons as `check --json`. `index.json` is authoritative: a CRL missing a serial it records as revoked is `untrusted`. For an intermediate CA it adds `issuer NAME` and `issuer crl NAME` rows for the chain (a missing chain CRL is `untrusted`), and a root's intermediates are checked as kind `ca`. |
+| `check_store(store, *, within, by, kinds, include_revoked, crl_renewal_interval)` | `check` | `(name, CertificateStatus)` rows with the same statuses and reasons as `check --json`. `index.json` is authoritative: a CRL missing a serial it records as revoked is `untrusted`. For an intermediate CA it adds `issuer NAME` and `issuer crl NAME` rows for the chain (a missing chain CRL is `untrusted`), and a root's intermediates are checked as kind `ca`. |
 
 The lower-level `add_certificate`, `mark_revoked` and `delete_certificate` also republish `ca/crl.pem` whenever the store has a CA, so no call sequence leaves the CRL behind the index. They validate the CA signing key before updating the index; on encrypted stores they therefore need `key_secret=`, while plaintext stores need no secret.
 

@@ -12,6 +12,7 @@ Layout (one CA per store root)::
     $STORE/
       ca/ca.crt  ca/ca.key  ca/crl.pem  ca/crlnumber  ca/crldays  ca/index.json
       ca/ocspdays  ca/ocspurl           (only once OCSP stapling / an OCSP URL is set up)
+      ca/crlurl  ca/publishhook         (only once a CRL URL / a publish hook is set up)
       ca/chain.pem  ca/chain-crl.pem    (only when the CA is an intermediate)
       public/ca.crt  public/crl.pem  public/ca-chain.pem  public/ocsp/{cn}.der
       clients/{cn}-{serial}.{crt,key}   (no .key for a certificate signed from a CSR)
@@ -48,8 +49,10 @@ from __future__ import annotations
 import functools
 import json
 import os
+import shlex
 import shutil
 import stat
+import subprocess
 import sys
 import threading
 from collections.abc import Callable, Generator, Mapping
@@ -78,6 +81,7 @@ from tiny_pki.constants import (
     DEFAULT_SERVER_VALIDITY_DAYS,
     MAX_OCSP_VALIDITY_DAYS,
     MAX_STORE_CRL_VALIDITY_DAYS,
+    PUBLISH_HOOK_TIMEOUT_SECONDS,
     KeyType,
 )
 from tiny_pki.errors import TinyPkiError
@@ -185,14 +189,28 @@ class CertificateStore:
 
     @property
     def crl_validity_days(self) -> int:
-        """Lifetime (days to ``nextUpdate``) of every CRL this store publishes; 30 until set."""
+        """Lifetime (days to ``nextUpdate``) of every CRL this store publishes.
+
+        Until set, a store that already has a CRL keeps that CRL's lifetime (stores
+        created before the default dropped to 7 days run timers sized for it); a
+        new store gets ``DEFAULT_CRL_VALIDITY_DAYS``. The next publish pins the
+        value to ``ca/crldays``.
+        """
         path = self._validated_write_path("ca/crldays")
         if not path.is_file():
-            return DEFAULT_CRL_VALIDITY_DAYS
+            return self._published_crl_lifetime_days() or DEFAULT_CRL_VALIDITY_DAYS
         text = path.read_text(encoding="utf-8").strip()
         if not text.isdigit():
             raise ValueError(f"Expected a decimal number of days in {path}")
         return _require_crl_validity_days(int(text))
+
+    @property
+    def crl_url(self) -> str | None:
+        """CRL URL written into newly issued leaves (CRL Distribution Points); ``None`` until set."""
+        path = self._validated_write_path("ca/crlurl")
+        if not path.is_file():
+            return None
+        return normalize_http_url(path.read_text(encoding="utf-8"), f"the CRL URL in {path}")
 
     @property
     def index_path(self) -> Path:
@@ -229,6 +247,14 @@ class CertificateStore:
         if not text.isdigit():
             raise ValueError(f"Expected a decimal number of days in {path}")
         return _require_ocsp_validity_days(int(text))
+
+    @property
+    def publish_hook(self) -> str | None:
+        """Command :meth:`run_publish_hook` runs after a CRL or OCSP publish; ``None`` until set."""
+        path = self._validated_write_path("ca/publishhook")
+        if not path.is_file():
+            return None
+        return _require_publish_hook(path.read_text(encoding="utf-8"))
 
     @property
     def public_dir(self) -> Path:
@@ -664,6 +690,74 @@ class CertificateStore:
         _write_plain(path, f"{text}\n".encode())
 
     @_locked
+    def set_crl_url(self, url: str | None) -> None:
+        """Persist the CRL URL written into every later leaf, or clear it with ``None``.
+
+        tiny-pki only writes PEM CRLs; serve a DER copy of ``ca/crl.pem`` (this CA's own CRL)
+        at this URL yourself, as RFC 5280 wants one DER CRL there.
+        Certificates already issued keep whatever they were issued with.
+
+        Raises:
+            TinyPkiError: ``url`` is not an ``http://`` or ``https://`` URL with a host.
+        """
+        path = self._validated_write_path("ca/crlurl")
+        if url is None:
+            path.unlink(missing_ok=True)
+            return
+        text = normalize_http_url(url, "the CRL URL")
+        self.ca_dir.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
+        _write_plain(path, f"{text}\n".encode())
+
+    @_locked
+    def set_publish_hook(self, command: str | None) -> None:
+        """Persist the command :meth:`run_publish_hook` runs, or clear it with ``None``.
+
+        The command is split like a shell would (:func:`shlex.split`) but run
+        without one, so pipes and ``&&`` need an explicit ``sh -c '...'``.
+
+        Raises:
+            TinyPkiError: ``command`` is empty, spans several lines, or cannot be split.
+        """
+        path = self._validated_write_path("ca/publishhook")
+        if command is None:
+            path.unlink(missing_ok=True)
+            return
+        text = _require_publish_hook(command)
+        self.ca_dir.mkdir(mode=_DIR_MODE, parents=True, exist_ok=True)
+        _write_plain(path, f"{text}\n".encode())
+
+    def run_publish_hook(self, *, timeout: float = PUBLISH_HOOK_TIMEOUT_SECONDS) -> int | None:
+        """Run :attr:`publish_hook`, if set, and return its exit status (``None`` without a hook).
+
+        The CLI calls this after any command that changed ``public/crl.pem`` or
+        ``public/ocsp/``, so a TLS server can reload; library callers that
+        publish call it themselves. The command runs in the store root, without
+        a shell, with ``TINY_PKI_STORE``, ``TINY_PKI_CRL`` (``public/crl.pem``)
+        and ``TINY_PKI_OCSP_DIR`` (``public/ocsp``) added to the environment and
+        stdout / stderr inherited.
+
+        Raises:
+            TinyPkiError: The command is not found or runs longer than ``timeout`` seconds.
+        """
+        command = self.publish_hook
+        if command is None:
+            return None
+        env = {
+            **os.environ,
+            "TINY_PKI_STORE": str(self.root),
+            "TINY_PKI_CRL": str(self.public_dir / "crl.pem"),
+            "TINY_PKI_OCSP_DIR": str(self.ocsp_dir),
+        }
+        try:
+            return subprocess.run(shlex.split(command), cwd=self.root, env=env, timeout=timeout, check=False).returncode
+        except FileNotFoundError as exc:
+            raise TinyPkiError(
+                f"Expected the publish hook command to exist, got {command!r} ({exc.strerror})"
+            ) from None
+        except subprocess.TimeoutExpired:
+            raise TinyPkiError(f"Expected the publish hook to finish within {timeout:g} seconds: {command!r}") from None
+
+    @_locked
     def respond_ocsp(self, request_der: bytes, *, key_secret: str | None = None) -> bytes:
         """Answer a DER OCSP request from the index, for a consumer's own responder.
 
@@ -744,6 +838,7 @@ class CertificateStore:
             allow_long_validity=allow_long_validity,
             allow_dn_special_chars=allow_dn_special_chars,
             ocsp_url=self.ocsp_url,
+            crl_url=self.crl_url,
             uri_san=uri_san,
         )
         return self._record(
@@ -787,6 +882,7 @@ class CertificateStore:
             include_common_name_in_sans=include_common_name_in_sans,
             allow_dn_special_chars=allow_dn_special_chars,
             ocsp_url=self.ocsp_url,
+            crl_url=self.crl_url,
         )
         return self._record(common_name, "server", cert_pem, key_pem, key_secret=key_secret)
 
@@ -824,6 +920,7 @@ class CertificateStore:
             allow_long_validity=allow_long_validity,
             allow_dn_special_chars=allow_dn_special_chars,
             ocsp_url=self.ocsp_url,
+            crl_url=self.crl_url,
             uri_san=uri_san,
         )
         return self._record(common_name, "client", cert_pem, None, keep_previous=keep_previous, key_secret=key_secret)
@@ -866,6 +963,7 @@ class CertificateStore:
             include_csr_sans=include_csr_sans,
             allow_dn_special_chars=allow_dn_special_chars,
             ocsp_url=self.ocsp_url,
+            crl_url=self.crl_url,
         )
         return self._record(common_name, "server", cert_pem, None, key_secret=key_secret)
 
@@ -1323,6 +1421,8 @@ class CertificateStore:
 
     def _sign_and_write_crl(self, validity_days: int | None, key_secret: str | None) -> tuple[bytes, bytes, bytes]:
         """Publish a fresh CRL; return it with the CA material that signed it."""
+        if validity_days is None and not self._validated_write_path("ca/crldays").is_file():
+            validity_days = self._published_crl_lifetime_days()
         days = self.crl_validity_days if validity_days is None else _require_crl_validity_days(validity_days)
         ca_material = self._require_ca_signing_key(key_secret)
         if ca_material is None:
@@ -1339,6 +1439,21 @@ class CertificateStore:
         if validity_days is not None:
             self.set_crl_validity_days(validity_days)
         return crl, ca_cert, ca_key
+
+    def _published_crl_lifetime_days(self) -> int | None:
+        """Whole days from ``lastUpdate`` to ``nextUpdate`` of ``ca/crl.pem``; ``None`` without a readable one."""
+        path = self._validated_write_path("ca/crl.pem")
+        if not path.is_file():
+            return None
+        try:
+            crl = x509.load_pem_x509_crl(path.read_bytes())
+        except ValueError:
+            return None
+        next_update = crl.next_update_utc
+        if next_update is None:
+            return None
+        days = round((next_update - crl.last_update_utc) / timedelta(days=1))
+        return min(max(days, 1), MAX_STORE_CRL_VALIDITY_DAYS)
 
     def _write_ocsp_responses(
         self, ca_cert_pem: bytes, ca_key_pem: bytes, days: int, *, only: str | None = None
@@ -1611,8 +1726,12 @@ def check_store(
     by: datetime | None = None,
     kinds: set[CheckKind] | frozenset[CheckKind] = CHECK_KINDS,
     include_revoked: bool = False,
+    crl_renewal_interval: timedelta | None = None,
 ) -> list[tuple[str, CertificateStatus]]:
     """Check the CA, the CRL, and every issued leaf, as ``tiny-pki check`` does for a store.
+
+    ``crl_renewal_interval`` (how often a timer runs ``tiny-pki crl``) is passed
+    to :func:`tiny_pki.check_crl` for the store's own CRL.
 
     ``index.json`` is authoritative: a CRL missing a serial it records as revoked
     is ``untrusted`` (reported even when ``kinds`` leaves out ``"crl"``), and a leaf
@@ -1650,7 +1769,9 @@ def check_store(
                 f"Expected a CRL at {store.crl_path} listing {len(index_revoked)} serial(s) revoked in index.json"
             )
     else:
-        crl_result = check_crl(crl_pem, within=within, by=by, ca_cert_pem=ca_cert)
+        crl_result = check_crl(
+            crl_pem, within=within, by=by, ca_cert_pem=ca_cert, renewal_interval=crl_renewal_interval
+        )
         if crl_result.status is not Status.UNTRUSTED:
             trusted_crl = crl_pem
             listed = {r.serial_number for r in x509.load_pem_x509_crl(crl_pem)}
@@ -1836,6 +1957,18 @@ def _crl_number(crl_pem: bytes) -> int | None:
         return crl.extensions.get_extension_for_class(x509.CRLNumber).value.crl_number
     except (ValueError, x509.ExtensionNotFound):
         return None
+
+
+def _require_publish_hook(command: str) -> str:
+    text = command.strip()
+    if not text or "\n" in text or "\r" in text or "\x00" in text:
+        raise TinyPkiError(f"Expected a one-line, non-empty publish hook command, got {command!r}")
+    try:
+        if not shlex.split(text):
+            raise ValueError("empty")
+    except ValueError:
+        raise TinyPkiError(f"Expected a publish hook command with balanced quotes, got {command!r}") from None
+    return text
 
 
 def _require_crl_validity_days(days: object) -> int:

@@ -63,6 +63,11 @@ COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
         Flag("by", "alert on anything expiring by this date", value="YYYY-MM-DD"),
         Flag("ca", "CA certificate to verify file targets against", value="PATH", path=True),
         Flag("crl", "CRL to check file targets against", value="PATH", path=True),
+        Flag(
+            "crl-renewal",
+            "how often a timer renews the CRL (12h, 1d): warn when one missed renewal would let it lapse",
+            value="DURATION",
+        ),
         Flag("include-revoked", "also report revoked store entries"),
         _JSON,
         Flag(
@@ -97,6 +102,7 @@ COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
             value="PATH",
             path=True,
         ),
+        Flag("clear", "url / hook only: remove the setting"),
         Flag("days", "change the stored CRL lifetime (1-365)", value="N"),
         _KEY_SECRET_FILE,
     ),
@@ -113,7 +119,7 @@ COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
     ),
     "init": (
         Flag("cn", 'CA common name (default "Private CA")', value="NAME", allow_empty=True),
-        Flag("crl-days", "CRL lifetime in days (1-365, default 30)", value="N"),
+        Flag("crl-days", "CRL lifetime in days (1-365, default 7)", value="N"),
         Flag("days", "CA validity in days (default 3650; 1825 for an intermediate)", value="N", allow_empty=True),
         Flag("encrypt-key", "encrypt the CA private key at rest"),
         Flag(
@@ -191,7 +197,7 @@ COMMAND_USAGE: dict[str, str] = {
     "check": "check [PATH...]",
     "completion": "completion bash|zsh|fish [--install] [--force] [--json]",
     "create": "create client|server NAME",
-    "crl": "crl",
+    "crl": "crl [hook [COMMAND]|url [URL]]",
     "decrypt-key": "decrypt-key",
     "delete": "delete NAME|0xSERIAL",
     "edit-mode": "edit-mode [emacs|vim]",
@@ -219,7 +225,7 @@ COMMAND_HELP: tuple[tuple[str, str], ...] = (
     (
         "crl",
         "Regenerate the CRL from revoked entries; --days N changes the stored CRL lifetime, "
-        "--chain-crl imports an issuer's CRL.",
+        "--chain-crl imports an issuer's CRL; crl hook / crl url set the reload command and the CRL URL.",
     ),
     ("decrypt-key", "Decrypt the CA private key in place."),
     ("delete", "Remove a revoked certificate's files; --force revokes an active one first; --dry-run previews."),
@@ -247,6 +253,7 @@ COMMANDS: tuple[str, ...] = tuple(sorted({name for name, _ in COMMAND_HELP}))
 POSITIONAL_CHOICES: dict[str, tuple[str, ...]] = {
     "completion": ("bash", "fish", "zsh"),
     "create": ("client", "server"),
+    "crl": ("hook", "url"),
     "edit-mode": ("emacs", "vim"),
     "export": ("p12", "pem"),
     "help": COMMANDS,

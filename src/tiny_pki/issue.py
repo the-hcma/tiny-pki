@@ -164,6 +164,7 @@ def generate_client_certificate(
     allow_long_validity: bool = False,
     allow_dn_special_chars: bool = False,
     ocsp_url: str | None = None,
+    crl_url: str | None = None,
     uri_san: str | None = None,
 ) -> tuple[bytes, bytes]:
     """Generate a client (CLIENT_AUTH) certificate signed by the given CA.
@@ -184,6 +185,10 @@ def generate_client_certificate(
     Access extension pointing relying parties at that OCSP responder; see
     :mod:`tiny_pki.ocsp`. Every leaf-issuing function accepts it.
 
+    ``crl_url`` (``http://`` or ``https://``) adds a CRL Distribution Points
+    extension naming where the CA's CRL is served, for relying parties that
+    fetch CRLs themselves. Every leaf-issuing function accepts it.
+
     ``uri_san`` adds exactly one URI Subject Alternative Name, such as the SPIFFE
     ID ``spiffe://example.home/device/phone-1`` that SPIFFE-aware relying parties
     (Envoy, amqtt's ``UserAuthCertPlugin``) authenticate on. The CN stays the
@@ -193,9 +198,9 @@ def generate_client_certificate(
     (``permitted_subtrees`` entry ``uri:HOST``).
 
     Raises:
-        TinyPkiError: If a name, key parameter, ``ocsp_url`` or ``uri_san`` is invalid, ``validity_days`` exceeds
-            ``MAX_CLIENT_VALIDITY_DAYS`` without ``allow_long_validity=True``, or the
-            certificate would outlive the CA.
+        TinyPkiError: If a name, key parameter, ``ocsp_url``, ``crl_url`` or ``uri_san`` is invalid,
+            ``validity_days`` exceeds ``MAX_CLIENT_VALIDITY_DAYS`` without
+            ``allow_long_validity=True``, or the certificate would outlive the CA.
     """
     common_name = normalize_subject_attribute(common_name, "common_name", max_length=MAX_COMMON_NAME_LENGTH)
     if not allow_dn_special_chars:
@@ -203,6 +208,7 @@ def generate_client_certificate(
     rsa_key_size = require_key_params(key_type, key_size, default_size=DEFAULT_LEAF_KEY_SIZE)
     _require_validity_days(validity_days)
     ocsp_url = _ocsp_url(ocsp_url)
+    crl_url = _crl_url(crl_url)
     uri_san = None if uri_san is None else normalize_uri_san(uri_san)
 
     ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
@@ -223,6 +229,7 @@ def generate_client_certificate(
         not_before=not_before,
         not_after=not_after,
         ocsp_url=ocsp_url,
+        crl_url=crl_url,
         uri_san=uri_san,
     )
     _emit_warnings(pending_warnings)
@@ -240,6 +247,7 @@ def sign_client_csr(
     allow_long_validity: bool = False,
     allow_dn_special_chars: bool = False,
     ocsp_url: str | None = None,
+    crl_url: str | None = None,
     uri_san: str | None = None,
 ) -> bytes:
     """Sign a device's certificate signing request as a client (CLIENT_AUTH) certificate.
@@ -274,6 +282,7 @@ def sign_client_csr(
         _require_plain_common_name(common_name)
     _require_validity_days(validity_days)
     ocsp_url = _ocsp_url(ocsp_url)
+    crl_url = _crl_url(crl_url)
     uri_san = None if uri_san is None else normalize_uri_san(uri_san)
     csr = load_csr(csr_pem)
     public_key = require_signable_public_key(csr)
@@ -295,6 +304,7 @@ def sign_client_csr(
         not_before=not_before,
         not_after=not_after,
         ocsp_url=ocsp_url,
+        crl_url=crl_url,
         uri_san=uri_san,
     )
     _emit_warnings(pending_warnings)
@@ -315,6 +325,7 @@ def generate_server_certificate(
     include_common_name_in_sans: bool = True,
     allow_dn_special_chars: bool = False,
     ocsp_url: str | None = None,
+    crl_url: str | None = None,
 ) -> tuple[bytes, bytes]:
     """Generate a server (SERVER_AUTH) certificate signed by the given CA.
 
@@ -342,6 +353,7 @@ def generate_server_certificate(
     rsa_key_size = require_key_params(key_type, key_size, default_size=DEFAULT_LEAF_KEY_SIZE)
     _require_validity_days(validity_days)
     ocsp_url = _ocsp_url(ocsp_url)
+    crl_url = _crl_url(crl_url)
     pending_warnings: list[str] = []
     ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
     sans = _server_sans(
@@ -369,6 +381,7 @@ def generate_server_certificate(
         not_before=not_before,
         not_after=not_after,
         ocsp_url=ocsp_url,
+        crl_url=crl_url,
     )
     _emit_warnings(pending_warnings)
     return _pem_pair(cert, server_key)
@@ -388,6 +401,7 @@ def sign_server_csr(
     include_csr_sans: bool = False,
     allow_dn_special_chars: bool = False,
     ocsp_url: str | None = None,
+    crl_url: str | None = None,
 ) -> bytes:
     """Sign a server's certificate signing request as a server (SERVER_AUTH) certificate.
 
@@ -428,6 +442,7 @@ def sign_server_csr(
         _require_plain_common_name(common_name)
     _require_validity_days(validity_days)
     ocsp_url = _ocsp_url(ocsp_url)
+    crl_url = _crl_url(crl_url)
     csr = load_csr(csr_pem)
     public_key = require_signable_public_key(csr)
 
@@ -473,6 +488,7 @@ def sign_server_csr(
         not_before=not_before,
         not_after=not_after,
         ocsp_url=ocsp_url,
+        crl_url=crl_url,
     )
     _emit_warnings(pending_warnings)
     return cert.public_bytes(serialization.Encoding.PEM)
@@ -706,6 +722,7 @@ def _client_certificate(
     not_before: datetime,
     not_after: datetime,
     ocsp_url: str | None,
+    crl_url: str | None,
     uri_san: str | None,
 ) -> x509.Certificate:
     """Build and sign the client leaf profile shared by generated and CSR-issued certificates."""
@@ -752,7 +769,7 @@ def _client_certificate(
         builder = builder.add_extension(
             x509.SubjectAlternativeName([x509.UniformResourceIdentifier(uri_san)]), critical=False
         )
-    return _with_ocsp_url(builder, ocsp_url).sign(ca_key, hashes.SHA256())
+    return _with_crl_url(_with_ocsp_url(builder, ocsp_url), crl_url).sign(ca_key, hashes.SHA256())
 
 
 def _cn_dns_id(common_name: str) -> str | None:
@@ -1108,6 +1125,10 @@ def _ocsp_url(url: str | None) -> str | None:
     return None if url is None else normalize_http_url(url, "ocsp_url")
 
 
+def _crl_url(url: str | None) -> str | None:
+    return None if url is None else normalize_http_url(url, "crl_url")
+
+
 def _pem_pair(cert: x509.Certificate, key: PrivateKey) -> tuple[bytes, bytes]:
     cert_pem = cert.public_bytes(serialization.Encoding.PEM)
     key_pem = key.private_bytes(
@@ -1173,6 +1194,7 @@ def _server_certificate(
     not_before: datetime,
     not_after: datetime,
     ocsp_url: str | None,
+    crl_url: str | None,
 ) -> x509.Certificate:
     """Build and sign the server leaf profile shared by generated and CSR-issued certificates."""
     subject = x509.Name(
@@ -1221,7 +1243,7 @@ def _server_certificate(
             critical=False,
         )
     )
-    return _with_ocsp_url(builder, ocsp_url).sign(ca_key, hashes.SHA256())
+    return _with_crl_url(_with_ocsp_url(builder, ocsp_url), crl_url).sign(ca_key, hashes.SHA256())
 
 
 def _server_sans(
@@ -1263,6 +1285,14 @@ def _validity_window(validity_days: int) -> tuple[datetime, datetime]:
     """Backdate the whole window so the encoded period is exactly ``validity_days``."""
     not_before = datetime.now(UTC) - CLOCK_SKEW_BACKDATE
     return not_before, not_before + timedelta(days=validity_days)
+
+
+def _with_crl_url(builder: x509.CertificateBuilder, crl_url: str | None) -> x509.CertificateBuilder:
+    """Name where relying parties fetch the CRL (CRL Distribution Points) when one is configured."""
+    if crl_url is None:
+        return builder
+    point = x509.DistributionPoint([x509.UniformResourceIdentifier(crl_url)], None, None, None)
+    return builder.add_extension(x509.CRLDistributionPoints([point]), critical=False)
 
 
 def _with_ocsp_url(builder: x509.CertificateBuilder, ocsp_url: str | None) -> x509.CertificateBuilder:

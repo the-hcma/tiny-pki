@@ -8,6 +8,7 @@ from __future__ import annotations
 import getpass
 import json
 import os
+import re
 import stat
 import sys
 import warnings
@@ -112,7 +113,49 @@ def dispatch(
     handler = handlers.get(command)
     if handler is None:
         raise ValueError(f"Unknown command {command!r}; type help")
-    return handler(args, store=store, theme=theme) or 0
+    before = _published_state(store)
+    try:
+        status = handler(args, store=store, theme=theme) or 0
+    finally:
+        hook_status = _run_publish_hook_if_changed(store, before, theme)
+    return status or hook_status
+
+
+def _published_state(store: CertificateStore | None) -> frozenset[tuple[str, int, int]] | None:
+    """Identify the current ``public/crl.pem`` and ``public/ocsp/*.der`` (inode and mtime) to spot a publish."""
+    if store is None or not store.root.is_dir():
+        return None
+    paths = [store.public_dir / "crl.pem"]
+    if store.ocsp_dir.is_dir():
+        paths.extend(sorted(store.ocsp_dir.glob("*.der")))
+    state: set[tuple[str, int, int]] = set()
+    for path in paths:
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        state.add((path.name, info.st_ino, info.st_mtime_ns))
+    return frozenset(state)
+
+
+def _run_publish_hook_if_changed(
+    store: CertificateStore | None, before: frozenset[tuple[str, int, int]] | None, theme: Theme
+) -> int:
+    if store is None or before is None or _published_state(store) == before:
+        return 0
+    try:
+        command = store.publish_hook
+        if command is None:
+            return 0
+        print(theme.dim("running publish hook"), file=sys.stderr)
+        returncode = store.run_publish_hook()
+    except (OSError, ValueError) as exc:
+        print(theme.error(f"error: published, but the publish hook failed: {exc}"), file=sys.stderr)
+        return 1
+    if returncode:
+        print(theme.error(f"error: published, but the publish hook exited {returncode}"), file=sys.stderr)
+        return 1
+    return 0
 
 
 def _confirm_cn_in_sans(name: str, sans: list[str], flags: dict[str, str]) -> bool:
@@ -291,6 +334,7 @@ def _cmd_check(args: list[str], *, store: CertificateStore | None, theme: Theme)
     flags = opts["flags"]
     within = _parse_within(flags["within"]) if "within" in flags else None
     by = _parse_by(flags["by"]) if "by" in flags else None
+    renewal = _parse_crl_renewal(flags["crl-renewal"]) if "crl-renewal" in flags else None
     kinds = set(opts["multi"].get("kind", [])) or set(_CHECK_KINDS)
     unknown_kinds = kinds - set(_CHECK_KINDS)
     if unknown_kinds:
@@ -310,6 +354,7 @@ def _cmd_check(args: list[str], *, store: CertificateStore | None, theme: Theme)
             crl_pem=crl_pem,
             password=password,
             theme=theme,
+            renewal=renewal,
         )
         if "kind" in opts["multi"]:
             rows = [row for row in rows if row[1].kind in kinds]
@@ -323,6 +368,7 @@ def _cmd_check(args: list[str], *, store: CertificateStore | None, theme: Theme)
             by=by,
             kinds=cast(set[CheckKind], kinds),
             include_revoked="include-revoked" in flags,
+            crl_renewal_interval=renewal,
         )
     rows.sort(key=lambda row: (row[1].not_after is None, row[1].not_after or datetime.max.replace(tzinfo=UTC)))
     worst = worst_status([result for _, result in rows])
@@ -614,6 +660,8 @@ def _list_ca(store: CertificateStore, *, theme: Theme, as_json: bool) -> None:
                     "ocsp_days": store.ocsp_validity_days,
                     "ocsp_dir": str(store.ocsp_dir),
                     "ocsp_url": store.ocsp_url,
+                    "crl_url": store.crl_url,
+                    "publish_hook": store.publish_hook,
                 },
                 sort_keys=True,
             )
@@ -633,6 +681,10 @@ def _list_ca(store: CertificateStore, *, theme: Theme, as_json: bool) -> None:
         print(theme.dim(f"ocsp {store.ocsp_dir} (stapling responses, valid {ocsp_days} days per publish)"))
     if store.ocsp_url is not None:
         print(theme.dim(f"ocsp url {store.ocsp_url} (in new certificates)"))
+    if store.crl_url is not None:
+        print(theme.dim(f"crl url {store.crl_url} (in new certificates)"))
+    if store.publish_hook is not None:
+        print(theme.dim("hook set (run after each CRL or OCSP publish; crl hook shows it)"))
 
 
 def _list_summary(store: CertificateStore, *, theme: Theme, as_json: bool) -> None:
@@ -1076,12 +1128,29 @@ def _offer_to_remove_key_secret_file(path: Path, theme: Theme) -> None:
 
 def _cmd_crl(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     opts = _parse_flags(args, command="crl")
-    if opts["positional"]:
-        raise ValueError(f"crl takes no positional arguments, got {' '.join(opts['positional'])}")
-    days = _parse_crl_days(opts["flags"]["days"], "--days") if "days" in opts["flags"] else None
+    positional = opts["positional"]
+    flags = opts["flags"]
+    action = positional[0] if positional else "publish"
+    if action not in {"hook", "publish", "url"}:
+        raise ValueError(f"Expected crl, crl hook or crl url, got crl {' '.join(positional)}")
+    if action == "hook" and len(positional) > 2:
+        raise ValueError("Expected the hook command as one argument; quote it: crl hook 'systemctl reload nginx'")
+    if len(positional) > 2 or (action == "publish" and positional):
+        raise ValueError(f"Unexpected extra arguments: {' '.join(positional[1:])}")
+    if action != "publish" and flags.keys() & {"chain-crl", "days", "key-secret-file"}:
+        raise ValueError("--chain-crl / --days / --key-secret-file are only supported when publishing the CRL")
+    if action == "publish" and "clear" in flags:
+        raise ValueError("--clear is only supported for crl hook and crl url")
     store = _require_store(store)
-    key_secret = _key_secret(opts["flags"], store=store, theme=theme)
-    chain_crl_flag = opts["flags"].get("chain-crl")
+    if action == "url":
+        _crl_url_setting(store, positional[1] if len(positional) == 2 else None, clear="clear" in flags, theme=theme)
+        return
+    if action == "hook":
+        _crl_hook_setting(store, positional[1] if len(positional) == 2 else None, clear="clear" in flags, theme=theme)
+        return
+    days = _parse_crl_days(flags["days"], "--days") if "days" in flags else None
+    key_secret = _key_secret(flags, store=store, theme=theme)
+    chain_crl_flag = flags.get("chain-crl")
     if chain_crl_flag:
         chain_crl_path = Path(chain_crl_flag)
         try:
@@ -1096,6 +1165,38 @@ def _cmd_crl(args: list[str], *, store: CertificateStore | None, theme: Theme) -
         print(theme.ok(f"imported {len(crls)} issuer CRL(s) from {chain_crl_path} into {store.chain_crl_path}"))
     store.publish_crl(validity_days=days, key_secret=key_secret)
     print(theme.ok(f"crl regenerated: {store.crl_path} (valid {store.crl_validity_days} days)"))
+
+
+def _crl_url_setting(store: CertificateStore, url: str | None, *, clear: bool, theme: Theme) -> None:
+    if clear:
+        if url is not None:
+            raise ValueError("Expected crl url URL or crl url --clear, not both")
+        store.set_crl_url(None)
+        print(theme.ok("CRL URL cleared; new certificates carry no CRL Distribution Points"))
+    elif url is not None:
+        store.set_crl_url(url)
+        print(theme.ok(f"new certificates point at the CRL {store.crl_url}"))
+        print(
+            theme.dim(
+                f"serve a DER copy of {store.crl_path} there (openssl crl -outform DER); "
+                "certificates already issued keep what they have"
+            )
+        )
+    else:
+        print(store.crl_url or theme.dim("(no CRL URL; new certificates carry no CRL Distribution Points)"))
+
+
+def _crl_hook_setting(store: CertificateStore, command: str | None, *, clear: bool, theme: Theme) -> None:
+    if clear:
+        if command is not None:
+            raise ValueError("Expected crl hook COMMAND or crl hook --clear, not both")
+        store.set_publish_hook(None)
+        print(theme.ok("publish hook cleared"))
+    elif command is not None:
+        store.set_publish_hook(command)
+        print(theme.ok(f"after each CRL or OCSP publish, the CLI runs: {store.publish_hook}"))
+    else:
+        print(store.publish_hook or theme.dim("(no publish hook)"))
 
 
 def _cmd_ocsp(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
@@ -1222,6 +1323,7 @@ def _check_file(
     ca_cert_pem: bytes | None,
     crl_pem: bytes | None,
     password: str | None,
+    renewal: timedelta | None = None,
 ) -> list[tuple[str, CertificateStatus]]:
     data = path.read_bytes()
     if path.suffix.lower() in {".p12", ".pfx"}:
@@ -1238,7 +1340,7 @@ def _check_file(
         rows.append((name, check_certificate(cert_pem, within=within, by=by, ca_cert_pem=ca_cert_pem, crl_pem=crl_pem)))
     for index, crl_pem in enumerate(crls, start=len(certs) + 1):
         name = str(path) if count == 1 else f"{path} #{index}"
-        rows.append((name, check_crl(crl_pem, within=within, by=by, ca_cert_pem=ca_cert_pem)))
+        rows.append((name, check_crl(crl_pem, within=within, by=by, ca_cert_pem=ca_cert_pem, renewal_interval=renewal)))
     return rows
 
 
@@ -1288,6 +1390,7 @@ def _check_targets(
     crl_pem: bytes | None,
     password: str | None,
     theme: Theme,
+    renewal: timedelta | None = None,
 ) -> list[tuple[str, CertificateStatus]]:
     """Check certificate, chain, CRL, and PKCS#12 files; directories are scanned one level deep."""
     rows: list[tuple[str, CertificateStatus]] = []
@@ -1297,14 +1400,28 @@ def _check_targets(
                 try:
                     rows.extend(
                         _check_file(
-                            path, within=within, by=by, ca_cert_pem=ca_cert_pem, crl_pem=crl_pem, password=password
+                            path,
+                            within=within,
+                            by=by,
+                            ca_cert_pem=ca_cert_pem,
+                            crl_pem=crl_pem,
+                            password=password,
+                            renewal=renewal,
                         )
                     )
                 except ValueError as exc:
                     print(theme.dim(f"skipped {path}: {exc}"), file=sys.stderr)
         elif target.exists():
             rows.extend(
-                _check_file(target, within=within, by=by, ca_cert_pem=ca_cert_pem, crl_pem=crl_pem, password=password)
+                _check_file(
+                    target,
+                    within=within,
+                    by=by,
+                    ca_cert_pem=ca_cert_pem,
+                    crl_pem=crl_pem,
+                    password=password,
+                    renewal=renewal,
+                )
             )
         else:
             raise FileNotFoundError(f"Expected a file or directory to check, got {target}")
@@ -1369,6 +1486,17 @@ def _parse_by(raw: str) -> datetime:
     except ValueError as exc:
         raise ValueError(f"Expected --by YYYY-MM-DD, got {raw!r}") from exc
     return datetime.combine(day, time.max).astimezone()
+
+
+def _parse_crl_renewal(raw: str) -> timedelta:
+    match = re.fullmatch(r"([1-9][0-9]{0,4})([hd])", raw.strip().lower())
+    if match is None:
+        raise ValueError(f"Expected --crl-renewal as hours or days such as 12h or 1d, got {raw!r}")
+    amount = int(match.group(1))
+    interval = timedelta(hours=amount) if match.group(2) == "h" else timedelta(days=amount)
+    if interval > timedelta(days=MAX_STORE_CRL_VALIDITY_DAYS):
+        raise ValueError(f"Expected --crl-renewal of at most {MAX_STORE_CRL_VALIDITY_DAYS} days, got {raw!r}")
+    return interval
 
 
 def _parse_within(raw: str) -> timedelta:
