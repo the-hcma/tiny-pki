@@ -18,6 +18,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
+from tiny_pki._certs import load_certificate
 from tiny_pki.constants import MAX_CA_WARNING_DAYS, MAX_LEAF_WARNING_DAYS
 from tiny_pki.errors import TinyPkiError
 
@@ -74,7 +75,7 @@ def check_certificate(
     """Check a certificate's validity now and at the cutoff.
 
     Args:
-        cert_pem: The certificate to check.
+        cert_pem: The certificate to check, PEM or DER (as are ``ca_cert_pem`` and the CA in :func:`check_crl`).
         now: Evaluation time (timezone-aware); defaults to the current time.
         within: Flag certificates that expire within this window of ``now``.
         by: Flag certificates that expire on or before this instant.
@@ -93,7 +94,7 @@ def check_certificate(
             by the given CA.
     """
     now = _require_aware(now or datetime.now(UTC), "now")
-    cert = x509.load_pem_x509_certificate(cert_pem)
+    cert = load_certificate(cert_pem)
     kind = _certificate_kind(cert)
     not_before = cert.not_valid_before_utc
     not_after = cert.not_valid_after_utc
@@ -255,7 +256,7 @@ def _is_issued_by(cert: x509.Certificate, ca_cert: x509.Certificate) -> bool:
 
 def _load_ca(ca_cert_pem: bytes) -> x509.Certificate:
     """Load a trust anchor, rejecting certificates without ``BasicConstraints(ca=True)``."""
-    ca_cert = x509.load_pem_x509_certificate(ca_cert_pem)
+    ca_cert = load_certificate(ca_cert_pem)
     try:
         is_ca = ca_cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca
     except x509.ExtensionNotFound:

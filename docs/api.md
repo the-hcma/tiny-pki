@@ -136,18 +136,29 @@ tiny-pki runs no responder. These functions sign OCSP responses (RFC 6960) with 
 
 ## Inspect
 
-All take a certificate PEM. For a CSR, see `inspect_csr` under [Signing a CSR](#signing-a-csr).
+All take a certificate as PEM or DER, detected from the input, so a TLS server can pass the DER from `SSLObject.getpeercert(binary_form=True)` directly. `check_certificate` and `check_crl` accept DER for the certificate and the CA too. Input that is neither raises `TinyPkiError` naming both formats, without echoing the bytes. These helpers only read, so they accept certificates tiny-pki would not issue, such as ones with several URI SANs. For a CSR, see `inspect_csr` under [Signing a CSR](#signing-a-csr).
 
 | Function | Returns |
 | --- | --- |
 | `get_certificate_expiry(cert_pem)` | `datetime` (UTC, `notAfter`) |
 | `get_certificate_fingerprint(cert_pem)` | SHA-256, colon-separated upper-case hex |
+| `get_certificate_identity(cert_pem)` | `CertificateIdentity`: `common_name` (first CN, or `None`), `dns_names`, `ip_addresses`, `uris` (tuples in certificate order), `serial_number` and `fingerprint`, to authenticate a peer in one call |
 | `get_certificate_issuer(cert_pem)` | issuer CN (or the full RFC 4514 DN, e.g. `OU=PKI,O=Acme,C=US`, if no CN) |
 | `get_certificate_metadata(cert_pem)` | `dict` of subject fields present: `CN`, `O`, `OU`, `C`, `ST`, `L` |
-| `get_certificate_sans(cert_pem)` | `list[str]` of DNS + IP SANs (empty if none) |
+| `get_certificate_sans(cert_pem)` | `list[str]` of DNS + IP SANs (empty if none); URI SANs come from `get_certificate_uris` |
 | `get_certificate_serial_number(cert_pem)` | `int` |
 | `get_certificate_subject(cert_pem)` | subject CN (or the full RFC 4514 DN if no CN) |
+| `get_certificate_uris(cert_pem)` | `list[str]` of URI SANs, such as SPIFFE IDs, in certificate order (empty if none) |
 | `is_certificate_self_signed(cert_pem)` | `True` only if issuer == subject **and** the signature verifies with its own key |
+
+Authenticating an mTLS peer, for example in an asyncio server:
+
+```python
+from tiny_pki import get_certificate_identity
+
+peer = get_certificate_identity(writer.get_extra_info("ssl_object").getpeercert(binary_form=True))
+user = peer.uris[0] if peer.uris else peer.common_name
+```
 
 ## Check
 

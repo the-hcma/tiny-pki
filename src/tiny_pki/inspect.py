@@ -1,4 +1,4 @@
-"""Certificate introspection helpers (PEM in, structured fields out)."""
+"""Certificate introspection helpers (PEM or DER in, structured fields out)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes
 from cryptography.x509.oid import NameOID
 
+from tiny_pki._certs import load_certificate
 from tiny_pki._csr import (
     csr_problems,
     describe_public_key,
@@ -27,6 +28,23 @@ _OID_TO_LABEL: dict[x509.ObjectIdentifier, str] = {
     NameOID.ORGANIZATIONAL_UNIT_NAME: "OU",
     NameOID.STATE_OR_PROVINCE_NAME: "ST",
 }
+
+
+@dataclass(frozen=True)
+class CertificateIdentity:
+    """Who a certificate names, for authenticating a TLS peer in one call.
+
+    ``common_name`` is the first subject CN, or ``None`` when there is none. The
+    SAN tuples keep certificate order; ``fingerprint`` is formatted as by
+    :func:`get_certificate_fingerprint`.
+    """
+
+    common_name: str | None
+    dns_names: tuple[str, ...]
+    ip_addresses: tuple[str, ...]
+    uris: tuple[str, ...]
+    serial_number: int
+    fingerprint: str
 
 
 @dataclass(frozen=True)
@@ -80,22 +98,40 @@ def inspect_csr(csr_pem: bytes) -> CsrSummary:
     )
 
 
+def get_certificate_identity(cert_pem: bytes) -> CertificateIdentity:
+    """Return the CN, SANs, serial number and fingerprint of a PEM or DER certificate.
+
+    Meant for a TLS server reading its peer: pass the DER from
+    ``SSLObject.getpeercert(binary_form=True)``. Read-only, so it accepts
+    certificates tiny-pki would not issue (several URI SANs, no CN, and so on).
+    """
+    cert = load_certificate(cert_pem)
+    cn_attrs = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    sans = _subject_alternative_names(cert)
+    return CertificateIdentity(
+        common_name=str(cn_attrs[0].value) if cn_attrs else None,
+        dns_names=tuple(str(name) for name in sans.get_values_for_type(x509.DNSName)) if sans else (),
+        ip_addresses=tuple(str(addr) for addr in sans.get_values_for_type(x509.IPAddress)) if sans else (),
+        uris=tuple(str(uri) for uri in sans.get_values_for_type(x509.UniformResourceIdentifier)) if sans else (),
+        serial_number=cert.serial_number,
+        fingerprint=_fingerprint(cert),
+    )
+
+
 def get_certificate_expiry(cert_pem: bytes) -> datetime:
     """Return the expiry datetime of a PEM-encoded certificate (UTC)."""
-    cert = x509.load_pem_x509_certificate(cert_pem)
+    cert = load_certificate(cert_pem)
     return cert.not_valid_after_utc
 
 
 def get_certificate_fingerprint(cert_pem: bytes) -> str:
     """Return the SHA-256 fingerprint as a colon-separated hex string."""
-    cert = x509.load_pem_x509_certificate(cert_pem)
-    digest = cert.fingerprint(hashes.SHA256())
-    return ":".join(f"{b:02X}" for b in digest)
+    return _fingerprint(load_certificate(cert_pem))
 
 
 def get_certificate_issuer(cert_pem: bytes) -> str:
     """Return the issuer common name, or the full issuer DN (RFC 4514) if CN is absent."""
-    cert = x509.load_pem_x509_certificate(cert_pem)
+    cert = load_certificate(cert_pem)
     cn_attrs = cert.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)
     if cn_attrs:
         return str(cn_attrs[0].value)
@@ -104,7 +140,7 @@ def get_certificate_issuer(cert_pem: bytes) -> str:
 
 def get_certificate_metadata(cert_pem: bytes) -> dict[str, str]:
     """Extract subject fields (CN, O, OU, C, ST, L) present on the certificate."""
-    cert = x509.load_pem_x509_certificate(cert_pem)
+    cert = load_certificate(cert_pem)
     metadata: dict[str, str] = {}
     for oid, label in _OID_TO_LABEL.items():
         attrs = cert.subject.get_attributes_for_oid(oid)
@@ -114,29 +150,32 @@ def get_certificate_metadata(cert_pem: bytes) -> dict[str, str]:
 
 
 def get_certificate_sans(cert_pem: bytes) -> list[str]:
-    """Return DNS and IP Subject Alternative Names as strings."""
-    cert = x509.load_pem_x509_certificate(cert_pem)
-    try:
-        san_ext = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
-    except x509.ExtensionNotFound:
+    """Return DNS and IP Subject Alternative Names as strings (URIs: see :func:`get_certificate_uris`)."""
+    sans = _subject_alternative_names(load_certificate(cert_pem))
+    if sans is None:
         return []
-    names: list[str] = []
-    for name in san_ext.value.get_values_for_type(x509.DNSName):
-        names.append(str(name))
-    for addr in san_ext.value.get_values_for_type(x509.IPAddress):
-        names.append(str(addr))
+    names: list[str] = [str(name) for name in sans.get_values_for_type(x509.DNSName)]
+    names.extend(str(addr) for addr in sans.get_values_for_type(x509.IPAddress))
     return names
 
 
 def get_certificate_serial_number(cert_pem: bytes) -> int:
     """Return the certificate serial number as an integer."""
-    cert = x509.load_pem_x509_certificate(cert_pem)
+    cert = load_certificate(cert_pem)
     return cert.serial_number
+
+
+def get_certificate_uris(cert_pem: bytes) -> list[str]:
+    """Return the URI Subject Alternative Names (such as SPIFFE IDs), in certificate order."""
+    sans = _subject_alternative_names(load_certificate(cert_pem))
+    if sans is None:
+        return []
+    return [str(uri) for uri in sans.get_values_for_type(x509.UniformResourceIdentifier)]
 
 
 def get_certificate_subject(cert_pem: bytes) -> str:
     """Return the subject common name, or the full subject DN (RFC 4514) if CN is absent."""
-    cert = x509.load_pem_x509_certificate(cert_pem)
+    cert = load_certificate(cert_pem)
     cn_attrs = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
     if cn_attrs:
         return str(cn_attrs[0].value)
@@ -150,7 +189,7 @@ def is_certificate_self_signed(cert_pem: bytes) -> bool:
     against the certificate's own public key (so a CA-issued leaf with an
     identical DN is not treated as self-signed).
     """
-    cert = x509.load_pem_x509_certificate(cert_pem)
+    cert = load_certificate(cert_pem)
     if cert.issuer != cert.subject:
         return False
     try:
@@ -158,3 +197,14 @@ def is_certificate_self_signed(cert_pem: bytes) -> bool:
     except (InvalidSignature, TypeError, ValueError):
         return False
     return True
+
+
+def _fingerprint(cert: x509.Certificate) -> str:
+    return ":".join(f"{b:02X}" for b in cert.fingerprint(hashes.SHA256()))
+
+
+def _subject_alternative_names(cert: x509.Certificate) -> x509.SubjectAlternativeName | None:
+    try:
+        return cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    except x509.ExtensionNotFound:
+        return None
