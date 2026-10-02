@@ -121,7 +121,7 @@ COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
         Flag("cn", 'CA common name (default "Private CA")', value="NAME", allow_empty=True),
         Flag("crl-days", "CRL lifetime in days (1-365, default 7)", value="N"),
         Flag("days", "CA validity in days (default 3650; 1825 for an intermediate)", value="N", allow_empty=True),
-        Flag("encrypt-key", "encrypt the CA private key at rest"),
+        Flag("encrypt-key", "optional but recommended: encrypt the CA private key at rest"),
         Flag(
             "intermediate-of",
             "create an intermediate CA signed by the CA in this store (created with --path-length 1)",
