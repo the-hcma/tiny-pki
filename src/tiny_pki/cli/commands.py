@@ -87,6 +87,7 @@ COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
         Flag("no-cn-san", "server only: do not add the CN to the SANs"),
         _ORG,
         Flag("san", "server only: DNS name or IP address (repeatable)", value="NAME", repeatable=True),
+        Flag("uri-san", "client only: one URI SAN, for example spiffe://example.home/device/NAME", value="URI"),
         Flag("yes", "server only: add the CN to the SANs without asking"),
     ),
     "crl": (
@@ -132,6 +133,12 @@ COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
             "path-length", "1 lets the CA sign intermediate CAs (default 0: leaves only)", value="N", choices=("0", "1")
         ),
         Flag("permit", "name constraint: DNS suffix or IP network (repeatable)", value="NAME", repeatable=True),
+        Flag(
+            "permit-uri",
+            "name constraint: URI host (.suffix for hosts under it; repeatable)",
+            value="HOST",
+            repeatable=True,
+        ),
     ),
     "inspect": (),
     "list": (_JSON,),
@@ -159,7 +166,14 @@ COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
             value="NAME",
             repeatable=True,
         ),
+        Flag(
+            "permit-uri",
+            "intermediate only: narrow the URI name constraints to this host (.suffix for hosts under it; repeatable)",
+            value="HOST",
+            repeatable=True,
+        ),
         Flag("san", "server only: DNS name or IP address (repeatable)", value="NAME", repeatable=True),
+        Flag("uri-san", "client only: one URI SAN, for example spiffe://example.home/device/NAME", value="URI"),
         Flag("yes", "server only: add the CN to the SANs without asking"),
     ),
 }

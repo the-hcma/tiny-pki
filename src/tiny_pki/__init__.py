@@ -39,6 +39,7 @@ from tiny_pki.constants import (
     MAX_STORE_CRL_VALIDITY_DAYS,
     MAX_VALIDITY_DAYS,
     MIN_PKCS12_PASSWORD_LENGTH,
+    URI_SUBTREE_PREFIX,
     VALIDITY_PRESETS,
     KeyType,
 )
@@ -105,6 +106,7 @@ __all__ = [
     "Status",
     "TinyPkiError",
     "TinyPkiWarning",
+    "URI_SUBTREE_PREFIX",
     "VALIDITY_PRESETS",
     "__version__",
     "check_certificate",

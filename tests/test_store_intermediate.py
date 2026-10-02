@@ -524,7 +524,7 @@ def test_cli_sign_intermediate_from_csr(tmp_path: Path, capsys: CaptureFixture[s
     [
         (["sign", "intermediate", "X", "--csr", "c.csr", "--san", "x.example"], "do not apply to intermediate CAs"),
         (["sign", "intermediate", "X", "--csr", "c.csr", "--keep-previous"], "do not apply to intermediate CAs"),
-        (["sign", "client", "X", "--csr", "c.csr", "--permit", "x.example"], "--permit is only supported"),
+        (["sign", "client", "X", "--csr", "c.csr", "--permit", "x.example"], "--permit-uri are only supported"),
         (["init", "--issuer-key-secret-file", "s"], "--issuer-key-secret-file requires --intermediate-of"),
         (["init", "--path-length", "2"], "Expected --path-length 0"),
     ],
