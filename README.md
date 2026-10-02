@@ -100,6 +100,7 @@ To encrypt the CA key during initialization, provide a protected file containing
 | [docs/monitoring.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/monitoring.md) | `check` output, JSON schema, exit codes, cron and systemd recipes |
 | [docs/security.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/security.md) | CA key handling, name constraints, choosing a key type, CRL freshness |
 | [docs/defaults.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/defaults.md) | Every default and the reasoning behind it |
+| [docs/openbao.md](https://github.com/the-hcma/tiny-pki/blob/main/docs/openbao.md) | How tiny-pki compares with the OpenBao PKI engine, combining them, and deliberate non-goals |
 | [CHANGELOG.md](https://github.com/the-hcma/tiny-pki/blob/main/CHANGELOG.md) | Release notes |
 | [SECURITY.md](https://github.com/the-hcma/tiny-pki/blob/main/SECURITY.md) | Reporting a vulnerability |
 
