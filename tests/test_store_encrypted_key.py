@@ -89,7 +89,7 @@ def test_cli_encrypted_store_operations(tmp_path: Path, capsys: CaptureFixture[s
     secret_file.write_text(f"{_SECRET}\n", encoding="utf-8")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
 
-    _run(
+    _, error = _run(
         store_path,
         "init",
         "--encrypt-key",
@@ -99,6 +99,7 @@ def test_cli_encrypted_store_operations(tmp_path: Path, capsys: CaptureFixture[s
         "2048",
         capsys=capsys,
     )
+    assert_that(error, is_not(contains_string("stored unencrypted")))
     store = CertificateStore(store_path)
     assert_that(store.ca_key_encrypted, is_(True))
     assert_that(store.ca_key_path.stat().st_mode & 0o777, equal_to(0o600))

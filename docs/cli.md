@@ -44,7 +44,7 @@ tiny-pki --store DIR init [options]
 
 Creates the CA certificate and key under `ca/`, publishes an empty CRL, and fills `public/` with key-free copies for TLS servers. Refuses a store that already has a CA.
 
-CA-key encryption is optional, but recommended when you can safely protect a separate high-entropy secret. Without `--encrypt-key`, the CA key remains plaintext with mode `0600`; the CLI warns after creation and the key can be encrypted later with `tiny-pki --store DIR encrypt-key`. Encryption protects a copied store from key use without the secret, but does not replace strict store permissions or secure secret backups.
+CA-key encryption is optional, but recommended when you can safely protect a separate high-entropy secret. Without `--encrypt-key`, the CA key remains plaintext with mode `0600`; the CLI warns after creation and prints the exact `encrypt-key` command for this store. Encryption protects a copied store from key use without the secret, but does not replace strict store permissions or secure secret backups.
 
 By default the CA signs leaves only. `--path-length 1` creates a root that may also sign intermediate CAs, and `--intermediate-of DIR` creates this store's CA as an intermediate signed by the root in `DIR`: the root records the certificate (with no key) under `intermediates/`, and this store gets the key, the chain (`ca/chain.pem`), the root's CRL and its own first CRL. An intermediate inherits the root's name constraints, `--permit` narrows them, and it signs leaves only. See [running an intermediate CA](#running-an-intermediate-ca).
 

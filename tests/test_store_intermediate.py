@@ -439,7 +439,7 @@ def test_cli_root_intermediate_leaf_workflow(tmp_path: Path, capsys: CaptureFixt
     root_dir, int_dir = tmp_path / "root", tmp_path / "issuing"
     out, _ = _run(root_dir, "init", "--cn", "CLI Root", "--path-length", "1", "--key-type", "ec-p256", capsys=capsys)
     assert_that(out, contains_string("it may sign intermediate CAs"))
-    out, _ = _run(
+    out, err = _run(
         int_dir,
         "init",
         "--intermediate-of",
@@ -452,6 +452,8 @@ def test_cli_root_intermediate_leaf_workflow(tmp_path: Path, capsys: CaptureFixt
         "ec-p256",
         capsys=capsys,
     )
+    assert_that(err, contains_string("warning: CA private key"))
+    assert_that(err, contains_string("Encryption is optional but recommended"))
     assert_that(out, contains_string("intermediate CA created: CLI Issuing"))
     _run(int_dir, "create", "server", "nas.home.arpa", "--key-type", "ec-p256", capsys=capsys)
     _run(int_dir, "create", "client", "alice", "--key-type", "ec-p256", capsys=capsys)
