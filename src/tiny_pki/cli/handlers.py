@@ -48,7 +48,7 @@ from tiny_pki import (
     inspect_csr,
 )
 from tiny_pki._csr import is_csr_data, load_csr, requested_sans
-from tiny_pki._fsutil import write_file_atomic
+from tiny_pki._fsutil import write_file_atomic, write_files_atomic
 from tiny_pki.check import CertificateStatus, Status, check_certificate, check_crl, worst_status
 from tiny_pki.cli.commands import COMMAND_FLAGS
 from tiny_pki.cli.theme import Theme
@@ -783,57 +783,96 @@ def _cmd_delete(args: list[str], *, store: CertificateStore | None, theme: Theme
 def _cmd_export(args: list[str], *, store: CertificateStore | None, theme: Theme) -> None:
     store = _require_store(store)
     if len(args) < 2:
-        raise ValueError("Expected export pem|p12 <identity> [--out PATH] [--legacy] [--password-file PATH]")
+        raise ValueError(
+            "Expected export pem|p12 <identity> [--out PATH] [--cert-out PATH --key-out PATH] [--ca-out PATH] "
+            "[--legacy] [--password-file PATH]"
+        )
     fmt = args[0]
     opts = _parse_flags(args[1:], command="export")
+    flags = opts["flags"]
     identity = _require_one_positional(opts, f"export {fmt} <identity>")
     entry = store.get_certificate(identity)
     if entry is None:
         raise KeyError(f"Expected issued certificate matching {identity!r}")
     if fmt not in {"pem", "p12"}:
         raise ValueError(f"Expected export pem|p12, got {fmt!r}")
-    cert_pem = store.read_certificate_pem(entry)
+    if fmt == "p12" and {"cert-out", "key-out", "ca-out"} & flags.keys():
+        raise ValueError("--cert-out / --key-out / --ca-out are only supported for export pem")
+    if fmt == "pem":
+        _export_pem(store, entry, flags, theme)
+        return
     if not entry.key_path:
-        holder = _KEY_HOLDER[entry.kind]
-        if fmt == "p12" and entry.kind == "intermediate":
+        if entry.kind == "intermediate":
             raise ValueError(
                 f"Expected a leaf to build a PKCS#12 bundle, but {entry.common_name!r} is an intermediate CA whose "
                 "key lives in its own store; use export pem for the certificate"
             )
-        if fmt == "p12":
-            raise ValueError(
-                f"Expected a private key for {entry.common_name!r} to build a PKCS#12 bundle, but it was signed "
-                f"from a CSR and its key stays on the {holder}; use export pem for the certificate"
-            )
-        out = Path(opts["flags"].get("out", f"{_safe_export_name(entry.common_name)}.pem"))
-        write_file_atomic(out, cert_pem, mode=0o644)
-        print(theme.ok(f"wrote {out} (certificate only: the private key stays on the {holder})"))
-        return
-    key_pem = store.read_key_pem(entry)
-    ca_cert = store.read_ca_chain()
-
-    if fmt == "pem":
-        out = Path(opts["flags"].get("out", f"{_safe_export_name(entry.common_name)}.pem"))
-        _write_secret_file(out, cert_pem.decode() + key_pem.decode())
-        print(theme.ok(f"wrote {out}"))
-        return
-    if fmt == "p12":
-        password_file = opts["flags"].get("password-file")
-        password = _read_password_file(Path(password_file)) if password_file else _prompt_p12_password()
-        p12 = generate_pkcs12(
-            cert_pem, key_pem, ca_cert, entry.common_name, password.encode(), legacy="legacy" in opts["flags"]
+        raise ValueError(
+            f"Expected a private key for {entry.common_name!r} to build a PKCS#12 bundle, but it was signed "
+            f"from a CSR and its key stays on the {_KEY_HOLDER[entry.kind]}; use export pem for the certificate"
         )
-        out_flag = opts["flags"].get("out")
-        if out_flag:
-            path = Path(out_flag)
-            _write_secret_file(path, p12)
+    cert_pem = store.read_certificate_pem(entry)
+    key_pem = store.read_key_pem(entry)
+    password_file = flags.get("password-file")
+    password = _read_password_file(Path(password_file)) if password_file else _prompt_p12_password()
+    p12 = generate_pkcs12(
+        cert_pem, key_pem, store.read_ca_chain(), entry.common_name, password.encode(), legacy="legacy" in flags
+    )
+    out_flag = flags.get("out")
+    if out_flag:
+        path = Path(out_flag)
+        _write_secret_file(path, p12)
+    else:
+        path = store.write_bundle(entry.common_name, p12, serial_number=entry.serial_number)
+    print(theme.ok(f"wrote {path}"))
+    if password_file:
+        _offer_to_remove_password_file(Path(password_file), theme)
+
+
+def _export_pem(store: CertificateStore, entry: IssuedCertificate, flags: dict[str, str], theme: Theme) -> None:
+    has_key = bool(entry.key_path)
+    split = {"cert-out", "key-out"} & flags.keys()
+    if split and "out" in flags:
+        raise ValueError("Expected either --out or --cert-out / --key-out, not both")
+    if "key-out" in flags and not has_key:
+        raise ValueError(
+            f"Expected a private key for {entry.common_name!r} to write --key-out, but its key stays on the "
+            f"{_KEY_HOLDER[entry.kind]}; use --cert-out alone"
+        )
+    if has_key and len(split) == 1:
+        raise ValueError("Expected --cert-out and --key-out together")
+    cert_pem = store.read_certificate_pem(entry)
+    holder_note = f"certificate only: the private key stays on the {_KEY_HOLDER[entry.kind]}"
+    outputs: list[tuple[Path, bytes, int, str]] = []
+    if split:
+        outputs.append((Path(flags["cert-out"]), cert_pem, 0o644, "certificate" if has_key else holder_note))
+        if has_key:
+            outputs.append((Path(flags["key-out"]), store.read_key_pem(entry), 0o600, "private key"))
+    else:
+        out = Path(flags.get("out", f"{_safe_export_name(entry.common_name)}.pem"))
+        if has_key:
+            outputs.append((out, cert_pem + store.read_key_pem(entry), 0o600, ""))
         else:
-            path = store.write_bundle(entry.common_name, p12, serial_number=entry.serial_number)
-        print(theme.ok(f"wrote {path}"))
-        if password_file:
-            _offer_to_remove_password_file(Path(password_file), theme)
-        return
-    raise ValueError(f"Expected export pem|p12, got {fmt!r}")
+            outputs.append((out, cert_pem, 0o644, holder_note))
+    if "ca-out" in flags:
+        outputs.append((Path(flags["ca-out"]), store.read_ca_chain(), 0o644, "CA certificate"))
+    _require_distinct_export_paths([path for path, _, _, _ in outputs])
+    write_files_atomic([(path, data, mode) for path, data, mode, _ in outputs])
+    for path, _, _, what in outputs:
+        print(theme.ok(f"wrote {path} ({what})" if what else f"wrote {path}"))
+
+
+def _require_distinct_export_paths(paths: list[Path]) -> None:
+    seen: dict[Path, Path] = {}
+    for path in paths:
+        if path.is_dir():
+            raise ValueError(f"Expected a file path to export to, got directory {path}")
+        if not path.parent.is_dir():
+            raise ValueError(f"Expected an existing directory for {path}")
+        key = path.parent.resolve() / path.name
+        if key in seen or any(path.exists() and other.exists() and path.samefile(other) for other in seen.values()):
+            raise ValueError(f"Expected a different path for each export, got {path} twice")
+        seen[key] = path
 
 
 def _offer_to_remove_password_file(path: Path, theme: Theme) -> None:

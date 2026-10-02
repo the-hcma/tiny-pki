@@ -51,6 +51,8 @@ def _bash_complete(tmp_path: Path, *words: str) -> list[str]:
         (("sign", ""), ["client", "intermediate", "server"]),
         (("sign", "intermediate", "Issuing", "--pe"), ["--permit", "--permit-uri"]),
         (("create", "client", "alice", "--ur"), ["--uri-san"]),
+        (("export", "pem", "alice", "--c"), ["--ca-out", "--cert-out"]),
+        (("export", "pem", "alice", "--k"), ["--key-out"]),
         (("sign", "server", "api.home", "--acc"), ["--accept-csr-sans"]),
         (("sign", "client", "alice", "--cs"), ["--csr"]),
         (("revoke", "alice", "--"), ["--dry-run", "--key-secret-file"]),

@@ -104,6 +104,9 @@ COMMAND_FLAGS: dict[str, tuple[Flag, ...]] = {
     "delete": (_KEY_SECRET_FILE, Flag("force", "revoke an active certificate first"), _DRY_RUN),
     "encrypt-key": (_KEY_SECRET_FILE,),
     "export": (
+        Flag("ca-out", "pem only: also write the CA certificate (and its chain) to this file", value="PATH", path=True),
+        Flag("cert-out", "pem only: write the certificate to this file (with --key-out)", value="PATH", path=True),
+        Flag("key-out", "pem only: write the private key to this file (with --cert-out)", value="PATH", path=True),
         Flag("legacy", "p12 only: 3DES / SHA-1 encryption for old Android and Apple keychains"),
         Flag("out", "output file", value="PATH", path=True),
         _PASSWORD_FILE,
