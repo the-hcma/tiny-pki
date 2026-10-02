@@ -9,6 +9,7 @@ import getpass
 import json
 import os
 import re
+import shlex
 import stat
 import sys
 import warnings
@@ -253,6 +254,8 @@ def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) 
         )
         if encrypted_key and "key-secret-file" in flags:
             _offer_to_remove_key_secret_file(Path(flags["key-secret-file"]), theme)
+        elif not encrypted_key:
+            _warn_unencrypted_ca_key(store, theme)
         return
     cn = opts["flags"].get("cn", "Private CA")
     org = opts["flags"].get("org", DEFAULT_ORGANIZATION_NAME)
@@ -275,6 +278,21 @@ def _cmd_init(args: list[str], *, store: CertificateStore | None, theme: Theme) 
         print(theme.dim("it may sign intermediate CAs: init --intermediate-of or sign intermediate"))
     if encrypted_key and "key-secret-file" in opts["flags"]:
         _offer_to_remove_key_secret_file(Path(opts["flags"]["key-secret-file"]), theme)
+    elif not encrypted_key:
+        _warn_unencrypted_ca_key(store, theme)
+
+
+def _warn_unencrypted_ca_key(store: CertificateStore, theme: Theme) -> None:
+    store_path = shlex.quote(str(store.root))
+    key_path = shlex.quote(str(store.ca_key_path))
+    print(
+        theme.warn(
+            f"warning: CA private key {key_path} is stored unencrypted (mode 0600). Encryption is optional but "
+            "recommended when you can protect a separate high-entropy secret. Encrypt it with: "
+            f"tiny-pki --store {store_path} encrypt-key"
+        ),
+        file=sys.stderr,
+    )
 
 
 def _permitted_subtrees(opts: _ParsedFlags) -> list[str] | None:

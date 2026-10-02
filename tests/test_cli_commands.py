@@ -52,7 +52,9 @@ def test_init_create_show_revoke_delete_export(
     password_file.write_text("secret-bundle-password\n")
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
     out, err = _run(store, "init", "--cn", "Test CA", "--key-size", "2048", capsys=capsys)
-    assert_that(err, equal_to(""))
+    assert_that(err, contains_string("warning: CA private key"))
+    assert_that(err, contains_string(f"tiny-pki --store {store} encrypt-key"))
+    assert_that(err, contains_string("Encryption is optional but recommended"))
     assert_that(out, contains_string("CA created"))
 
     out, err = _run(

@@ -44,6 +44,8 @@ tiny-pki --store DIR init [options]
 
 Creates the CA certificate and key under `ca/`, publishes an empty CRL, and fills `public/` with key-free copies for TLS servers. Refuses a store that already has a CA.
 
+CA-key encryption is optional, but recommended when you can safely protect a separate high-entropy secret. Without `--encrypt-key`, the CA key remains plaintext with mode `0600`; the CLI warns after creation and prints the exact `encrypt-key` command for this store. Encryption protects a copied store from key use without the secret, but does not replace strict store permissions or secure secret backups.
+
 By default the CA signs leaves only. `--path-length 1` creates a root that may also sign intermediate CAs, and `--intermediate-of DIR` creates this store's CA as an intermediate signed by the root in `DIR`: the root records the certificate (with no key) under `intermediates/`, and this store gets the key, the chain (`ca/chain.pem`), the root's CRL and its own first CRL. An intermediate inherits the root's name constraints, `--permit` narrows them, and it signs leaves only. See [running an intermediate CA](#running-an-intermediate-ca).
 
 | Flag | Meaning |
@@ -59,7 +61,7 @@ By default the CA signs leaves only. `--path-length 1` creates a root that may a
 | `--permit NAME` | Add a Name Constraint: a DNS suffix (`home` covers `home` and every name under it) or an IP network (`192.168.0.0/16`). Repeat it for each; constrain both DNS and IP (see [security.md](security.md#limit-what-the-ca-can-vouch-for)). Constraints cannot be changed later. For an intermediate, each must lie within the issuer's. |
 | `--permit-uri HOST` | Add a URI Name Constraint, so the CA may issue client certificates with a `--uri-san`. `example.home` permits URIs whose host is exactly `example.home`; `.example.home` permits any host under it. Repeat it for each. Once a CA has any `--permit`, a URI SAN needs a matching `--permit-uri`. |
 | `--crl-days N` | CRL lifetime in days, 1–365 (default 7), saved in the store and used by every later publish. |
-| `--encrypt-key` | Encrypt `ca/ca.key` at rest when creating the CA; the secret is read from `--key-secret-file`, a configured credential file, or an interactive prompt. |
+| `--encrypt-key` | Optional but recommended: encrypt `ca/ca.key` at rest when creating the CA; the secret is read from `--key-secret-file`, a configured credential file, or an interactive prompt. |
 | `--key-secret-file PATH` | Read the high-entropy CA-key secret from the first line of this file; use only with `--encrypt-key` for `init`. |
 
 ```bash
