@@ -2,7 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/tiny-pki.svg)](https://pypi.org/project/tiny-pki/) [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/the-hcma/tiny-pki/blob/main/LICENSE) [![CI](https://github.com/the-hcma/tiny-pki/actions/workflows/ci.yml/badge.svg)](https://github.com/the-hcma/tiny-pki/actions/workflows/ci.yml)
 
-A small **private certificate authority** for mutual TLS on home and internal networks: issue a CA and its client and server certificates, revoke them with a CRL, hand them to phones as PKCS#12 bundles, and watch for expiry. Built on [`cryptography`](https://cryptography.io/) 50.0.1 or newer.
+A small **private certificate authority** for mutual TLS on home and internal networks: issue a CA and its client and server certificates, revoke them with a CRL, hand them to phones as PKCS#12 bundles, and watch for expiry. Built on [`cryptography`](https://cryptography.io/) 50 or newer.
 
 It comes in two layers; use either:
 
