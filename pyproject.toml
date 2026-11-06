@@ -64,7 +64,7 @@ packages = ["src/tiny_pki"]
 dev = [
     "PyHamcrest>=2.1.0",
     "pyright>=1.1.414",
-    "pytest>=9.1.1",
+    "pytest>=9.2.0",
     "ruff>=0.17.3",
     "time-machine>=3.6.0",
     "tiny-pki[cli]",
