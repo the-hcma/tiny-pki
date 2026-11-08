@@ -93,6 +93,8 @@ jobs:
         with:
           version: "0.12.19" # bump deliberately; see SECURITY.md
 
+      - uses: the-hcma/repository-helpers/actions/setup-tmp-layout@bfee0e1f2d682e83c6207a0d6a0f7feefa576fd8
+
       - name: Python lint & format checks
         run: bash .github/ci/python-static
 
@@ -110,6 +112,8 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "0.12.19" # bump deliberately; see SECURITY.md
+
+      - uses: the-hcma/repository-helpers/actions/setup-tmp-layout@bfee0e1f2d682e83c6207a0d6a0f7feefa576fd8
 
       - name: Pytest (hermetic)
         run: bash .github/ci/pytest-hermetic
@@ -129,6 +133,8 @@ jobs:
         with:
           version: "0.12.19" # bump deliberately; see SECURITY.md
 
+      - uses: the-hcma/repository-helpers/actions/setup-tmp-layout@bfee0e1f2d682e83c6207a0d6a0f7feefa576fd8
+
       - name: Packaging
         run: bash .github/ci/packaging
 
@@ -146,6 +152,8 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: "0.12.19" # bump deliberately; see SECURITY.md
+
+      - uses: the-hcma/repository-helpers/actions/setup-tmp-layout@bfee0e1f2d682e83c6207a0d6a0f7feefa576fd8
 
       - name: Pytest (cryptography minimum)
         run: bash .github/ci/pytest-cryptography-minimum
