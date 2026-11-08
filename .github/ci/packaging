@@ -2,11 +2,22 @@
 # .github/ci/ gate — the-hcma/repository-helpers convention; run by ci.yml.
 # Builds the wheel and sdist and checks them the way a consumer would see them.
 set -euo pipefail
+# Temp files and caches follow $TMPDIR/<project>/<branch>/<tool> (repository-helpers#832).
+# CI exports REPOSITORY_HELPERS_DIR through the setup-tmp-layout action; without a clone, run unchanged.
+layout_bin="${REPOSITORY_HELPERS_DIR:-$HOME/work/ai/repository-helpers}/scripts/dev/with-tmp-layout"
+if [[ -z "${CI_TMP_LAYOUT:-}" ]]; then
+  if [[ -x "$layout_bin" ]]; then
+    CI_TMP_LAYOUT=1 exec "$layout_bin" uv -- bash "$0" "$@"
+  elif [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+    echo 'ERROR: with-tmp-layout missing; add the setup-tmp-layout action step before this one' >&2
+    exit 1
+  fi
+fi
 
 # Pinned so the gate is deterministic; bump deliberately (never `latest`).
 mypy_version="2.3.1"
 
-dist="$(mktemp -d)"
+dist="$(mktemp --directory "${TMP_LAYOUT_DIR:-${TMPDIR:-/tmp}}/packaging.XXXXXX")"
 trap 'rm -rf "$dist"' EXIT
 
 timeout 300 uv build --quiet --out-dir "$dist"

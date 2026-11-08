@@ -75,6 +75,8 @@ jobs:
           fi
           echo "version=${version}" >>"$GITHUB_OUTPUT"
 
+      - uses: the-hcma/repository-helpers/actions/setup-tmp-layout@bfee0e1f2d682e83c6207a0d6a0f7feefa576fd8
+
       - name: Python lint & format checks
         run: bash .github/ci/python-static
 
@@ -85,7 +87,9 @@ jobs:
         env:
           TINY_PKI_EMBED_VERSION: ${{ steps.version.outputs.version }}
           TINY_PKI_EMBED_COMMIT: ${{ github.sha }}
-        run: uv build
+        run: |
+          layout="$REPOSITORY_HELPERS_DIR/scripts/dev/with-tmp-layout"
+          "$layout" uv -- uv build
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
